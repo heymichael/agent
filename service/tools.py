@@ -3,6 +3,7 @@
 import json
 
 from . import firestore_client
+from .sandbox import execute_python
 
 # ---------------------------------------------------------------------------
 # Tool schemas (registered with the OpenAI API)
@@ -102,6 +103,28 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_python",
+            "description": (
+                "Execute Python code to query vendor billing APIs. "
+                "Pre-installed libraries: boto3, json, os, datetime, math, re, collections, decimal. "
+                "Vendor credentials are available as environment variables (never print them). "
+                "Print the result as JSON to stdout."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Python code to execute. Must print results as JSON to stdout.",
+                    },
+                },
+                "required": ["code"],
+            },
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -147,9 +170,15 @@ def execute_modify_vendor(args: dict) -> str:
     })
 
 
+def execute_execute_python(args: dict) -> str:
+    result = execute_python(args["code"])
+    return json.dumps(result)
+
+
 TOOL_HANDLERS = {
     "add_vendor": execute_add_vendor,
     "delete_vendor": execute_delete_vendor,
     "get_vendor": execute_get_vendor,
     "modify_vendor": execute_modify_vendor,
+    "execute_python": execute_execute_python,
 }
