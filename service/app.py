@@ -69,6 +69,22 @@ def delete_vendor(vendor_id: str):
     return {"ok": True, "deleted": vendor_id}
 
 
+@app.get("/users")
+def list_users(role: str):
+    return firestore_client.list_users_by_role(role)
+
+
+@app.patch("/vendors/{vendor_id}")
+def update_vendor(vendor_id: str, updates: dict):
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    try:
+        result = firestore_client.update_vendor(vendor_id, updates)
+        return {"ok": True, "vendor": result}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     openai_client = get_openai_client()
@@ -117,10 +133,10 @@ def chat(req: ChatRequest):
                 })
 
                 parsed = json.loads(result)
-                if parsed.get("action") == "confirm_delete":
+                if parsed.get("action") in ("confirm_delete", "open_edit"):
                     vendor = parsed["vendor"]
                     pending_action = PendingAction(
-                        type="confirm_delete",
+                        type=parsed["action"],
                         vendor_id=vendor["id"],
                         vendor_name=vendor["name"],
                     )

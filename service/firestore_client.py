@@ -86,6 +86,25 @@ def delete_vendor(vendor_id: str) -> bool:
     return True
 
 
+def list_users_by_role(role: str) -> list[dict]:
+    """Return users whose roles array contains the given role."""
+    db = get_db()
+    docs = (
+        db.collection("users")
+        .where("roles", "array_contains", role)
+        .stream()
+    )
+    results = []
+    for d in docs:
+        data = d.to_dict()
+        results.append({
+            "email": d.id,
+            "firstName": data.get("first_name", ""),
+            "lastName": data.get("last_name", ""),
+        })
+    return results
+
+
 def resolve_vendor(identifier: str) -> dict | None:
     """Find a vendor by ID or by name."""
     result = get_vendor(identifier)

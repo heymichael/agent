@@ -85,6 +85,23 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "modify_vendor",
+            "description": "Open the vendor edit modal in the UI so the user can modify fields. This does not update fields directly — it opens the edit form for the user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "identifier": {
+                        "type": "string",
+                        "description": "Vendor name or ID to edit",
+                    },
+                },
+                "required": ["identifier"],
+            },
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -119,8 +136,20 @@ def execute_get_vendor(args: dict) -> str:
     return json.dumps({"ok": True, "vendor": vendor})
 
 
+def execute_modify_vendor(args: dict) -> str:
+    vendor = firestore_client.resolve_vendor(args["identifier"])
+    if not vendor:
+        return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
+    return json.dumps({
+        "ok": True,
+        "action": "open_edit",
+        "vendor": {"id": vendor["id"], "name": vendor.get("name", vendor["id"])},
+    })
+
+
 TOOL_HANDLERS = {
     "add_vendor": execute_add_vendor,
     "delete_vendor": execute_delete_vendor,
     "get_vendor": execute_get_vendor,
+    "modify_vendor": execute_modify_vendor,
 }
