@@ -1,0 +1,30 @@
+---
+description: Task management redirect — tasks live in the platform repo
+alwaysApply: true
+---
+
+# Task Management
+
+All tasks are managed centrally in the **haderach-platform** repo at `../haderach-platform/tasks/` using [taskmd](https://github.com/driangle/taskmd). This app repo does not have its own tasks directory.
+
+## Creating a task from this repo
+
+Write the task file to `../haderach-platform/tasks/` with `group: agent` and `phase: agent` in the frontmatter. Follow the taskmd format and conventions defined in `haderach-platform/.cursor/rules/todo-conventions.mdc`.
+
+Use plain integer IDs with no leading zeros (e.g., `"7"` not `"007"`). Check existing files in `../haderach-platform/tasks/` to determine the next available ID.
+
+If the task is ambiguous about which app it belongs to (e.g., cross-cutting infra work), prompt the user to specify the `group` value (`card`, `stocks`, `vendors`, `agent`, or `platform`).
+
+## Reading tasks
+
+When the user references a task by number (e.g., "task 29"), look it up in `../haderach-platform/tasks/` by matching the `id` field or filename prefix (e.g., `29-*.md`). All tasks across all apps live there — the referenced task may belong to any group, not just `agent`.
+
+To see tasks for this app, read files in `../haderach-platform/tasks/` where the `group` frontmatter field is `agent`. Only read tasks where `status` is `pending` or `in-progress` unless specifically asked about others.
+
+## Task dashboard
+
+To start the taskmd web dashboard, run from the platform repo:
+
+```sh
+cd ../haderach-platform && taskmd web start --dir tasks/ --open --port 4173
+```
