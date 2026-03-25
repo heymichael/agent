@@ -55,8 +55,9 @@ The agent uses a three-step routing pattern:
    Excludes hidden vendors via live lookup.
 
 3. **execute_python** (sandbox) — only called for data not in Firestore:
-   individual Bill.com bill details, invoice numbers, PII, AWS Cost Explorer
-   cloud costs. Uses the `billcomId` from step 1 for exact lookups.
+   individual Bill.com bill details, invoice numbers, PII, AWS per-service
+   breakdowns or daily granularity. Uses the `billcomId` from step 1 for
+   exact lookups.
 
 ## Module layout
 
@@ -70,6 +71,7 @@ The agent uses a three-step routing pattern:
 | `service/billcom_auth.py` | Shared Bill.com v3 login helper |
 | `service/sync_billcom.py` | Nightly Bill.com → Firestore vendor metadata sync (`python -m service.sync_billcom`) |
 | `service/sync_billcom_spend.py` | Nightly Bill.com bills → Firestore spend aggregation sync (`python -m service.sync_billcom_spend`) |
+| `service/sync_aws_spend.py` | Nightly AWS Cost Explorer → Firestore spend aggregation sync (`python -m service.sync_aws_spend`) |
 
 ## Supported tools
 
@@ -111,9 +113,13 @@ Top-level collection with monthly spend summaries per vendor. Doc ID:
 `department`, `owner`, `track1099`, `accountType`, `purpose`, `spendType`,
 `hide`
 
-Synced by `python -m service.sync_billcom_spend`. Paginates all Bill.com bills,
-aggregates by vendor + month, batch writes to Firestore. ~1,244 docs from
-~1,943 bills.
+**Sources:**
+
+- **Bill.com** — synced by `python -m service.sync_billcom_spend`. Paginates
+  all bills, aggregates by vendor + month. `toolCall: "billcom"`. ~1,244 docs.
+- **AWS Cost Explorer** — synced by `python -m service.sync_aws_spend`. Fetches
+  12 months of monthly unblended costs. `toolCall: "aws-ce"`. `vendorId: "aws"`
+  (matches Firestore vendor doc ID). ~12 docs.
 
 ## Delete guard
 

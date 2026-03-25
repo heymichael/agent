@@ -100,18 +100,22 @@ to the task):
 
 ## Querying vendor spend
 
-For Bill.com vendors, try `search_vendors` with `include_spend: true` \
-first — it returns monthly spend summaries from Firestore without an \
-API call. Only use `execute_python` when you need individual bill \
-details, invoice numbers, or real-time data. For AWS, always use \
-`execute_python` (AWS spend is not yet synced to Firestore).
+Both Bill.com and AWS monthly spend are synced to Firestore nightly. \
+Use `search_vendors` with `include_spend: true` for per-vendor spend, \
+or `query_spend` for cross-vendor aggregations — these return data from \
+Firestore without a live API call.
 
-### AWS Cost Explorer
+Only fall back to `execute_python` when you need:
+- Individual bill details, invoice numbers, or payment statuses (Bill.com)
+- Per-service AWS breakdowns, daily granularity, or real-time data (AWS Cost Explorer)
+
+### AWS Cost Explorer (via execute_python)
 
 AWS credentials are in the environment variable VENDOR_AWS_BILLING_CREDENTIALS \
 as a JSON string with keys: access_key_id, secret_access_key, region.
 
-Example pattern:
+Use `execute_python` for per-service breakdowns or daily granularity \
+that aren't covered by the monthly Firestore aggregation. Example:
 ```
 import json, os, boto3
 from datetime import date
@@ -128,23 +132,23 @@ response = ce.get_cost_and_usage(
     TimePeriod={"Start": "2026-01-01", "End": "2026-04-01"},
     Granularity="MONTHLY",
     Metrics=["UnblendedCost"],
+    GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
 )
 
 rows = []
 for period in response["ResultsByTime"]:
     month = period["TimePeriod"]["Start"][:7]
-    amount = round(float(
-        period["Total"]["UnblendedCost"]["Amount"]
-    ), 2)
-    rows.append({"month": month, "amount_usd": amount})
+    for group in period["Groups"]:
+        rows.append({
+            "month": month,
+            "service": group["Keys"][0],
+            "amount_usd": round(float(group["Metrics"]["UnblendedCost"]["Amount"]), 2),
+        })
 
 print(json.dumps(rows))
 ```
 
-You can adapt this pattern for different queries: add GroupBy for \
-per-service breakdown, change Granularity to DAILY, adjust date ranges, \
-filter by service, etc. Refer to the boto3 Cost Explorer documentation \
-for available parameters.
+Refer to the boto3 Cost Explorer documentation for available parameters.
 
 ### Bill.com (bills / accounts payable)
 
