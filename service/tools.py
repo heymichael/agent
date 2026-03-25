@@ -186,7 +186,11 @@ TOOL_DEFINITIONS = [
                     },
                     "group_by": {
                         "type": "string",
-                        "description": "Group and sum spend by this field. Returns {groups: {value: {totalAmount, billCount, vendorCount}}, grandTotal}. Fields: 'paymentMethod', 'department', 'owner', 'billingFrequency', 'track1099', 'accountType', 'purpose', 'spendType', 'vendorName'.",
+                        "description": "Group and sum spend by this field. Results are sorted by totalAmount descending. Fields: 'paymentMethod', 'department', 'owner', 'billingFrequency', 'track1099', 'accountType', 'purpose', 'spendType', 'vendorName'.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max number of results to return (default 50). For 'top N vendors' queries, set this to N. Applies to both grouped and ungrouped results.",
                     },
                 },
             },
@@ -294,13 +298,16 @@ def execute_hide_vendor(args: dict) -> str:
 
 
 def execute_query_spend(args: dict) -> str:
-    result = firestore_client.query_spend(
-        month=args.get("month"),
-        start_month=args.get("start_month"),
-        end_month=args.get("end_month"),
-        vendor_name=args.get("vendor_name"),
-        group_by=args.get("group_by"),
-    )
+    kwargs: dict = {
+        "month": args.get("month"),
+        "start_month": args.get("start_month"),
+        "end_month": args.get("end_month"),
+        "vendor_name": args.get("vendor_name"),
+        "group_by": args.get("group_by"),
+    }
+    if "limit" in args:
+        kwargs["limit"] = args["limit"]
+    result = firestore_client.query_spend(**kwargs)
     return json.dumps({"ok": True, **result})
 
 
