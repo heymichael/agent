@@ -46,17 +46,22 @@ overwritten). Takes ~110s.
 
 ## Spend sync
 
-Bill.com bills are aggregated into monthly spend summaries in the Firestore
+Monthly spend summaries from external APIs are aggregated into the Firestore
 `vendor_spend` collection. Run manually:
 
 ```bash
 source .venv/bin/activate
+
+# Bill.com bills (~200–270s, ~1,244 docs)
 python -m service.sync_billcom_spend
+
+# AWS Cost Explorer (~10s, ~12 docs)
+python -m service.sync_aws_spend
 ```
 
-This paginates all Bill.com bills (~1,943), aggregates by vendor + month
-(~1,244 buckets), denormalizes vendor metadata, and batch-writes to Firestore.
-Takes ~200–270s. Idempotent — each run overwrites all spend docs.
+Both scripts are idempotent — each run overwrites all spend docs for their
+source. Bill.com sync paginates all bills and aggregates by vendor + month.
+AWS sync fetches 12 months of monthly unblended costs from Cost Explorer.
 
 ## API
 
