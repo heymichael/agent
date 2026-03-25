@@ -109,7 +109,7 @@ TOOL_DEFINITIONS = [
             "name": "execute_python",
             "description": (
                 "Execute Python code to query vendor billing APIs. "
-                "Pre-installed libraries: boto3, json, os, datetime, math, re, collections, decimal. "
+                "Pre-installed libraries: boto3, requests, json, os, datetime, math, re, collections, decimal. "
                 "Vendor credentials are available as environment variables (never print them). "
                 "Print the result as JSON to stdout."
             ),

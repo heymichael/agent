@@ -67,6 +67,110 @@ per-service breakdown, change Granularity to DAILY, adjust date ranges, \
 filter by service, etc. Refer to the boto3 Cost Explorer documentation \
 for available parameters.
 
+### Bill.com (bills / accounts payable)
+
+Bill.com credentials are in the environment variable VENDOR_BILL_CREDENTIALS \
+as a JSON string with keys: userName, password, orgId, devKey, baseUrl.
+
+The Bill.com v3 API is session-based: first POST to login, then use the \
+sessionId + devKey as headers on subsequent calls.
+
+Example pattern:
+```
+import json, os, requests
+
+creds = json.loads(os.environ["VENDOR_BILL_CREDENTIALS"])
+base = creds.get("baseUrl", "https://gateway.prod.bill.com/connect")
+
+# 1. Login to get a session (v3 uses JSON body with these field names)
+login_resp = requests.post(
+    f"{base}/v3/login",
+    json={
+        "username": creds["userName"],
+        "password": creds["password"],
+        "organizationId": creds["orgId"],
+        "devKey": creds["devKey"],
+    },
+)
+login_resp.raise_for_status()
+session_id = login_resp.json()["sessionId"]
+
+headers = {
+    "devKey": creds["devKey"],
+    "sessionId": session_id,
+    "Accept": "application/json",
+}
+
+# 2. List bills in a date range
+resp = requests.get(
+    f"{base}/v3/bills",
+    headers=headers,
+    params={
+        "max": 100,
+        "filters": "dueDate:gte:2026-01-01,dueDate:lte:2026-03-31",
+    },
+)
+resp.raise_for_status()
+data = resp.json()
+bills = data["results"]  # bills are in data["results"]
+
+rows = []
+for bill in bills:
+    rows.append({
+        "vendor_name": bill.get("vendorName"),
+        "vendor_id": bill.get("vendorId"),
+        "amount": bill.get("amount"),
+        "due_date": bill.get("dueDate"),
+        "status": bill.get("paymentStatus"),
+        "invoice": bill.get("invoice", {}).get("invoiceNumber"),
+    })
+
+print(json.dumps(rows))
+```
+
+Important: always use `from datetime import date; today = date.today()` to \
+determine the current year, month, and date boundaries. Never hard-code years.
+
+To look up a vendor by name (needed before filtering bills by vendor):
+```
+resp = requests.get(
+    f"{base}/v3/vendors",
+    headers=headers,
+    params={"filters": "name:sw:Rhonda"},
+)
+vendor_id = resp.json()["results"][0]["id"]  # starts with 009
+```
+
+You can adapt the bills query pattern for different queries:
+- Filter by vendor: first look up the vendorId via GET /v3/vendors, then \
+add `vendorId:eq:{id}` to the bills filters
+- Filter by payment status: add `paymentStatus:eq:PAID` or `UNPAID`
+- Filter by creation date: use `createdTime:gte:...` and `createdTime:lt:...`
+- Sort results: add `sort=dueDate:asc` or `dueDate:desc` param
+- Paginate: response has `nextPage` key; pass its value as the `page` query \
+param (NOT `nextPage`) — e.g. `params={"page": next_page, "max": 100}`. \
+When using `page`, do NOT include `filters` or `sort` — the cursor encodes them.
+- Response structure: `{"results": [...], "nextPage": "..."}`
+- Each bill has: id, vendorId, vendorName, amount, paidAmount, dueAmount, \
+dueDate, paymentStatus, approvalStatus, invoice, billLineItems, createdTime
+- Vendor lookup response: same `{"results": [...]}` structure
+- Each vendor has: id, name, accountType, email, phone, address, \
+paymentInformation, additionalInfo, balance, createdTime, updatedTime
+- additionalInfo contains: taxId, track1099 (boolean), combinePayments, \
+companyName — use track1099 to find 1099 vendors
+- To list all vendors, use GET /v3/vendors with max=100 and paginate \
+with nextPage if needed
+- Pagination: pass the `nextPage` value from the response as the `page` \
+query param (not `nextPage`). Only include `page` when the value is not None. \
+When using `page`, omit `filters` and `sort` — the cursor encodes them.
+
+The filterable fields and operators for bills are:
+- vendorId (eq, in)
+- dueDate (gt, gte, lt, lte)
+- paymentStatus (eq, ne, in) — values: PAID, UNPAID, PARTIAL
+- createdTime / updatedTime (gt, gte, lt, lte)
+- archived (eq, ne)
+
 ### Spend query rules
 
 - Always print results as JSON to stdout.
