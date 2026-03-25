@@ -117,3 +117,69 @@ def resolve_vendor(identifier: str) -> dict | None:
     if slug != identifier:
         return get_vendor(slug)
     return None
+
+
+SEARCH_RETURN_FIELDS = [
+    "name", "billcomId", "toolCall", "paymentMethod", "accountType",
+    "track1099", "owner", "secondaryOwner", "department", "purpose",
+    "spendType", "billingFrequency", "contractStartDate", "contractEndDate",
+    "contractLengthMonths", "autoRenew", "renewalRate", "renewalNoticeDays",
+    "terminationTerms", "lastSyncedAt",
+]
+
+
+def search_vendors(
+    query: str | None = None,
+    filters: dict | None = None,
+    group_by: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """Search the vendors collection with optional name prefix, filters, and aggregation.
+
+    - query: prefix match on nameLower (case-insensitive)
+    - filters: exact-match field/value pairs (e.g. {"track1099": True})
+    - group_by: return counts grouped by this field instead of individual records
+    """
+    db = get_db()
+    ref = db.collection(VENDORS_COLLECTION)
+
+    if filters and not query:
+        for field, value in filters.items():
+            ref = ref.where(field, "==", value)
+
+    docs = ref.stream()
+
+    query_lower = query.lower() if query else None
+    query_tokens = query_lower.split() if query_lower else []
+
+    matched: list[dict] = []
+    for doc in docs:
+        data = doc.to_dict()
+
+        if query_tokens:
+            name_lower = data.get("nameLower", "")
+            if not all(token in name_lower for token in query_tokens):
+                continue
+
+        if filters and query:
+            if not all(data.get(k) == v for k, v in filters.items()):
+                continue
+
+        matched.append(data)
+
+    if group_by:
+        counts: dict[str, int] = {}
+        for data in matched:
+            key = str(data.get(group_by, "unknown"))
+            counts[key] = counts.get(key, 0) + 1
+        return {"counts": counts, "total": len(matched)}
+
+    results = []
+    for data in matched[:limit]:
+        record = {"id": data.get("id", "")}
+        for f in SEARCH_RETURN_FIELDS:
+            if f in data:
+                record[f] = data[f]
+        results.append(record)
+
+    return {"results": results, "total": len(matched)}

@@ -72,17 +72,29 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "get_vendor",
-            "description": "Retrieve a vendor from the app's local Firestore registry by name or ID. This does NOT search Bill.com — use execute_python for Bill.com vendor lookups.",
+            "name": "search_vendors",
+            "description": (
+                "Search the vendor registry in Firestore. Use this as the FIRST step for any vendor question. "
+                "Returns vendor metadata including billcomId (for follow-up Bill.com API queries via execute_python), "
+                "payment method, 1099 status, owner, department, and contract fields. "
+                "Use group_by to get aggregate counts (e.g. count vendors by payment method or 1099 status)."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "identifier": {
+                    "query": {
                         "type": "string",
-                        "description": "Vendor name or ID to look up",
+                        "description": "Vendor name to search for (prefix match, case-insensitive). E.g. 'Michael' matches 'Michael D Mader'.",
+                    },
+                    "filters": {
+                        "type": "object",
+                        "description": "Exact-match filters on vendor fields. E.g. {\"track1099\": true}, {\"paymentMethod\": \"Check\"}, {\"toolCall\": \"billcom\"}.",
+                    },
+                    "group_by": {
+                        "type": "string",
+                        "description": "Field name to aggregate counts by. Returns {counts: {value: count}, total: N} instead of individual records. E.g. 'paymentMethod', 'track1099', 'department'.",
                     },
                 },
-                "required": ["identifier"],
             },
         },
     },
@@ -108,9 +120,9 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "execute_python",
             "description": (
-                "Execute Python code to query external vendor APIs (Bill.com, AWS Cost Explorer). "
-                "Use this for ANY question about Bill.com data (vendors, bills, spend, 1099 status, payment info) "
-                "or AWS cloud costs. "
+                "Execute Python code to query external vendor APIs for TRANSACTIONAL data: "
+                "Bill.com bills/spend/PII or AWS Cost Explorer cloud costs. "
+                "Always call search_vendors first to get the billcomId, then use it here for exact lookups. "
                 "Pre-installed libraries: boto3, requests, json, os, datetime, math, re, collections, decimal. "
                 "Vendor credentials are available as environment variables (never print them). "
                 "Print the result as JSON to stdout."
@@ -154,11 +166,13 @@ def execute_delete_vendor(args: dict) -> str:
     })
 
 
-def execute_get_vendor(args: dict) -> str:
-    vendor = firestore_client.resolve_vendor(args["identifier"])
-    if not vendor:
-        return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
-    return json.dumps({"ok": True, "vendor": vendor})
+def execute_search_vendors(args: dict) -> str:
+    result = firestore_client.search_vendors(
+        query=args.get("query"),
+        filters=args.get("filters"),
+        group_by=args.get("group_by"),
+    )
+    return json.dumps({"ok": True, **result})
 
 
 def execute_modify_vendor(args: dict) -> str:
@@ -180,7 +194,7 @@ def execute_execute_python(args: dict) -> str:
 TOOL_HANDLERS = {
     "add_vendor": execute_add_vendor,
     "delete_vendor": execute_delete_vendor,
-    "get_vendor": execute_get_vendor,
+    "search_vendors": execute_search_vendors,
     "modify_vendor": execute_modify_vendor,
     "execute_python": execute_execute_python,
 }
