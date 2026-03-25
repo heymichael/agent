@@ -8,9 +8,7 @@ Usage:
     python -m service.sync_billcom
 """
 
-import json
 import logging
-import os
 import time
 from datetime import datetime, timezone
 
@@ -19,6 +17,8 @@ from dotenv import load_dotenv
 from google.cloud import firestore
 
 load_dotenv(interpolate=False)
+
+from .billcom_auth import billcom_login
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -47,32 +47,6 @@ CONTRACT_FIELDS = [
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _billcom_login() -> tuple[str, str, dict]:
-    """Login to Bill.com and return (base_url, session_id, headers)."""
-    creds = json.loads(os.environ["VENDOR_BILL_CREDENTIALS"])
-    base = creds.get("baseUrl", "https://gateway.prod.bill.com/connect")
-
-    resp = requests.post(
-        f"{base}/v3/login",
-        json={
-            "username": creds["userName"],
-            "password": creds["password"],
-            "organizationId": creds["orgId"],
-            "devKey": creds["devKey"],
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
-    session_id = resp.json()["sessionId"]
-
-    headers = {
-        "devKey": creds["devKey"],
-        "sessionId": session_id,
-        "Accept": "application/json",
-    }
-    return base, session_id, headers
 
 
 def _paginate_vendors(base: str, headers: dict) -> list[dict]:
@@ -122,7 +96,7 @@ def sync():
     start = time.time()
     logger.info("Starting Bill.com vendor sync")
 
-    base, _, headers = _billcom_login()
+    base, _, headers = billcom_login()
     logger.info("Logged into Bill.com")
 
     vendors = _paginate_vendors(base, headers)

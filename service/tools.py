@@ -77,7 +77,9 @@ TOOL_DEFINITIONS = [
                 "Search the vendor registry in Firestore. Use this as the FIRST step for any vendor question. "
                 "Returns vendor metadata including billcomId (for follow-up Bill.com API queries via execute_python), "
                 "payment method, 1099 status, owner, department, and contract fields. "
-                "Use group_by to get aggregate counts (e.g. count vendors by payment method or 1099 status)."
+                "Use group_by to get aggregate counts (e.g. count vendors by payment method or 1099 status). "
+                "Set include_spend to true to attach monthly spend summaries from Firestore "
+                "(avoids a live Bill.com API call for historical spend questions)."
             ),
             "parameters": {
                 "type": "object",
@@ -93,6 +95,18 @@ TOOL_DEFINITIONS = [
                     "group_by": {
                         "type": "string",
                         "description": "Field name to aggregate counts by. Returns {counts: {value: count}, total: N} instead of individual records. E.g. 'paymentMethod', 'track1099', 'department'.",
+                    },
+                    "include_spend": {
+                        "type": "boolean",
+                        "description": "If true, include recent monthly spend summaries (from vendor_spend collection) for each matched vendor. Each vendor result gets a 'spend' array with {month, totalAmount, billCount} entries.",
+                    },
+                    "spend_months": {
+                        "type": "integer",
+                        "description": "Number of months of spend history to include when include_spend is true. Defaults to 6.",
+                    },
+                    "include_hidden": {
+                        "type": "boolean",
+                        "description": "If true, include vendors that have been hidden from spend analysis. Defaults to false.",
                     },
                 },
             },
@@ -112,6 +126,69 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["identifier"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hide_vendor",
+            "description": (
+                "Hide or unhide a vendor from spend analysis. Hidden vendors are excluded "
+                "from search_vendors results and query_spend aggregations by default. "
+                "Use this instead of deleting Bill.com-synced vendors."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "identifier": {
+                        "type": "string",
+                        "description": "Vendor name or ID to hide/unhide",
+                    },
+                    "hide": {
+                        "type": "boolean",
+                        "description": "True to hide, false to unhide. Defaults to true.",
+                    },
+                },
+                "required": ["identifier"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_spend",
+            "description": (
+                "Query aggregated spend data from Firestore (vendor_spend collection). "
+                "Use for cross-vendor spend questions: totals by month, spend grouped by "
+                "payment method / department / billing frequency, or top vendors by spend. "
+                "Data is synced nightly from Bill.com bills. For per-vendor spend, prefer "
+                "search_vendors with include_spend instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "month": {
+                        "type": "string",
+                        "description": "Exact month to query (YYYY-MM). E.g. '2026-02'.",
+                    },
+                    "start_month": {
+                        "type": "string",
+                        "description": "Start of month range (inclusive, YYYY-MM). Use with end_month for multi-month queries.",
+                    },
+                    "end_month": {
+                        "type": "string",
+                        "description": "End of month range (inclusive, YYYY-MM). Use with start_month.",
+                    },
+                    "vendor_name": {
+                        "type": "string",
+                        "description": "Filter by vendor name (substring match, case-insensitive).",
+                    },
+                    "group_by": {
+                        "type": "string",
+                        "description": "Group and sum spend by this field. Returns {groups: {value: {totalAmount, billCount, vendorCount}}, grandTotal}. Fields: 'paymentMethod', 'department', 'owner', 'billingFrequency', 'track1099', 'accountType', 'purpose', 'spendType', 'vendorName'.",
+                    },
+                },
             },
         },
     },
@@ -159,6 +236,15 @@ def execute_delete_vendor(args: dict) -> str:
     vendor = firestore_client.resolve_vendor(args["identifier"])
     if not vendor:
         return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
+    if vendor.get("billcomId"):
+        return json.dumps({
+            "ok": False,
+            "error": (
+                f"'{vendor.get('name')}' is synced from Bill.com and can't be deleted — "
+                "it would be re-created on the next nightly sync. "
+                "You can hide it from spend analysis instead using hide_vendor."
+            ),
+        })
     return json.dumps({
         "ok": True,
         "action": "confirm_delete",
@@ -171,6 +257,9 @@ def execute_search_vendors(args: dict) -> str:
         query=args.get("query"),
         filters=args.get("filters"),
         group_by=args.get("group_by"),
+        include_spend=args.get("include_spend", False),
+        spend_months=args.get("spend_months", 6),
+        include_hidden=args.get("include_hidden", False),
     )
     return json.dumps({"ok": True, **result})
 
@@ -186,6 +275,35 @@ def execute_modify_vendor(args: dict) -> str:
     })
 
 
+def execute_hide_vendor(args: dict) -> str:
+    vendor = firestore_client.resolve_vendor(args["identifier"])
+    if not vendor:
+        return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
+    hide = args.get("hide", True)
+    vendor_id = vendor.get("billcomId") or vendor.get("id", "")
+    try:
+        updated = firestore_client.set_vendor_hidden(vendor_id, hide)
+        action = "hidden" if hide else "unhidden"
+        return json.dumps({
+            "ok": True,
+            "action": action,
+            "vendor": {"id": vendor_id, "name": updated.get("name", vendor_id)},
+        })
+    except ValueError as exc:
+        return json.dumps({"ok": False, "error": str(exc)})
+
+
+def execute_query_spend(args: dict) -> str:
+    result = firestore_client.query_spend(
+        month=args.get("month"),
+        start_month=args.get("start_month"),
+        end_month=args.get("end_month"),
+        vendor_name=args.get("vendor_name"),
+        group_by=args.get("group_by"),
+    )
+    return json.dumps({"ok": True, **result})
+
+
 def execute_execute_python(args: dict) -> str:
     result = execute_python(args["code"])
     return json.dumps(result)
@@ -196,5 +314,7 @@ TOOL_HANDLERS = {
     "delete_vendor": execute_delete_vendor,
     "search_vendors": execute_search_vendors,
     "modify_vendor": execute_modify_vendor,
+    "hide_vendor": execute_hide_vendor,
+    "query_spend": execute_query_spend,
     "execute_python": execute_execute_python,
 }
