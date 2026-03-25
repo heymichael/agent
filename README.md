@@ -44,6 +44,20 @@ This paginates all Bill.com vendors (~926) and batch-writes to Firestore with
 merge semantics (app-managed fields like owner and contract terms are never
 overwritten). Takes ~110s.
 
+## Spend sync
+
+Bill.com bills are aggregated into monthly spend summaries in the Firestore
+`vendor_spend` collection. Run manually:
+
+```bash
+source .venv/bin/activate
+python -m service.sync_billcom_spend
+```
+
+This paginates all Bill.com bills (~1,943), aggregates by vendor + month
+(~1,244 buckets), denormalizes vendor metadata, and batch-writes to Firestore.
+Takes ~200–270s. Idempotent — each run overwrites all spend docs.
+
 ## API
 
 ### `POST /chat`
@@ -71,7 +85,8 @@ Returns `{"status": "ok"}`.
 
 ### `DELETE /vendors/{vendor_id}`
 
-Deletes a vendor from Firestore.
+Deletes a vendor from Firestore. Returns 400 for Bill.com-synced vendors
+(those with a `billcomId`) — use the `hide_vendor` agent tool instead.
 
 ### `PATCH /vendors/{vendor_id}`
 

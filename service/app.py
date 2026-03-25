@@ -79,9 +79,19 @@ def health():
 
 @app.delete("/vendors/{vendor_id}")
 def delete_vendor(vendor_id: str):
-    deleted = firestore_client.delete_vendor(vendor_id)
-    if not deleted:
+    vendor = firestore_client.get_vendor(vendor_id)
+    if not vendor:
         raise HTTPException(status_code=404, detail=f"Vendor '{vendor_id}' not found")
+    if vendor.get("billcomId"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"'{vendor.get('name')}' is synced from Bill.com and can't be deleted — "
+                "it would be re-created on the next nightly sync. "
+                "Use the hide flag to exclude it from spend analysis instead."
+            ),
+        )
+    firestore_client.delete_vendor(vendor_id)
     return {"ok": True, "deleted": vendor_id}
 
 

@@ -26,32 +26,37 @@ FastAPI app.py  (max 10 tool-call rounds, 20K char result truncation)
   │     ▼                    ▼
   │   Execute handler   Return reply
   │     │                    to frontend
-  │     ├─ search_vendors ──► Firestore (vendor metadata)
+  │     ├─ search_vendors ──► Firestore (vendor metadata + optional spend)
+  │     ├─ query_spend ─────► Firestore (vendor_spend aggregations)
   │     ├─ add/modify/delete ► Firestore (vendor CRUD)
+  │     ├─ hide_vendor ─────► Firestore (toggle hide flag)
   │     ├─ execute_python ──► Sandbox → Bill.com API / AWS CE
   │     │
   │     ▼
   │   Send tool result back to OpenAI → loop
   │
   ▼
-Firestore (vendors collection)
+Firestore (vendors + vendor_spend collections)
 ```
 
 ## Routing: Firestore-first
 
-The agent uses a two-step routing pattern:
+The agent uses a three-step routing pattern:
 
 1. **search_vendors** (Firestore) — always called first for any vendor
    question. Returns metadata: name, billcomId, paymentMethod, track1099,
    owner, department, contract fields. Supports fuzzy name matching, field
-   filters, and group_by aggregation.
+   filters, group_by aggregation, and optional spend inclusion via
+   `include_spend`.
 
-2. **execute_python** (sandbox) — only called for transactional data that
-   isn't in Firestore: Bill.com bills/spend/PII, AWS Cost Explorer cloud
-   costs. Uses the `billcomId` from step 1 for exact lookups.
+2. **query_spend** (Firestore) — for cross-vendor spend aggregations: totals
+   by month, spend grouped by payment method / department / billing frequency,
+   top vendors by spend. Queries the `vendor_spend` collection directly.
+   Excludes hidden vendors via live lookup.
 
-Cross-source joins (queries needing both Firestore metadata and live spend
-data) are explicitly unsupported until spend summaries are synced.
+3. **execute_python** (sandbox) — only called for data not in Firestore:
+   individual Bill.com bill details, invoice numbers, PII, AWS Cost Explorer
+   cloud costs. Uses the `billcomId` from step 1 for exact lookups.
 
 ## Module layout
 
@@ -60,18 +65,22 @@ data) are explicitly unsupported until spend summaries are synced.
 | `service/app.py` | FastAPI application, `/chat` endpoint, orchestration loop, tool-result truncation |
 | `service/tools.py` | OpenAI tool schemas + execution handlers |
 | `service/prompts.py` | System prompt with routing rules, API patterns, behavior rules |
-| `service/firestore_client.py` | Firestore read/write helpers, `search_vendors()` |
+| `service/firestore_client.py` | Firestore read/write helpers, `search_vendors()`, `query_spend()`, hide/unhide |
 | `service/sandbox.py` | Sandboxed Python executor for LLM-generated code (120s timeout) |
-| `service/sync_billcom.py` | Nightly Bill.com → Firestore vendor sync (run via `python -m service.sync_billcom`) |
+| `service/billcom_auth.py` | Shared Bill.com v3 login helper |
+| `service/sync_billcom.py` | Nightly Bill.com → Firestore vendor metadata sync (`python -m service.sync_billcom`) |
+| `service/sync_billcom_spend.py` | Nightly Bill.com bills → Firestore spend aggregation sync (`python -m service.sync_billcom_spend`) |
 
 ## Supported tools
 
 | Tool | Params | Effect |
 |---|---|---|
-| `search_vendors` | query, filters, group_by | Fuzzy name search, field filters, aggregate counts against Firestore |
+| `search_vendors` | query, filters, group_by, include_spend, spend_months, include_hidden | Fuzzy name search, field filters, aggregate counts, optional spend data |
+| `query_spend` | month, start_month, end_month, vendor_name, group_by | Cross-vendor spend aggregations from `vendor_spend` collection |
 | `add_vendor` | name (+ optional fields) | Creates `vendors/{id}` doc in Firestore |
-| `delete_vendor` | identifier | Returns confirmation prompt (UI must approve) |
+| `delete_vendor` | identifier | Returns confirmation prompt (UI must approve). Blocked for Bill.com-synced vendors |
 | `modify_vendor` | identifier | Opens edit modal in UI |
+| `hide_vendor` | identifier, hide | Toggles hide flag — excludes vendor from spend analysis |
 | `execute_python` | code | Runs sandboxed Python for Bill.com/AWS API queries |
 
 ## Firestore `vendors` schema
@@ -81,13 +90,37 @@ Unified collection — all vendors regardless of source.
 **Synced from Bill.com (nightly):** `id`, `name`, `billcomId`, `nameLower`,
 `paymentMethod`, `accountType`, `track1099`, `toolCall`, `lastSyncedAt`
 
-**App-managed:** `owner`, `secondaryOwner`, `department`, `purpose`, `spendType`
+**App-managed:** `owner`, `secondaryOwner`, `department`, `purpose`,
+`spendType`, `hide`
 
 **Contract fields:** `contractStartDate`, `contractEndDate`,
 `contractLengthMonths`, `autoRenew`, `renewalRate`, `renewalNoticeDays`,
 `billingFrequency`, `terminationTerms`
 
 No PII stored (no email, phone, address, taxId).
+
+## Firestore `vendor_spend` schema
+
+Top-level collection with monthly spend summaries per vendor. Doc ID:
+`{vendorId}_{YYYY-MM}`.
+
+**Core fields:** `vendorId`, `vendorName`, `month`, `totalAmount`, `billCount`,
+`toolCall`, `lastSyncedAt`
+
+**Denormalized from vendor doc:** `paymentMethod`, `billingFrequency`,
+`department`, `owner`, `track1099`, `accountType`, `purpose`, `spendType`,
+`hide`
+
+Synced by `python -m service.sync_billcom_spend`. Paginates all Bill.com bills,
+aggregates by vendor + month, batch writes to Firestore. ~1,244 docs from
+~1,943 bills.
+
+## Delete guard
+
+Bill.com-synced vendors (docs with a `billcomId`) cannot be deleted — they
+would be re-created on the next nightly sync. The guard is enforced in both
+the `delete_vendor` tool handler and the `DELETE /vendors/{id}` REST endpoint.
+Users can hide vendors from spend analysis instead via `hide_vendor`.
 
 ## Runtime
 
@@ -111,6 +144,6 @@ subject to client Firestore rules).
 |---|---|---|
 | `POST` | `/chat` | Chat with the agent (tool-calling loop) |
 | `GET` | `/health` | Health check |
-| `DELETE` | `/vendors/{vendor_id}` | Delete a vendor |
+| `DELETE` | `/vendors/{vendor_id}` | Delete a vendor (blocked for Bill.com-synced vendors) |
 | `PATCH` | `/vendors/{vendor_id}` | Partial update a vendor |
 | `GET` | `/users?role=...` | List users by role |
