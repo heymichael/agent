@@ -236,7 +236,16 @@ def query_spend(
             groups[key]["billCount"] += data.get("billCount", 0)
             groups[key]["vendorCount"] += 1
         grand_total = round(sum(g["totalAmount"] for g in groups.values()), 2)
-        return {"groups": groups, "grandTotal": grand_total, "totalVendors": len(matched)}
+        total_groups = len(groups)
+        sorted_groups = dict(
+            sorted(groups.items(), key=lambda kv: kv[1]["totalAmount"], reverse=True)[:limit]
+        )
+        return {
+            "groups": sorted_groups,
+            "grandTotal": grand_total,
+            "totalGroups": total_groups,
+            "limitApplied": limit if total_groups > limit else None,
+        }
 
     matched.sort(key=lambda r: r.get("totalAmount", 0), reverse=True)
     results = []

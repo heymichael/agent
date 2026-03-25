@@ -63,8 +63,11 @@ type", "top vendors by spend this quarter", "spend by department"): \
 Call `query_spend`. It queries the vendor_spend collection directly with \
 month filters and `group_by` for server-side aggregation. Supports \
 `month` (exact), `start_month`/`end_month` (range), `vendor_name` \
-(substring filter), and `group_by` (paymentMethod, department, owner, \
-billingFrequency, vendorName).
+(substring filter), `group_by` (paymentMethod, department, owner, \
+billingFrequency, vendorName), and `limit` (integer, default 50). \
+For "top N" questions (e.g. "top 20 vendors"), always set \
+`group_by: "vendorName"` and `limit: N`. Results are pre-sorted by \
+totalAmount descending — present them in the order returned.
 
 **Live Bill.com API** (individual bill details, invoice numbers, payment \
 statuses, PII, real-time data from today): Fall back to `execute_python` \
