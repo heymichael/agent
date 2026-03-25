@@ -3,11 +3,12 @@
 import json
 import logging
 import os
+from datetime import date
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 
-load_dotenv()
+load_dotenv(interpolate=False)
 from pydantic import BaseModel
 from openai import OpenAI
 
@@ -89,7 +90,9 @@ def update_vendor(vendor_id: str, updates: dict):
 def chat(req: ChatRequest):
     openai_client = get_openai_client()
 
-    messages = [{"role": "system", "content": VENDOR_AGENT_SYSTEM_PROMPT}]
+    today = date.today().isoformat()
+    system_prompt = f"Today's date is {today}.\n\n{VENDOR_AGENT_SYSTEM_PROMPT}"
+    messages = [{"role": "system", "content": system_prompt}]
     for m in req.messages:
         messages.append({"role": m.role, "content": m.content})
 

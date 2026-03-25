@@ -15,7 +15,7 @@ from contextlib import redirect_stderr
 
 logger = logging.getLogger(__name__)
 
-EXECUTION_TIMEOUT_SECONDS = 30
+EXECUTION_TIMEOUT_SECONDS = 120
 
 BLOCKED_MODULES = frozenset({
     "subprocess",
@@ -94,10 +94,10 @@ def execute_python(code: str) -> dict:
         with redirect_stderr(stderr_buf):
             exec(code, restricted_globals)  # noqa: S102
 
+    pool = ThreadPoolExecutor(max_workers=1)
     try:
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_run)
-            future.result(timeout=EXECUTION_TIMEOUT_SECONDS)
+        future = pool.submit(_run)
+        future.result(timeout=EXECUTION_TIMEOUT_SECONDS)
 
         stdout_val = stdout_buf.getvalue()
         stderr_val = stderr_buf.getvalue()
@@ -112,3 +112,5 @@ def execute_python(code: str) -> dict:
         tb = traceback.format_exc()
         logger.warning("Sandbox: error — %s", exc)
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "stderr": tb}
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
