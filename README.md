@@ -1,7 +1,8 @@
 # Haderach Agent Service
 
 Shared chat agent backend for the Haderach platform. Wraps OpenAI tool-calling
-to perform CRUD operations on Firestore collections (currently: vendors).
+to manage vendors in Firestore and query external billing APIs (Bill.com, AWS
+Cost Explorer) via sandboxed Python execution.
 
 ## Architecture
 
@@ -16,9 +17,11 @@ python3 -m venv .venv && source .venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Set required env vars
+# Set required env vars (or copy .env.example to .env)
 export OPENAI_API_KEY="sk-..."
 export GOOGLE_CLOUD_PROJECT="haderach-ai"
+export VENDOR_BILL_CREDENTIALS='{"userName":"...","password":"...","orgId":"...","devKey":"..."}'
+export VENDOR_AWS_BILLING_CREDENTIALS='{"access_key_id":"...","secret_access_key":"...","region":"us-east-1"}'
 
 # Run the service
 uvicorn service.app:app --reload --port 8080
@@ -27,6 +30,20 @@ uvicorn service.app:app --reload --port 8080
 The API is available at `http://localhost:8080`. In production it's mounted at
 `/agent/api/` via Firebase Hosting rewrite.
 
+## Vendor sync
+
+Bill.com vendor metadata is synced into the Firestore `vendors` collection.
+Run manually:
+
+```bash
+source .venv/bin/activate
+python -m service.sync_billcom
+```
+
+This paginates all Bill.com vendors (~926) and batch-writes to Firestore with
+merge semantics (app-managed fields like owner and contract terms are never
+overwritten). Takes ~110s.
+
 ## API
 
 ### `POST /chat`
@@ -34,9 +51,8 @@ The API is available at `http://localhost:8080`. In production it's mounted at
 ```json
 {
   "messages": [
-    { "role": "user", "content": "Add Datadog as an active DevOps vendor" }
-  ],
-  "context": { "app": "vendors" }
+    { "role": "user", "content": "How many 1099 vendors do we have?" }
+  ]
 }
 ```
 
@@ -44,14 +60,26 @@ Response:
 
 ```json
 {
-  "reply": "Done — I've added Datadog as an active vendor in the DevOps category.",
-  "tool_calls_executed": ["add_vendor"]
+  "reply": "You have 150 1099 vendors.",
+  "tool_calls_executed": ["search_vendors"]
 }
 ```
 
 ### `GET /health`
 
 Returns `{"status": "ok"}`.
+
+### `DELETE /vendors/{vendor_id}`
+
+Deletes a vendor from Firestore.
+
+### `PATCH /vendors/{vendor_id}`
+
+Partial update on a vendor document. Body is a JSON object of fields to update.
+
+### `GET /users?role={role}`
+
+Lists users whose roles array contains the given role.
 
 ## Deployment
 
