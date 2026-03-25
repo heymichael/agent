@@ -21,6 +21,21 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Haderach Agent Service", root_path="/agent/api")
 
+MAX_TOOL_RESULT_CHARS = 20_000
+
+
+def _truncate_tool_result(result: str) -> str:
+    """Cap tool-result strings so they don't bloat the conversation context."""
+    if len(result) <= MAX_TOOL_RESULT_CHARS:
+        return result
+    truncated = result[:MAX_TOOL_RESULT_CHARS]
+    return (
+        truncated
+        + f"\n\n[TRUNCATED — output was {len(result):,} chars, "
+        f"showing first {MAX_TOOL_RESULT_CHARS:,}. "
+        "Summarize what you have and tell the user if data was cut off.]"
+    )
+
 client: OpenAI | None = None
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
@@ -98,7 +113,7 @@ def chat(req: ChatRequest):
 
     tool_calls_executed: list[str] = []
     pending_action: PendingAction | None = None
-    max_rounds = 5
+    max_rounds = 10
 
     for _ in range(max_rounds):
         try:
@@ -132,7 +147,7 @@ def chat(req: ChatRequest):
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": result,
+                    "content": _truncate_tool_result(result),
                 })
 
                 parsed = json.loads(result)

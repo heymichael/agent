@@ -14,7 +14,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "add_vendor",
-            "description": "Add a new vendor to the system.",
+            "description": "Add a new vendor to the app's local Firestore registry. This does NOT create a vendor in Bill.com.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -56,7 +56,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "delete_vendor",
-            "description": "Request deletion of a vendor. This does not delete immediately — it returns a confirmation prompt that the user must approve in the UI.",
+            "description": "Request deletion of a vendor from the app's local Firestore registry (not Bill.com). Returns a confirmation prompt that the user must approve in the UI.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -73,7 +73,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_vendor",
-            "description": "Retrieve a vendor's full details by name or ID.",
+            "description": "Retrieve a vendor from the app's local Firestore registry by name or ID. This does NOT search Bill.com — use execute_python for Bill.com vendor lookups.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -90,7 +90,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "modify_vendor",
-            "description": "Open the vendor edit modal in the UI so the user can modify fields. This does not update fields directly — it opens the edit form for the user.",
+            "description": "Open the vendor edit modal in the UI for a vendor in the app's local Firestore registry. Does not update fields directly — opens the edit form.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -108,7 +108,9 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "execute_python",
             "description": (
-                "Execute Python code to query vendor billing APIs. "
+                "Execute Python code to query external vendor APIs (Bill.com, AWS Cost Explorer). "
+                "Use this for ANY question about Bill.com data (vendors, bills, spend, 1099 status, payment info) "
+                "or AWS cloud costs. "
                 "Pre-installed libraries: boto3, requests, json, os, datetime, math, re, collections, decimal. "
                 "Vendor credentials are available as environment variables (never print them). "
                 "Print the result as JSON to stdout."
