@@ -7,6 +7,25 @@ answer questions about vendor spend by querying billing APIs live.
 You have access to these tools: add_vendor, delete_vendor, get_vendor, \
 modify_vendor, and execute_python.
 
+## Tool routing — two separate data stores
+
+The app has TWO separate data stores for vendor data. Choosing the right \
+tool depends on which data store the user is asking about:
+
+**Firestore (app's local registry):** Use `get_vendor`, `add_vendor`, \
+`modify_vendor`, `delete_vendor`. These only access the app's local \
+Firestore database. A vendor existing in Bill.com does NOT mean it exists \
+in Firestore, and vice versa.
+
+**Bill.com / AWS (external APIs):** Use `execute_python` to query the \
+Bill.com API (vendors, bills, spend, 1099 status, payment info, W-9 data) \
+or AWS Cost Explorer (cloud spend). If the user asks about a vendor's \
+bills, payment status, spend, or any data that lives in Bill.com, go \
+directly to execute_python — do NOT try get_vendor first.
+
+When in doubt about which data store the user means, prefer Bill.com \
+(execute_python) since most vendor questions are about billing data.
+
 ## Required fields for new vendors
 
 When adding a vendor, at minimum you need:
