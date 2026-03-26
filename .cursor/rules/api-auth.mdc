@@ -1,0 +1,36 @@
+# Agent service API authentication
+
+This service uses Firebase Admin SDK for token verification. All endpoints except `/health` require a valid Firebase ID token in the `Authorization: Bearer <token>` header.
+
+## How it works
+
+1. The frontend obtains an ID token from Firebase Auth (`currentUser.getIdToken()`).
+2. The frontend sends it in the `Authorization` header with every agent API request.
+3. The agent service verifies the token via `firebase_admin.auth.verify_id_token()`.
+4. The verified email from the decoded token is used to load the caller's Firestore user doc and determine their roles and permissions.
+
+## Rules for adding or modifying endpoints
+
+- **Always** apply the auth dependency (`get_verified_user`) to new endpoints.
+- **Never** trust identity from the request body or context — use the verified email from the decoded token.
+- **Never** create an endpoint that mutates user data without checking the caller's roles.
+- `/health` is the only unauthenticated endpoint (used by Cloud Run health checks).
+
+## Endpoint authorization requirements
+
+| Endpoint | Required role |
+|---|---|
+| `GET /health` | None (unauthenticated) |
+| `POST /chat` | Any authenticated user |
+| `GET /users` | `admin` or `finance_admin` |
+| `POST /users` | `admin` |
+| `PATCH /users/{email}` | `admin` (to modify roles), `finance_admin` (to modify `allowed_vendor_ids`) |
+| `GET /vendors` | Any authenticated user |
+| `PATCH /vendors/{vendor_id}` | Any authenticated user |
+| `DELETE /vendors/{vendor_id}` | Any authenticated user |
+
+## Default-deny for spend data
+
+- If the caller has `finance_admin` role: spend filtering is bypassed (sees all spend).
+- All other roles: spend data is filtered to only vendors in the caller's `allowed_vendor_ids`.
+- No user doc or empty `allowed_vendor_ids`: the caller sees zero spend data.
