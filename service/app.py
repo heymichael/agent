@@ -6,7 +6,7 @@ import os
 from datetime import date
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 
 load_dotenv(interpolate=False)
 from pydantic import BaseModel
@@ -15,6 +15,7 @@ from openai import OpenAI
 from .prompts import VENDOR_AGENT_SYSTEM_PROMPT
 from .tools import TOOL_DEFINITIONS, TOOL_HANDLERS
 from . import firestore_client
+from .auth import get_verified_user
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -78,7 +79,7 @@ def health():
 
 
 @app.delete("/vendors/{vendor_id}")
-def delete_vendor(vendor_id: str):
+def delete_vendor(vendor_id: str, caller: dict = Depends(get_verified_user)):
     vendor = firestore_client.get_vendor(vendor_id)
     if not vendor:
         raise HTTPException(status_code=404, detail=f"Vendor '{vendor_id}' not found")
@@ -96,12 +97,12 @@ def delete_vendor(vendor_id: str):
 
 
 @app.get("/users")
-def list_users(role: str):
+def list_users(role: str, caller: dict = Depends(get_verified_user)):
     return firestore_client.list_users_by_role(role)
 
 
 @app.patch("/vendors/{vendor_id}")
-def update_vendor(vendor_id: str, updates: dict):
+def update_vendor(vendor_id: str, updates: dict, caller: dict = Depends(get_verified_user)):
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
     try:
@@ -112,8 +113,10 @@ def update_vendor(vendor_id: str, updates: dict):
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
     openai_client = get_openai_client()
+    caller_email = caller.get("email", "")
+    logger.info("Chat request from %s", caller_email)
 
     today = date.today().isoformat()
     system_prompt = f"Today's date is {today}.\n\n{VENDOR_AGENT_SYSTEM_PROMPT}"

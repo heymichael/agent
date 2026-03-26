@@ -50,3 +50,11 @@ jobs:
             --region "$REGION" \
             --project haderach-ai \
             --quiet
+
+      - name: Post-deploy auth smoke tests
+        run: |
+          SERVICE_URL=$(gcloud run services describe "$SERVICE" \
+            --region "$REGION" --project haderach-ai \
+            --format='value(status.url)')
+          sleep 5
+          ./scripts/smoke-test.sh "$SERVICE_URL"

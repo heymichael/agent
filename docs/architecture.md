@@ -72,6 +72,7 @@ The agent uses a three-step routing pattern:
 | `service/sync_billcom.py` | Nightly Bill.com → Firestore vendor metadata sync (`python -m service.sync_billcom`) |
 | `service/sync_billcom_spend.py` | Nightly Bill.com bills → Firestore spend aggregation sync (`python -m service.sync_billcom_spend`) |
 | `service/sync_aws_spend.py` | Nightly AWS Cost Explorer → Firestore spend aggregation sync (`python -m service.sync_aws_spend`) |
+| `scripts/smoke-test.sh` | Post-deploy auth smoke tests — verifies health, unauthenticated rejection, and invalid-token rejection |
 
 ## Supported tools
 
