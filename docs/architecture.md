@@ -12,8 +12,16 @@ consumed by frontend chat panels across Haderach apps.
 ```text
 Frontend ChatPanel
   │
+  ├─ Authorization: Bearer <Firebase ID token>
+  │
   ▼
 POST /agent/api/chat  (Firebase Hosting rewrite → Cloud Run)
+  │
+  ▼
+Auth middleware (get_verified_user)
+  │  Verifies Firebase ID token via Admin SDK
+  │  Extracts caller email from decoded token
+  │  Rejects with 401 if missing/invalid/expired
   │
   ▼
 FastAPI app.py  (max 10 tool-call rounds, 20K char result truncation)
@@ -64,6 +72,7 @@ The agent uses a three-step routing pattern:
 | File | Responsibility |
 |---|---|
 | `service/app.py` | FastAPI application, `/chat` endpoint, orchestration loop, tool-result truncation |
+| `service/auth.py` | Firebase ID token verification dependency (`get_verified_user`) |
 | `service/tools.py` | OpenAI tool schemas + execution handlers |
 | `service/prompts.py` | System prompt with routing rules, API patterns, behavior rules |
 | `service/firestore_client.py` | Firestore read/write helpers, `search_vendors()`, `query_spend()`, hide/unhide |
@@ -145,12 +154,21 @@ The service uses the default compute service account, which has Datastore User
 access on the `haderach-ai` project. Writes go through the Admin SDK (not
 subject to client Firestore rules).
 
+## Authentication
+
+All sensitive endpoints require a valid Firebase ID token in the `Authorization`
+header (`Bearer <idToken>`). The `get_verified_user` dependency in `service/auth.py`
+verifies the token via Firebase Admin SDK and extracts the caller's email. Requests
+without a valid token are rejected with HTTP 401.
+
+The `/health` endpoint is unauthenticated.
+
 ## API endpoints
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/chat` | Chat with the agent (tool-calling loop) |
-| `GET` | `/health` | Health check |
-| `DELETE` | `/vendors/{vendor_id}` | Delete a vendor (blocked for Bill.com-synced vendors) |
-| `PATCH` | `/vendors/{vendor_id}` | Partial update a vendor |
-| `GET` | `/users?role=...` | List users by role |
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `POST` | `/chat` | Required | Chat with the agent (tool-calling loop) |
+| `GET` | `/health` | None | Health check |
+| `DELETE` | `/vendors/{vendor_id}` | Required | Delete a vendor (blocked for Bill.com-synced vendors) |
+| `PATCH` | `/vendors/{vendor_id}` | Required | Partial update a vendor |
+| `GET` | `/users?role=...` | Required | List users by role |
