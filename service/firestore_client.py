@@ -88,23 +88,117 @@ def delete_vendor(vendor_id: str) -> bool:
     return True
 
 
-def list_users_by_role(role: str) -> list[dict]:
-    """Return users whose roles array contains the given role."""
+def _user_summary(doc_id: str, data: dict) -> dict:
+    return {
+        "email": doc_id,
+        "firstName": data.get("first_name", ""),
+        "lastName": data.get("last_name", ""),
+        "roles": data.get("roles", []),
+    }
+
+
+def list_users(roles: list[str] | None = None) -> list[dict]:
+    """Return users, optionally filtered to those holding any of the given roles.
+
+    Firestore ``array_contains`` supports only a single value per query, so
+    we run one query per role and merge the results.
+    """
     db = get_db()
-    docs = (
-        db.collection("users")
-        .where("roles", "array_contains", role)
-        .stream()
-    )
-    results = []
-    for d in docs:
-        data = d.to_dict()
-        results.append({
-            "email": d.id,
-            "firstName": data.get("first_name", ""),
-            "lastName": data.get("last_name", ""),
-        })
+
+    if not roles:
+        docs = db.collection("users").stream()
+        return [_user_summary(d.id, d.to_dict()) for d in docs]
+
+    seen: set[str] = set()
+    results: list[dict] = []
+    for role in roles:
+        docs = (
+            db.collection("users")
+            .where("roles", "array_contains", role)
+            .stream()
+        )
+        for d in docs:
+            if d.id not in seen:
+                seen.add(d.id)
+                results.append(_user_summary(d.id, d.to_dict()))
     return results
+
+
+def get_user(email: str) -> dict | None:
+    """Fetch a single user doc by email. Returns None if not found."""
+    db = get_db()
+    snap = db.collection("users").document(email).get()
+    if not snap.exists:
+        return None
+    data = snap.to_dict()
+    user = _user_summary(snap.id, data)
+    allowed_ids = data.get("allowed_vendor_ids", [])
+    if allowed_ids:
+        resolved = []
+        for vid in allowed_ids:
+            vendor = get_vendor(vid)
+            resolved.append({"id": vid, "name": vendor.get("name", vid) if vendor else vid})
+        user["allowedVendors"] = resolved
+    else:
+        user["allowedVendors"] = []
+    return user
+
+
+def create_user(email: str, first_name: str, last_name: str, roles: list[str]) -> dict:
+    """Create a new user doc. Raises ValueError if the user already exists."""
+    db = get_db()
+    normalized = email.strip().lower()
+    ref = db.collection("users").document(normalized)
+    if ref.get().exists:
+        raise ValueError(f"User '{normalized}' already exists")
+    data = {
+        "first_name": first_name,
+        "last_name": last_name,
+        "roles": roles,
+        "createdAt": _now_iso(),
+    }
+    ref.set(data)
+    return _user_summary(normalized, data)
+
+
+def update_user(
+    email: str,
+    roles: list[str] | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+) -> dict:
+    """Update a user's fields. Only non-None fields are written.
+
+    Raises ValueError if the user does not exist.
+    """
+    db = get_db()
+    normalized = email.strip().lower()
+    ref = db.collection("users").document(normalized)
+    snap = ref.get()
+    if not snap.exists:
+        raise ValueError(f"User '{normalized}' not found")
+    updates: dict = {}
+    if roles is not None:
+        updates["roles"] = roles
+    if first_name is not None:
+        updates["first_name"] = first_name
+    if last_name is not None:
+        updates["last_name"] = last_name
+    if updates:
+        ref.update(updates)
+    updated = ref.get().to_dict()
+    return _user_summary(normalized, updated)
+
+
+def delete_user(email: str) -> bool:
+    """Delete a user doc. Returns True if deleted, False if not found."""
+    db = get_db()
+    normalized = email.strip().lower()
+    ref = db.collection("users").document(normalized)
+    if not ref.get().exists:
+        return False
+    ref.delete()
+    return True
 
 
 def set_vendor_hidden(vendor_id: str, hide: bool) -> dict:

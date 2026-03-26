@@ -6,7 +6,7 @@ import os
 from datetime import date
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 
 load_dotenv(interpolate=False)
 from pydantic import BaseModel
@@ -21,6 +21,25 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Haderach Agent Service", root_path="/agent/api")
+
+ADMIN_ROLES = {"admin"}
+
+
+def require_admin(caller: dict) -> str:
+    """Verify the caller has the admin role. Returns the caller email.
+
+    Loads the caller's Firestore user doc to check roles — role data is
+    not embedded in the Firebase ID token.
+    """
+    email = caller.get("email", "")
+    if not email:
+        raise HTTPException(status_code=403, detail="No email in token")
+    user = firestore_client.get_user(email.strip().lower())
+    if not user:
+        raise HTTPException(status_code=403, detail="User doc not found")
+    if not ADMIN_ROLES.intersection(user.get("roles", [])):
+        raise HTTPException(status_code=403, detail="Requires admin role")
+    return email
 
 MAX_TOOL_RESULT_CHARS = 20_000
 
@@ -96,9 +115,59 @@ def delete_vendor(vendor_id: str, caller: dict = Depends(get_verified_user)):
     return {"ok": True, "deleted": vendor_id}
 
 
+class CreateUserRequest(BaseModel):
+    email: str
+    firstName: str = ""
+    lastName: str = ""
+    roles: list[str] = []
+
+
+class UpdateUserRequest(BaseModel):
+    roles: list[str] | None = None
+    firstName: str | None = None
+    lastName: str | None = None
+
+
 @app.get("/users")
-def list_users(role: str, caller: dict = Depends(get_verified_user)):
-    return firestore_client.list_users_by_role(role)
+def list_users(
+    role: list[str] | None = Query(default=None),
+    caller: dict = Depends(get_verified_user),
+):
+    return firestore_client.list_users(role if role else None)
+
+
+@app.get("/users/{email}")
+def get_user(email: str, caller: dict = Depends(get_verified_user)):
+    user = firestore_client.get_user(email)
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User '{email}' not found")
+    return user
+
+
+@app.post("/users", status_code=201)
+def create_user(req: CreateUserRequest, caller: dict = Depends(get_verified_user)):
+    require_admin(caller)
+    try:
+        return firestore_client.create_user(req.email, req.firstName, req.lastName, req.roles)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.patch("/users/{email}")
+def update_user(email: str, req: UpdateUserRequest, caller: dict = Depends(get_verified_user)):
+    require_admin(caller)
+    try:
+        return firestore_client.update_user(email, roles=req.roles, first_name=req.firstName, last_name=req.lastName)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/users/{email}")
+def delete_user_endpoint(email: str, caller: dict = Depends(get_verified_user)):
+    require_admin(caller)
+    if not firestore_client.delete_user(email):
+        raise HTTPException(status_code=404, detail=f"User '{email}' not found")
+    return {"ok": True, "deleted": email}
 
 
 @app.patch("/vendors/{vendor_id}")
