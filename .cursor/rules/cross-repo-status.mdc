@@ -1,0 +1,10 @@
+---
+description: Cross-repo status table redirect — definition lives in the platform repo
+alwaysApply: false
+---
+
+# Cross-Repo Status Table
+
+When the user asks for a status overview, repo table, or cross-repo summary, follow the procedure defined in `../haderach-platform/.cursor/rules/cross-repo-status.mdc`.
+
+The status table covers **all** site repositories, not just this one. Always produce the full table regardless of which repo the request originates from.
