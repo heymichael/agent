@@ -3,9 +3,9 @@
 ## Purpose
 
 The agent service is a shared backend that accepts chat messages, calls OpenAI
-with tool definitions, executes tool calls (Firestore operations, sandboxed
-Python for external APIs), and returns natural-language responses. It is
-consumed by frontend chat panels across Haderach apps.
+with tool definitions, executes tool calls (MCP analytics layer, Firestore
+writes, sandboxed Python for external APIs), and returns natural-language
+responses. It is consumed by frontend chat panels across Haderach apps.
 
 ## Request flow
 
@@ -34,10 +34,15 @@ FastAPI app.py  (max 10 tool-call rounds, 20K char result truncation)
   │     ▼                    ▼
   │   Execute handler   Return reply
   │     │                    to frontend
-  │     ├─ search_vendors ──► Firestore (vendor metadata + optional spend)
-  │     ├─ query_spend ─────► Firestore (vendor_spend aggregations)
-  │     ├─ add/modify/delete ► Firestore (vendor CRUD)
-  │     ├─ hide_vendor ─────► Firestore (toggle hide flag)
+  │     │
+  │     ├─ Analytics tools ──► MCP server module ──► Firestore
+  │     │   (vendor_lookup, vendor_count,
+  │     │    spend_total, spend_by_vendor,
+  │     │    spend_by_dimension, top_vendors)
+  │     │
+  │     ├─ Write tools ──────► Firestore (vendor CRUD)
+  │     │   (add/modify/delete/hide_vendor)
+  │     │
   │     ├─ execute_python ──► Sandbox → Bill.com API / AWS CE
   │     │
   │     ▼
@@ -47,25 +52,25 @@ FastAPI app.py  (max 10 tool-call rounds, 20K char result truncation)
 Firestore (vendors + vendor_spend collections)
 ```
 
-## Routing: Firestore-first
+## MCP analytics layer
 
-The agent uses a three-step routing pattern:
+Analytics tools are backed by the `mcp_server/` module, which provides:
 
-1. **search_vendors** (Firestore) — always called first for any vendor
-   question. Returns metadata: name, billcomId, paymentMethod, track1099,
-   owner, department, contract fields. Supports fuzzy name matching, field
-   filters, group_by aggregation, and optional spend inclusion via
-   `include_spend`.
+- **Intent-aligned tool handlers** — six tools with clear, specific purposes
+  instead of general-purpose query builders
+- **Vendor resolution pipeline** — single `resolve_vendor()` function that
+  handles exact ID, exact name, alias, normalised, and token/fuzzy matching.
+  Returns ok/ambiguous/not_found.
+- **Period parser** — deterministic conversion of period strings (YYYY-MM,
+  YYYY-QN, YTD, last-N-months) to month ranges
+- **Filter validation** — enum fields validated at schema level, dynamic
+  fields (department, owner) validated against Firestore data
+- **Standardised response contract** — every tool returns a `status` field:
+  `ok`, `ambiguous`, `not_found`, `not_authorized`, or `invalid_filter`
 
-2. **query_spend** (Firestore) — for cross-vendor spend aggregations: totals
-   by month, spend grouped by payment method / department / billing frequency,
-   top vendors by spend. Queries the `vendor_spend` collection directly.
-   Excludes hidden vendors via live lookup.
-
-3. **execute_python** (sandbox) — only called for data not in Firestore:
-   individual Bill.com bill details, invoice numbers, PII, AWS per-service
-   breakdowns or daily granularity. Uses the `billcomId` from step 1 for
-   exact lookups.
+The MCP module is imported directly by the production agent (in-process, no
+protocol overhead). It can also be run as a standalone MCP server via
+`python -m mcp_server` for Cursor or other MCP clients (stdio transport).
 
 ## Module layout
 
@@ -73,27 +78,78 @@ The agent uses a three-step routing pattern:
 |---|---|
 | `service/app.py` | FastAPI application, `/chat` endpoint, orchestration loop, tool-result truncation |
 | `service/auth.py` | Firebase ID token verification dependency (`get_verified_user`) |
-| `service/tools.py` | OpenAI tool schemas + execution handlers |
-| `service/prompts.py` | System prompt with routing rules, API patterns, behavior rules |
-| `service/firestore_client.py` | Firestore read/write helpers, `search_vendors()`, `query_spend()`, hide/unhide |
+| `service/tools.py` | OpenAI tool schemas + thin handler wrappers that delegate to MCP module |
+| `service/prompts.py` | System prompt with tool list, response contract rules, and behaviour rules |
+| `service/firestore_client.py` | Firestore read/write helpers, vendor CRUD, spend queries |
 | `service/sandbox.py` | Sandboxed Python executor for LLM-generated code (120s timeout) |
 | `service/billcom_auth.py` | Shared Bill.com v3 login helper |
-| `service/sync_billcom.py` | Nightly Bill.com → Firestore vendor metadata sync (`python -m service.sync_billcom`) |
-| `service/sync_billcom_spend.py` | Nightly Bill.com bills → Firestore spend aggregation sync (`python -m service.sync_billcom_spend`) |
-| `service/sync_aws_spend.py` | Nightly AWS Cost Explorer → Firestore spend aggregation sync (`python -m service.sync_aws_spend`) |
-| `scripts/smoke-test.sh` | Post-deploy auth smoke tests — verifies health, unauthenticated rejection, and invalid-token rejection |
+| `service/sync_billcom.py` | Nightly Bill.com → Firestore vendor metadata sync |
+| `service/sync_billcom_spend.py` | Nightly Bill.com bills → Firestore spend aggregation sync |
+| `service/sync_aws_spend.py` | Nightly AWS Cost Explorer → Firestore spend aggregation sync |
+| `mcp_server/tools.py` | Intent-aligned analytics tool handlers (core logic) |
+| `mcp_server/resolver.py` | Vendor resolution pipeline, filter validation, alias support |
+| `mcp_server/period_parser.py` | Deterministic period string parser |
+| `mcp_server/server.py` | MCP protocol entry point (stdio transport) |
+| `scripts/smoke-test.sh` | Post-deploy auth smoke tests |
 
 ## Supported tools
 
+### Analytics tools (MCP-backed)
+
 | Tool | Params | Effect |
 |---|---|---|
-| `search_vendors` | query, filters, group_by, include_spend, spend_months, include_hidden | Fuzzy name search, field filters, aggregate counts, optional spend data |
-| `query_spend` | month, start_month, end_month, vendor_name, group_by | Cross-vendor spend aggregations from `vendor_spend` collection |
+| `vendor_lookup` | vendor | Resolve vendor by name/ID/alias, return full profile |
+| `vendor_count` | filters?, group_by? | Count vendors, optionally grouped by a dimension |
+| `spend_total` | period?, filters? | Grand total spend for a period |
+| `spend_by_vendor` | vendor?, period?, filters? | Spend for one vendor (monthly) or all (ranked) |
+| `spend_by_dimension` | dimension, period?, filters? | Spend grouped by a dimension |
+| `top_vendors` | n, period?, filters? | Top N vendors by spend |
+
+### Write tools
+
+| Tool | Params | Effect |
+|---|---|---|
 | `add_vendor` | name (+ optional fields) | Creates `vendors/{id}` doc in Firestore |
-| `delete_vendor` | identifier | Returns confirmation prompt (UI must approve). Blocked for Bill.com-synced vendors |
+| `delete_vendor` | identifier | Returns confirmation prompt. Blocked for Bill.com-synced vendors |
 | `modify_vendor` | identifier | Opens edit modal in UI |
-| `hide_vendor` | identifier, hide | Toggles hide flag — excludes vendor from spend analysis |
+| `hide_vendor` | identifier, hide | Toggles hide flag — excludes vendor from analytics |
+
+### Live API tool
+
+| Tool | Params | Effect |
+|---|---|---|
 | `execute_python` | code | Runs sandboxed Python for Bill.com/AWS API queries |
+
+## Vendor resolution pipeline
+
+All tools that accept a `vendor` parameter use a single shared
+`resolve_vendor()` function in `mcp_server/resolver.py`:
+
+1. Exact document-ID match
+2. Exact name match (case-insensitive)
+3. Alias match (`aliases` array field on vendor docs)
+4. Normalised match (strip punctuation, collapse whitespace)
+5. Token/fuzzy match (all query tokens present in vendor name)
+6. Single match → `ok` with `vendor_id`
+7. Multiple matches → `ambiguous` with candidates
+8. No match → `not_found`
+
+After resolution, all downstream logic uses `vendor_id`, never the raw input.
+
+## Parameter classification
+
+**Enum (hardcoded in tool schema):**
+- `paymentMethod`: Check, ACH, CreditCard, Wire, PayPal
+- `accountType`: Business, Individual
+- `track1099`: true, false
+- `billingFrequency`: monthly, annual, usage-based
+- `toolCall`: billcom, aws-ce, manual
+
+**Resolve (validated against Firestore data at query time):**
+- `vendor` — full resolution pipeline
+- `department` — validated against distinct values
+- `owner` — validated against distinct values
+- `period` — deterministic parser (YYYY-MM, YYYY-QN, YYYY-HN, YYYY, YTD, last-N-months)
 
 ## Firestore `vendors` schema
 
@@ -103,7 +159,7 @@ Unified collection — all vendors regardless of source.
 `paymentMethod`, `accountType`, `track1099`, `toolCall`, `lastSyncedAt`
 
 **App-managed:** `owner`, `secondaryOwner`, `department`, `purpose`,
-`spendType`, `hide`
+`spendType`, `hide`, `aliases`
 
 **Contract fields:** `contractStartDate`, `contractEndDate`,
 `contractLengthMonths`, `autoRenew`, `renewalRate`, `renewalNoticeDays`,
@@ -128,8 +184,7 @@ Top-level collection with monthly spend summaries per vendor. Doc ID:
 - **Bill.com** — synced by `python -m service.sync_billcom_spend`. Paginates
   all bills, aggregates by vendor + month. `toolCall: "billcom"`. ~1,244 docs.
 - **AWS Cost Explorer** — synced by `python -m service.sync_aws_spend`. Fetches
-  12 months of monthly unblended costs. `toolCall: "aws-ce"`. `vendorId: "aws"`
-  (matches Firestore vendor doc ID). ~12 docs.
+  12 months of monthly unblended costs. `toolCall: "aws-ce"`. ~12 docs.
 
 ## Delete guard
 
@@ -137,6 +192,16 @@ Bill.com-synced vendors (docs with a `billcomId`) cannot be deleted — they
 would be re-created on the next nightly sync. The guard is enforced in both
 the `delete_vendor` tool handler and the `DELETE /vendors/{id}` REST endpoint.
 Users can hide vendors from spend analysis instead via `hide_vendor`.
+
+## Caller context (spend permissions)
+
+All MCP analytics tool handlers accept an optional `caller_context` with
+`allowed_vendor_ids` and `is_finance_admin`. When `None` (default), access
+is unrestricted. When provided, spend tools filter results to the caller's
+allowed vendor list. Finance admins bypass filtering.
+
+Currently defaults to unrestricted — spend filtering is implemented when
+task 65 workstream 4 is built.
 
 ## Runtime
 
@@ -172,3 +237,16 @@ The `/health` endpoint is unauthenticated.
 | `DELETE` | `/vendors/{vendor_id}` | Required | Delete a vendor (blocked for Bill.com-synced vendors) |
 | `PATCH` | `/vendors/{vendor_id}` | Required | Partial update a vendor |
 | `GET` | `/users?role=...` | Required | List users by role |
+
+## MCP server (standalone)
+
+The analytics tools can be run as a standalone MCP server for Cursor or other
+MCP clients:
+
+```bash
+source .venv/bin/activate
+python -m mcp_server
+```
+
+This starts a stdio-transport MCP server exposing the six analytics tools.
+Requires GCP Application Default Credentials for Firestore access.

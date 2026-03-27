@@ -31,6 +31,7 @@ APP_MANAGED_FIELDS = [
     "department",
     "purpose",
     "spendType",
+    "aliases",
 ]
 
 CONTRACT_FIELDS = [
