@@ -313,11 +313,30 @@ TOOL_DEFINITIONS = [
 def _build_caller_context(caller_email: str) -> dict | None:
     """Build caller context for spend-level access control.
 
-    Returns None for now (unrestricted). When task 65 workstream 4 is
-    implemented, this will load allowed_vendor_ids and is_finance_admin
-    from the caller's Firestore user doc.
+    Checks the ``enforce_spend_filtering`` feature flag in Firestore.
+    When disabled (default), returns None (unrestricted access).
+    When enabled, resolves the caller's effective vendor set from their
+    allowed_departments, allowed_vendor_ids, and denied_vendor_ids.
     """
-    return None
+    if not firestore_client.get_feature_flag("enforce_spend_filtering"):
+        return None
+
+    if not caller_email:
+        return {"allowed_vendor_ids": [], "is_finance_admin": False}
+
+    user = firestore_client.get_user_access_context(caller_email)
+    if not user:
+        return {"allowed_vendor_ids": [], "is_finance_admin": False}
+
+    if "finance_admin" in user.get("roles", []):
+        return {"is_finance_admin": True}
+
+    effective_ids = firestore_client.resolve_effective_vendor_ids(
+        user.get("allowed_departments", []),
+        user.get("allowed_vendor_ids", []),
+        user.get("denied_vendor_ids", []),
+    )
+    return {"allowed_vendor_ids": effective_ids, "is_finance_admin": False}
 
 
 def execute_vendor_lookup(args: dict, caller_email: str = "") -> str:

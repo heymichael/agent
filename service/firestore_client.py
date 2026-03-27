@@ -94,6 +94,9 @@ def _user_summary(doc_id: str, data: dict) -> dict:
         "firstName": data.get("first_name", ""),
         "lastName": data.get("last_name", ""),
         "roles": data.get("roles", []),
+        "allowedDepartments": data.get("allowed_departments", []),
+        "allowedVendorIds": data.get("allowed_vendor_ids", []),
+        "deniedVendorIds": data.get("denied_vendor_ids", []),
     }
 
 
@@ -166,6 +169,9 @@ def update_user(
     roles: list[str] | None = None,
     first_name: str | None = None,
     last_name: str | None = None,
+    allowed_departments: list[str] | None = None,
+    allowed_vendor_ids: list[str] | None = None,
+    denied_vendor_ids: list[str] | None = None,
 ) -> dict:
     """Update a user's fields. Only non-None fields are written.
 
@@ -184,6 +190,12 @@ def update_user(
         updates["first_name"] = first_name
     if last_name is not None:
         updates["last_name"] = last_name
+    if allowed_departments is not None:
+        updates["allowed_departments"] = allowed_departments
+    if allowed_vendor_ids is not None:
+        updates["allowed_vendor_ids"] = allowed_vendor_ids
+    if denied_vendor_ids is not None:
+        updates["denied_vendor_ids"] = denied_vendor_ids
     if updates:
         ref.update(updates)
     updated = ref.get().to_dict()
@@ -237,6 +249,62 @@ def resolve_vendor(identifier: str) -> dict | None:
     return None
 
 
+def get_feature_flag(flag_name: str, default: bool = False) -> bool:
+    """Read a boolean feature flag from the config/feature_flags Firestore doc."""
+    db = get_db()
+    snap = db.collection("config").document("feature_flags").get()
+    if not snap.exists:
+        return default
+    return bool(snap.to_dict().get(flag_name, default))
+
+
+def resolve_effective_vendor_ids(
+    allowed_departments: list[str],
+    allowed_vendor_ids: list[str],
+    denied_vendor_ids: list[str],
+) -> list[str]:
+    """Compute the effective set of vendor IDs a user can access.
+
+    Resolution: (vendors in allowed_departments UNION allowed_vendor_ids)
+                MINUS denied_vendor_ids.
+    Deny always wins.
+    Vendors with no department are invisible unless explicitly in allowed_vendor_ids.
+    """
+    db = get_db()
+    dept_set = set(allowed_departments) if allowed_departments else set()
+
+    vendor_ids: set[str] = set()
+    if dept_set:
+        for doc in db.collection(VENDORS_COLLECTION).stream():
+            data = doc.to_dict()
+            if data.get("department") in dept_set:
+                vendor_ids.add(doc.id)
+
+    vendor_ids.update(allowed_vendor_ids or [])
+    vendor_ids -= set(denied_vendor_ids or [])
+
+    return sorted(vendor_ids)
+
+
+def get_user_access_context(email: str) -> dict | None:
+    """Load a user's raw access control fields for spend filtering.
+
+    Returns None if the user doc doesn't exist. Does not resolve vendor
+    names -- returns raw Firestore field values for use by _build_caller_context.
+    """
+    db = get_db()
+    snap = db.collection("users").document(email.strip().lower()).get()
+    if not snap.exists:
+        return None
+    data = snap.to_dict()
+    return {
+        "roles": data.get("roles", []),
+        "allowed_departments": data.get("allowed_departments", []),
+        "allowed_vendor_ids": data.get("allowed_vendor_ids", []),
+        "denied_vendor_ids": data.get("denied_vendor_ids", []),
+    }
+
+
 SEARCH_RETURN_FIELDS = [
     "name", "billcomId", "toolCall", "paymentMethod", "accountType",
     "track1099", "hide", "owner", "secondaryOwner", "department", "purpose",
@@ -244,6 +312,20 @@ SEARCH_RETURN_FIELDS = [
     "contractLengthMonths", "autoRenew", "renewalRate", "renewalNoticeDays",
     "terminationTerms", "lastSyncedAt", "aliases",
 ]
+
+
+def list_vendors() -> list[dict]:
+    """Return all vendors with full field set for API responses."""
+    db = get_db()
+    results = []
+    for doc in db.collection(VENDORS_COLLECTION).stream():
+        data = doc.to_dict()
+        record = {"id": doc.id}
+        for f in SEARCH_RETURN_FIELDS:
+            if f in data:
+                record[f] = data[f]
+        results.append(record)
+    return results
 
 SPEND_RETURN_FIELDS = ["month", "totalAmount", "billCount"]
 
