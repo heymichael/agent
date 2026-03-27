@@ -80,7 +80,7 @@ protocol overhead). It can also be run as a standalone MCP server via
 | `service/auth.py` | Firebase ID token verification dependency (`get_verified_user`) |
 | `service/tools.py` | OpenAI tool schemas + thin handler wrappers that delegate to MCP module |
 | `service/prompts.py` | System prompt with tool list, response contract rules, and behaviour rules |
-| `service/firestore_client.py` | Firestore read/write helpers, vendor CRUD, spend queries |
+| `service/firestore_client.py` | Firestore read/write helpers, vendor CRUD, spend queries, user CRUD, feature flags, access resolution |
 | `service/sandbox.py` | Sandboxed Python executor for LLM-generated code (120s timeout) |
 | `service/billcom_auth.py` | Shared Bill.com v3 login helper |
 | `service/sync_billcom.py` | Nightly Bill.com → Firestore vendor metadata sync |
@@ -200,8 +200,13 @@ All MCP analytics tool handlers accept an optional `caller_context` with
 is unrestricted. When provided, spend tools filter results to the caller's
 allowed vendor list. Finance admins bypass filtering.
 
-Currently defaults to unrestricted — spend filtering is implemented when
-task 65 workstream 4 is built.
+Activation is controlled by the `enforce_spend_filtering` feature flag in
+`config/feature_flags` (Firestore). When `false` (current default), the
+`_build_caller_context` function returns `None` (unrestricted). When `true`,
+it resolves the caller's effective vendor set via `resolve_effective_vendor_ids`
+in `firestore_client.py` — combining `allowed_departments`, `allowed_vendor_ids`,
+and `denied_vendor_ids` from the user doc. The flag can be toggled in the
+Firebase console without a deploy.
 
 ## Runtime
 
@@ -234,9 +239,14 @@ The `/health` endpoint is unauthenticated.
 |---|---|---|---|
 | `POST` | `/chat` | Required | Chat with the agent (tool-calling loop) |
 | `GET` | `/health` | None | Health check |
+| `GET` | `/vendors` | Required | List all vendors with full field set |
 | `DELETE` | `/vendors/{vendor_id}` | Required | Delete a vendor (blocked for Bill.com-synced vendors) |
 | `PATCH` | `/vendors/{vendor_id}` | Required | Partial update a vendor |
-| `GET` | `/users?role=...` | Required | List users by role |
+| `GET` | `/users?role=...` | Required | List users (optional role filter) |
+| `GET` | `/users/{email}` | Required | Single user detail with resolved vendor names |
+| `POST` | `/users` | `admin` | Create a new user |
+| `PATCH` | `/users/{email}` | `admin` or `finance_admin` | Update user roles/name (`admin`) or access fields (`finance_admin`) |
+| `DELETE` | `/users/{email}` | `admin` | Delete a user |
 
 ## MCP server (standalone)
 
