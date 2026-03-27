@@ -1,15 +1,183 @@
-"""OpenAI tool definitions and execution handlers."""
+"""OpenAI tool definitions and execution handlers.
+
+Analytics tools (vendor_lookup, vendor_count, spend_total, spend_by_vendor,
+spend_by_dimension, top_vendors) delegate to the MCP server module which
+owns the resolution pipeline, period parsing, and response contract.
+
+Write tools (add_vendor, delete_vendor, modify_vendor, hide_vendor) and
+execute_python remain here unchanged.
+"""
 
 import json
 
 from . import firestore_client
 from .sandbox import execute_python
+from mcp_server.tools import (
+    handle_vendor_lookup,
+    handle_vendor_count,
+    handle_spend_total,
+    handle_spend_by_vendor,
+    handle_spend_by_dimension,
+    handle_top_vendors,
+)
+
+# ---------------------------------------------------------------------------
+# Shared filter properties (reused across spend tools)
+# ---------------------------------------------------------------------------
+
+_PERIOD_PARAM = {
+    "type": "string",
+    "description": (
+        "Time period. Formats: YYYY-MM (month), YYYY-QN (quarter), "
+        "YYYY-HN (half), YYYY (year), YTD, last-N-months (e.g. "
+        "last-3-months). Omit for all time."
+    ),
+}
+
+_FILTERS_PARAM = {
+    "type": "object",
+    "description": (
+        "Exact-match filters to narrow results. Multiple filters are AND-combined. "
+        "Supported fields: paymentMethod (Check, ACH, CreditCard, Wire, PayPal), "
+        "accountType (Business, Individual), track1099 (true/false), "
+        "billingFrequency (monthly, annual, usage-based), "
+        "toolCall (billcom, aws-ce, manual), department, owner."
+    ),
+}
 
 # ---------------------------------------------------------------------------
 # Tool schemas (registered with the OpenAI API)
 # ---------------------------------------------------------------------------
 
 TOOL_DEFINITIONS = [
+    # -- Analytics tools (MCP-backed) --
+    {
+        "type": "function",
+        "function": {
+            "name": "vendor_lookup",
+            "description": (
+                "Look up a vendor by name, ID, or alias. Returns the full "
+                "vendor profile including metadata and contract fields. "
+                "Accepts partial names and abbreviations (e.g. 'AWS', 'Rhonda')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vendor": {
+                        "type": "string",
+                        "description": "Vendor name, ID, or alias to look up.",
+                    },
+                },
+                "required": ["vendor"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "vendor_count",
+            "description": (
+                "Count vendors, optionally filtered and/or grouped by a "
+                "dimension (e.g. 'how many 1099 vendors?', 'vendors by "
+                "payment type')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_by": {
+                        "type": "string",
+                        "description": (
+                            "Field to group counts by: paymentMethod, accountType, "
+                            "track1099, billingFrequency, toolCall, department, owner."
+                        ),
+                    },
+                    "filters": _FILTERS_PARAM,
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "spend_total",
+            "description": "Grand total spend for a time period, optionally filtered.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": _PERIOD_PARAM,
+                    "filters": _FILTERS_PARAM,
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "spend_by_vendor",
+            "description": (
+                "Spend for a single vendor (monthly breakdown) or all vendors "
+                "(ranked by total). Specify vendor for per-vendor history; "
+                "omit for a cross-vendor ranking."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vendor": {
+                        "type": "string",
+                        "description": "Vendor name, ID, or alias. Omit for all vendors.",
+                    },
+                    "period": _PERIOD_PARAM,
+                    "filters": _FILTERS_PARAM,
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "spend_by_dimension",
+            "description": (
+                "Spend grouped by a single dimension (e.g. 'spend by payment "
+                "type', 'spend by department'). Results sorted by amount "
+                "descending."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dimension": {
+                        "type": "string",
+                        "description": (
+                            "Field to group by: paymentMethod, accountType, "
+                            "track1099, billingFrequency, toolCall, department, "
+                            "owner, vendorName."
+                        ),
+                    },
+                    "period": _PERIOD_PARAM,
+                    "filters": _FILTERS_PARAM,
+                },
+                "required": ["dimension"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "top_vendors",
+            "description": "Top N vendors by spend in a time period.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "n": {
+                        "type": "integer",
+                        "description": "Number of vendors to return (default 10).",
+                    },
+                    "period": _PERIOD_PARAM,
+                    "filters": _FILTERS_PARAM,
+                },
+            },
+        },
+    },
+    # -- Write tools (unchanged) --
     {
         "type": "function",
         "function": {
@@ -72,49 +240,6 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "search_vendors",
-            "description": (
-                "Search the vendor registry in Firestore. Use this as the FIRST step for any vendor question. "
-                "Returns vendor metadata including billcomId (for follow-up Bill.com API queries via execute_python), "
-                "payment method, 1099 status, owner, department, and contract fields. "
-                "Use group_by to get aggregate counts (e.g. count vendors by payment method or 1099 status). "
-                "Set include_spend to true to attach monthly spend summaries from Firestore "
-                "(avoids a live Bill.com API call for historical spend questions)."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Vendor name to search for (prefix match, case-insensitive). E.g. 'Michael' matches 'Michael D Mader'.",
-                    },
-                    "filters": {
-                        "type": "object",
-                        "description": "Exact-match filters on vendor fields. E.g. {\"track1099\": true}, {\"paymentMethod\": \"Check\"}, {\"toolCall\": \"billcom\"}.",
-                    },
-                    "group_by": {
-                        "type": "string",
-                        "description": "Field name to aggregate counts by. Returns {counts: {value: count}, total: N} instead of individual records. E.g. 'paymentMethod', 'track1099', 'department'.",
-                    },
-                    "include_spend": {
-                        "type": "boolean",
-                        "description": "If true, include recent monthly spend summaries (from vendor_spend collection) for each matched vendor. Each vendor result gets a 'spend' array with {month, totalAmount, billCount} entries.",
-                    },
-                    "spend_months": {
-                        "type": "integer",
-                        "description": "Number of months of spend history to include when include_spend is true. Defaults to 6.",
-                    },
-                    "include_hidden": {
-                        "type": "boolean",
-                        "description": "If true, include vendors that have been hidden from spend analysis. Defaults to false.",
-                    },
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "modify_vendor",
             "description": "Open the vendor edit modal in the UI for a vendor in the app's local Firestore registry. Does not update fields directly — opens the edit form.",
             "parameters": {
@@ -135,7 +260,7 @@ TOOL_DEFINITIONS = [
             "name": "hide_vendor",
             "description": (
                 "Hide or unhide a vendor from spend analysis. Hidden vendors are excluded "
-                "from search_vendors results and query_spend aggregations by default. "
+                "from analytics tool results by default. "
                 "Use this instead of deleting Bill.com-synced vendors."
             ),
             "parameters": {
@@ -157,53 +282,11 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "query_spend",
-            "description": (
-                "Query aggregated spend data from Firestore (vendor_spend collection). "
-                "Use for cross-vendor spend questions: totals by month, spend grouped by "
-                "payment method / department / billing frequency, or top vendors by spend. "
-                "Data is synced nightly from Bill.com bills. For per-vendor spend, prefer "
-                "search_vendors with include_spend instead."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "month": {
-                        "type": "string",
-                        "description": "Exact month to query (YYYY-MM). E.g. '2026-02'.",
-                    },
-                    "start_month": {
-                        "type": "string",
-                        "description": "Start of month range (inclusive, YYYY-MM). Use with end_month for multi-month queries.",
-                    },
-                    "end_month": {
-                        "type": "string",
-                        "description": "End of month range (inclusive, YYYY-MM). Use with start_month.",
-                    },
-                    "vendor_name": {
-                        "type": "string",
-                        "description": "Filter by vendor name (substring match, case-insensitive).",
-                    },
-                    "group_by": {
-                        "type": "string",
-                        "description": "Group and sum spend by this field. Results are sorted by totalAmount descending. Fields: 'paymentMethod', 'department', 'owner', 'billingFrequency', 'track1099', 'accountType', 'purpose', 'spendType', 'vendorName'.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max number of results to return (default 50). For 'top N vendors' queries, set this to N. Applies to both grouped and ungrouped results.",
-                    },
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "execute_python",
             "description": (
                 "Execute Python code to query external vendor APIs for TRANSACTIONAL data: "
                 "Bill.com bills/spend/PII or AWS Cost Explorer cloud costs. "
-                "Always call search_vendors first to get the billcomId, then use it here for exact lookups. "
+                "Use vendor_lookup first to get the billcomId and toolCall, then use it here. "
                 "Pre-installed libraries: boto3, requests, json, os, datetime, math, re, collections, decimal. "
                 "Vendor credentials are available as environment variables (never print them). "
                 "Print the result as JSON to stdout."
@@ -227,7 +310,45 @@ TOOL_DEFINITIONS = [
 # ---------------------------------------------------------------------------
 
 
-def execute_add_vendor(args: dict) -> str:
+def _build_caller_context(caller_email: str) -> dict | None:
+    """Build caller context for spend-level access control.
+
+    Returns None for now (unrestricted). When task 65 workstream 4 is
+    implemented, this will load allowed_vendor_ids and is_finance_admin
+    from the caller's Firestore user doc.
+    """
+    return None
+
+
+def execute_vendor_lookup(args: dict, caller_email: str = "") -> str:
+    return json.dumps(handle_vendor_lookup(args))
+
+
+def execute_vendor_count(args: dict, caller_email: str = "") -> str:
+    return json.dumps(handle_vendor_count(args))
+
+
+def execute_spend_total(args: dict, caller_email: str = "") -> str:
+    ctx = _build_caller_context(caller_email)
+    return json.dumps(handle_spend_total(args, caller_context=ctx))
+
+
+def execute_spend_by_vendor(args: dict, caller_email: str = "") -> str:
+    ctx = _build_caller_context(caller_email)
+    return json.dumps(handle_spend_by_vendor(args, caller_context=ctx))
+
+
+def execute_spend_by_dimension(args: dict, caller_email: str = "") -> str:
+    ctx = _build_caller_context(caller_email)
+    return json.dumps(handle_spend_by_dimension(args, caller_context=ctx))
+
+
+def execute_top_vendors(args: dict, caller_email: str = "") -> str:
+    ctx = _build_caller_context(caller_email)
+    return json.dumps(handle_top_vendors(args, caller_context=ctx))
+
+
+def execute_add_vendor(args: dict, caller_email: str = "") -> str:
     args.setdefault("status", "active")
     try:
         result = firestore_client.add_vendor(args)
@@ -236,7 +357,7 @@ def execute_add_vendor(args: dict) -> str:
         return json.dumps({"ok": False, "error": str(exc)})
 
 
-def execute_delete_vendor(args: dict) -> str:
+def execute_delete_vendor(args: dict, caller_email: str = "") -> str:
     vendor = firestore_client.resolve_vendor(args["identifier"])
     if not vendor:
         return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
@@ -256,19 +377,7 @@ def execute_delete_vendor(args: dict) -> str:
     })
 
 
-def execute_search_vendors(args: dict) -> str:
-    result = firestore_client.search_vendors(
-        query=args.get("query"),
-        filters=args.get("filters"),
-        group_by=args.get("group_by"),
-        include_spend=args.get("include_spend", False),
-        spend_months=args.get("spend_months", 6),
-        include_hidden=args.get("include_hidden", False),
-    )
-    return json.dumps({"ok": True, **result})
-
-
-def execute_modify_vendor(args: dict) -> str:
+def execute_modify_vendor(args: dict, caller_email: str = "") -> str:
     vendor = firestore_client.resolve_vendor(args["identifier"])
     if not vendor:
         return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
@@ -279,7 +388,7 @@ def execute_modify_vendor(args: dict) -> str:
     })
 
 
-def execute_hide_vendor(args: dict) -> str:
+def execute_hide_vendor(args: dict, caller_email: str = "") -> str:
     vendor = firestore_client.resolve_vendor(args["identifier"])
     if not vendor:
         return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
@@ -297,31 +406,21 @@ def execute_hide_vendor(args: dict) -> str:
         return json.dumps({"ok": False, "error": str(exc)})
 
 
-def execute_query_spend(args: dict) -> str:
-    kwargs: dict = {
-        "month": args.get("month"),
-        "start_month": args.get("start_month"),
-        "end_month": args.get("end_month"),
-        "vendor_name": args.get("vendor_name"),
-        "group_by": args.get("group_by"),
-    }
-    if "limit" in args:
-        kwargs["limit"] = args["limit"]
-    result = firestore_client.query_spend(**kwargs)
-    return json.dumps({"ok": True, **result})
-
-
-def execute_execute_python(args: dict) -> str:
+def execute_execute_python(args: dict, caller_email: str = "") -> str:
     result = execute_python(args["code"])
     return json.dumps(result)
 
 
 TOOL_HANDLERS = {
+    "vendor_lookup": execute_vendor_lookup,
+    "vendor_count": execute_vendor_count,
+    "spend_total": execute_spend_total,
+    "spend_by_vendor": execute_spend_by_vendor,
+    "spend_by_dimension": execute_spend_by_dimension,
+    "top_vendors": execute_top_vendors,
     "add_vendor": execute_add_vendor,
     "delete_vendor": execute_delete_vendor,
-    "search_vendors": execute_search_vendors,
     "modify_vendor": execute_modify_vendor,
     "hide_vendor": execute_hide_vendor,
-    "query_spend": execute_query_spend,
     "execute_python": execute_execute_python,
 }

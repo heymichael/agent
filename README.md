@@ -94,7 +94,7 @@ Response:
 ```json
 {
   "reply": "You have 150 1099 vendors.",
-  "tool_calls_executed": ["search_vendors"]
+  "tool_calls_executed": ["vendor_count"]
 }
 ```
 

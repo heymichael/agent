@@ -223,7 +223,7 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
                 if handler is None:
                     result = json.dumps({"ok": False, "error": f"Unknown tool: {fn_name}"})
                 else:
-                    result = handler(fn_args)
+                    result = handler(fn_args, caller_email=caller_email)
 
                 tool_calls_executed.append(fn_name)
                 messages.append({

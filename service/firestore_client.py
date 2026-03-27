@@ -242,7 +242,7 @@ SEARCH_RETURN_FIELDS = [
     "track1099", "hide", "owner", "secondaryOwner", "department", "purpose",
     "spendType", "billingFrequency", "contractStartDate", "contractEndDate",
     "contractLengthMonths", "autoRenew", "renewalRate", "renewalNoticeDays",
-    "terminationTerms", "lastSyncedAt",
+    "terminationTerms", "lastSyncedAt", "aliases",
 ]
 
 SPEND_RETURN_FIELDS = ["month", "totalAmount", "billCount"]
