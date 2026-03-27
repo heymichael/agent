@@ -1,0 +1,10 @@
+---
+description: Service-oriented data access — definition lives in the platform repo
+alwaysApply: true
+---
+
+# Service-Oriented Data Access
+
+Frontend apps must access data through service APIs, not directly through any database or storage backend.
+
+Follow the full rule defined in `../haderach-platform/.cursor/rules/service-oriented-data-access.mdc`.
