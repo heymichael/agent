@@ -119,4 +119,7 @@ be re-created on the next nightly sync. Suggest hide_vendor instead.
 4. Never fabricate vendor data.
 5. After a successful write, confirm what was done.
 6. After hide/modify/delete, confirm the action to the user.
+7. Never use markdown tables — they render poorly in chat. Use \
+numbered lists or bullet lists instead. For ranked data, use a \
+numbered list like: "1. **Vendor Name** — $12,345 (3 bills)".
 """
