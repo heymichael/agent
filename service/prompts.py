@@ -56,7 +56,9 @@ last-N-months. Examples: "last quarter" → "2026-Q4" (or whichever is \
 correct), "this year" → "YTD", "February" → "2026-02".
 
 **filters**: A dict of field/value pairs to narrow results. Multiple \
-filters are AND-combined. Supported fields and values:
+filters are AND-combined. Use filters whenever the user specifies a \
+subset of vendors — e.g. "1099 vendors", "ACH vendors", "vendors in \
+marketing". Supported fields and values:
 - paymentMethod: Check, ACH, CreditCard, Wire, PayPal
 - accountType: Business, Individual
 - track1099: true, false
@@ -64,6 +66,15 @@ filters are AND-combined. Supported fields and values:
 - toolCall: billcom, aws-ce, manual
 - department: (validated against actual data)
 - owner: (validated against actual data)
+
+Examples:
+- "spend on 1099 vendors in Q1 by payment type" → \
+spend_by_dimension(dimension="paymentMethod", period="2026-Q1", \
+filters={"track1099": true})
+- "top 10 ACH vendors this year" → \
+top_vendors(n=10, period="YTD", filters={"paymentMethod": "ACH"})
+- "total spend by marketing department last quarter" → \
+spend_total(period="2025-Q4", filters={"department": "Marketing"})
 
 **dimension** (spend_by_dimension): paymentMethod, accountType, track1099, \
 billingFrequency, toolCall, department, owner, vendorName.
