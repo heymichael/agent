@@ -23,21 +23,24 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Haderach Agent Service", root_path="/agent/api")
 
 ADMIN_ROLES = {"admin"}
+FINANCE_ADMIN_ROLES = {"finance_admin"}
 
 
-def require_admin(caller: dict) -> str:
-    """Verify the caller has the admin role. Returns the caller email.
-
-    Loads the caller's Firestore user doc to check roles — role data is
-    not embedded in the Firebase ID token.
-    """
+def _get_caller_roles(caller: dict) -> tuple[str, set[str]]:
+    """Load the caller's roles from Firestore. Returns (email, roles set)."""
     email = caller.get("email", "")
     if not email:
         raise HTTPException(status_code=403, detail="No email in token")
     user = firestore_client.get_user(email.strip().lower())
     if not user:
         raise HTTPException(status_code=403, detail="User doc not found")
-    if not ADMIN_ROLES.intersection(user.get("roles", [])):
+    return email, set(user.get("roles", []))
+
+
+def require_admin(caller: dict) -> str:
+    """Verify the caller has the admin role. Returns the caller email."""
+    email, roles = _get_caller_roles(caller)
+    if not ADMIN_ROLES.intersection(roles):
         raise HTTPException(status_code=403, detail="Requires admin role")
     return email
 
@@ -126,6 +129,9 @@ class UpdateUserRequest(BaseModel):
     roles: list[str] | None = None
     firstName: str | None = None
     lastName: str | None = None
+    allowedDepartments: list[str] | None = None
+    allowedVendorIds: list[str] | None = None
+    deniedVendorIds: list[str] | None = None
 
 
 @app.get("/users")
@@ -155,9 +161,30 @@ def create_user(req: CreateUserRequest, caller: dict = Depends(get_verified_user
 
 @app.patch("/users/{email}")
 def update_user(email: str, req: UpdateUserRequest, caller: dict = Depends(get_verified_user)):
-    require_admin(caller)
+    _email, caller_roles = _get_caller_roles(caller)
+
+    admin_fields = req.roles is not None or req.firstName is not None or req.lastName is not None
+    access_fields = (
+        req.allowedDepartments is not None
+        or req.allowedVendorIds is not None
+        or req.deniedVendorIds is not None
+    )
+
+    if admin_fields and not ADMIN_ROLES.intersection(caller_roles):
+        raise HTTPException(status_code=403, detail="Requires admin role to modify roles/name")
+    if access_fields and not FINANCE_ADMIN_ROLES.intersection(caller_roles):
+        raise HTTPException(status_code=403, detail="Requires finance_admin role to modify vendor access")
+
     try:
-        return firestore_client.update_user(email, roles=req.roles, first_name=req.firstName, last_name=req.lastName)
+        return firestore_client.update_user(
+            email,
+            roles=req.roles,
+            first_name=req.firstName,
+            last_name=req.lastName,
+            allowed_departments=req.allowedDepartments,
+            allowed_vendor_ids=req.allowedVendorIds,
+            denied_vendor_ids=req.deniedVendorIds,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -168,6 +195,11 @@ def delete_user_endpoint(email: str, caller: dict = Depends(get_verified_user)):
     if not firestore_client.delete_user(email):
         raise HTTPException(status_code=404, detail=f"User '{email}' not found")
     return {"ok": True, "deleted": email}
+
+
+@app.get("/vendors")
+def list_vendors(caller: dict = Depends(get_verified_user)):
+    return firestore_client.list_vendors()
 
 
 @app.patch("/vendors/{vendor_id}")
