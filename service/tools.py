@@ -313,14 +313,10 @@ TOOL_DEFINITIONS = [
 def _build_caller_context(caller_email: str) -> dict | None:
     """Build caller context for spend-level access control.
 
-    Checks the ``enforce_spend_filtering`` feature flag in Firestore.
-    When disabled (default), returns None (unrestricted access).
-    When enabled, resolves the caller's effective vendor set from their
+    Resolves the caller's effective vendor set from their
     allowed_departments, allowed_vendor_ids, and denied_vendor_ids.
+    finance_admin users bypass filtering entirely.
     """
-    if not firestore_client.get_feature_flag("enforce_spend_filtering"):
-        return None
-
     if not caller_email:
         return {"allowed_vendor_ids": [], "is_finance_admin": False}
 

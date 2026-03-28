@@ -196,17 +196,13 @@ Users can hide vendors from spend analysis instead via `hide_vendor`.
 ## Caller context (spend permissions)
 
 All MCP analytics tool handlers accept an optional `caller_context` with
-`allowed_vendor_ids` and `is_finance_admin`. When `None` (default), access
-is unrestricted. When provided, spend tools filter results to the caller's
-allowed vendor list. Finance admins bypass filtering.
+`allowed_vendor_ids` and `is_finance_admin`. Spend tools filter results to
+the caller's allowed vendor list. Finance admins bypass filtering.
 
-Activation is controlled by the `enforce_spend_filtering` feature flag in
-`config/feature_flags` (Firestore). When `false` (current default), the
-`_build_caller_context` function returns `None` (unrestricted). When `true`,
-it resolves the caller's effective vendor set via `resolve_effective_vendor_ids`
-in `firestore_client.py` — combining `allowed_departments`, `allowed_vendor_ids`,
-and `denied_vendor_ids` from the user doc. The flag can be toggled in the
-Firebase console without a deploy.
+`_build_caller_context` resolves the caller's effective vendor set via
+`resolve_effective_vendor_ids` in `firestore_client.py` — combining
+`allowed_departments`, `allowed_vendor_ids`, and `denied_vendor_ids` from
+the user doc. Filtering is always active; there is no feature flag gate.
 
 ## Runtime
 
