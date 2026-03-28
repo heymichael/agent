@@ -249,14 +249,6 @@ def resolve_vendor(identifier: str) -> dict | None:
     return None
 
 
-def get_feature_flag(flag_name: str, default: bool = False) -> bool:
-    """Read a boolean feature flag from the config/feature_flags Firestore doc."""
-    db = get_db()
-    snap = db.collection("config").document("feature_flags").get()
-    if not snap.exists:
-        return default
-    return bool(snap.to_dict().get(flag_name, default))
-
 
 def resolve_effective_vendor_ids(
     allowed_departments: list[str],
