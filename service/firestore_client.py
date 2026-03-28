@@ -429,6 +429,44 @@ def query_spend(
     return {"results": results, "total": len(matched), "grandTotal": grand_total}
 
 
+def query_spend_by_vendor_ids(
+    vendor_ids: list[str],
+    start_month: str,
+    end_month: str,
+) -> list[dict]:
+    """Query vendor_spend for specific vendors within a month range.
+
+    Filters by vendor ID set and excludes hidden vendors.
+    Returns rows shaped for the frontend spend chart: {vendor, month, amount}.
+    """
+    db = get_db()
+    hidden_ids = get_hidden_vendor_ids()
+    id_set = set(vendor_ids)
+
+    ref = db.collection(VENDOR_SPEND_COLLECTION)
+    if start_month == end_month:
+        ref = ref.where("month", "==", start_month)
+    else:
+        ref = ref.where("month", ">=", start_month)
+        ref = ref.where("month", "<=", end_month)
+
+    results: list[dict] = []
+    for doc in ref.stream():
+        data = doc.to_dict()
+        vid = data.get("vendorId", "")
+        if vid not in id_set:
+            continue
+        if vid in hidden_ids:
+            continue
+        results.append({
+            "vendor": data.get("vendorName") or vid,
+            "month": data.get("month", ""),
+            "amount": float(data.get("totalAmount", 0)),
+        })
+
+    return results
+
+
 def search_vendors(
     query: str | None = None,
     filters: dict | None = None,

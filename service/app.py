@@ -44,6 +44,27 @@ def require_admin(caller: dict) -> str:
         raise HTTPException(status_code=403, detail="Requires admin role")
     return email
 
+
+def _resolve_caller_access(caller: dict) -> set[str] | None:
+    """Resolve the caller's effective vendor set for REST endpoint filtering.
+
+    Returns None for finance_admin (full access) or a set of allowed vendor
+    IDs for restricted users. Empty set means no vendor access.
+    """
+    email = caller.get("email", "")
+    if not email:
+        return set()
+    ctx = firestore_client.get_user_access_context(email)
+    if not ctx:
+        return set()
+    if "finance_admin" in ctx.get("roles", []):
+        return None
+    return set(firestore_client.resolve_effective_vendor_ids(
+        ctx.get("allowed_departments", []),
+        ctx.get("allowed_vendor_ids", []),
+        ctx.get("denied_vendor_ids", []),
+    ))
+
 MAX_TOOL_RESULT_CHARS = 20_000
 
 
@@ -199,7 +220,11 @@ def delete_user_endpoint(email: str, caller: dict = Depends(get_verified_user)):
 
 @app.get("/vendors")
 def list_vendors(caller: dict = Depends(get_verified_user)):
-    return firestore_client.list_vendors()
+    vendors = firestore_client.list_vendors()
+    allowed = _resolve_caller_access(caller)
+    if allowed is None:
+        return vendors
+    return [v for v in vendors if v.get("id") in allowed]
 
 
 @app.patch("/vendors/{vendor_id}")
@@ -211,6 +236,20 @@ def update_vendor(vendor_id: str, updates: dict, caller: dict = Depends(get_veri
         return {"ok": True, "vendor": result}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/spend")
+def get_spend(
+    vendor_ids: list[str] = Query(..., alias="vendor_ids"),
+    from_month: str = Query(..., alias="from"),
+    to_month: str = Query(..., alias="to"),
+    caller: dict = Depends(get_verified_user),
+):
+    allowed = _resolve_caller_access(caller)
+    if allowed is not None:
+        vendor_ids = [v for v in vendor_ids if v in allowed]
+    data = firestore_client.query_spend_by_vendor_ids(vendor_ids, from_month, to_month)
+    return {"data": data}
 
 
 @app.post("/chat", response_model=ChatResponse)
