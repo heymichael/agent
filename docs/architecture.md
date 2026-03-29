@@ -91,6 +91,7 @@ protocol overhead). It can also be run as a standalone MCP server via
 | `mcp_server/period_parser.py` | Deterministic period string parser |
 | `mcp_server/server.py` | MCP protocol entry point (stdio transport) |
 | `scripts/smoke-test.sh` | Post-deploy auth smoke tests |
+| `scripts/seed_apps.py` | Seed `apps` collection in Firestore with initial app definitions |
 
 ## Supported tools
 
@@ -167,6 +168,22 @@ Unified collection — all vendors regardless of source.
 
 No PII stored (no email, phone, address, taxId).
 
+## Firestore `apps` schema
+
+Top-level collection defining app entries and their permission configuration.
+Doc ID is the app slug (e.g., `stocks`, `system_administration`).
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `id` | `string` | App slug (matches doc ID) |
+| `label` | `string` | Display name |
+| `path` | `string` | URL path prefix (e.g., `/stocks/`) |
+| `type` | `"app" \| "admin"` | Whether it's a regular app or an admin app |
+| `granting_roles` | `string[]` | Roles that grant access to this app |
+| `sort_order` | `number` | Display ordering |
+
+Seeded via `scripts/seed_apps.py`. The `PATCH /apps/{app_id}` endpoint allows admins to modify `label`, `granting_roles`, and `sort_order` at runtime.
+
 ## Firestore `vendor_spend` schema
 
 Top-level collection with monthly spend summaries per vendor. Doc ID:
@@ -239,6 +256,8 @@ The `/health` endpoint is unauthenticated.
 | `GET` | `/vendors` | Required | List all vendors with full field set |
 | `DELETE` | `/vendors/{vendor_id}` | Required | Delete a vendor (blocked for Bill.com-synced vendors) |
 | `PATCH` | `/vendors/{vendor_id}` | Required | Partial update a vendor |
+| `GET` | `/apps` | Required | List all app definitions (from `apps` collection) |
+| `PATCH` | `/apps/{app_id}` | `admin` | Update app label, granting roles, or sort order |
 | `GET` | `/users?role=...` | Required | List users (optional role filter) |
 | `GET` | `/users/{email}` | Required | Single user detail with resolved vendor names |
 | `POST` | `/users` | `admin` | Create a new user |
