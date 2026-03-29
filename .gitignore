@@ -1,6 +1,9 @@
 # OS
 .DS_Store
 
+# GCP service account keys
+*-sa-key.json
+
 __pycache__/
 *.pyc
 .env

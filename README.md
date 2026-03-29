@@ -30,6 +30,31 @@ uvicorn service.app:app --reload --port 8080
 The API is available at `http://localhost:8080`. In production it's mounted at
 `/agent/api/` via Firebase Hosting rewrite.
 
+### GCP credentials
+
+The service needs GCP credentials for Firestore access and Firebase Auth token
+verification. Two options:
+
+**Option A — Service account key (recommended).** Place a key file in the repo
+root and point to it in `.env`. The key never expires, so you won't get
+interrupted by credential expiry during dev sessions.
+
+```bash
+# One-time setup (already done if you cloned after this was added):
+# 1. Download a key for the agent-local-dev service account
+gcloud iam service-accounts keys create agent-local-dev-sa-key.json \
+  --iam-account=agent-local-dev@haderach-ai.iam.gserviceaccount.com
+
+# 2. Add to .env
+echo 'GOOGLE_APPLICATION_CREDENTIALS=agent-local-dev-sa-key.json' >> .env
+```
+
+The `*-sa-key.json` pattern is gitignored. Never commit key files.
+
+**Option B — Application Default Credentials.** Run
+`gcloud auth application-default login`. Credentials expire periodically and
+require re-authentication.
+
 ## Vendor sync
 
 Bill.com vendor metadata is synced into the Firestore `vendors` collection.
