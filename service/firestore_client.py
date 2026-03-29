@@ -468,6 +468,60 @@ def query_spend_by_vendor_ids(
     return results
 
 
+APPS_COLLECTION = "apps"
+
+
+def list_apps() -> list[dict]:
+    """Return all app definitions, sorted by type then sort_order."""
+    db = get_db()
+    results = []
+    for doc in db.collection(APPS_COLLECTION).stream():
+        data = doc.to_dict()
+        data["id"] = doc.id
+        results.append(data)
+    results.sort(key=lambda a: (0 if a.get("type") == "app" else 1, a.get("sort_order", 99)))
+    return results
+
+
+def get_app(app_id: str) -> dict | None:
+    """Fetch a single app definition by document ID."""
+    db = get_db()
+    snap = db.collection(APPS_COLLECTION).document(app_id).get()
+    if not snap.exists:
+        return None
+    data = snap.to_dict()
+    data["id"] = snap.id
+    return data
+
+
+def update_app(
+    app_id: str,
+    label: str | None = None,
+    granting_roles: list[str] | None = None,
+    sort_order: int | None = None,
+) -> dict:
+    """Update an app definition. Only non-None fields are written.
+
+    Raises ValueError if the app does not exist.
+    """
+    db = get_db()
+    ref = db.collection(APPS_COLLECTION).document(app_id)
+    if not ref.get().exists:
+        raise ValueError(f"App '{app_id}' not found")
+    updates: dict = {}
+    if label is not None:
+        updates["label"] = label
+    if granting_roles is not None:
+        updates["granting_roles"] = granting_roles
+    if sort_order is not None:
+        updates["sort_order"] = sort_order
+    if updates:
+        ref.update(updates)
+    data = ref.get().to_dict()
+    data["id"] = app_id
+    return data
+
+
 def search_vendors(
     query: str | None = None,
     filters: dict | None = None,
