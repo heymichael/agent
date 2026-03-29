@@ -229,6 +229,31 @@ def delete_user_endpoint(email: str, caller: dict = Depends(get_verified_user)):
     return {"ok": True, "deleted": email}
 
 
+class UpdateAppRequest(BaseModel):
+    label: str | None = None
+    granting_roles: list[str] | None = None
+    sort_order: int | None = None
+
+
+@app.get("/apps")
+def list_apps(caller: dict = Depends(get_verified_user)):
+    return firestore_client.list_apps()
+
+
+@app.patch("/apps/{app_id}")
+def update_app(app_id: str, req: UpdateAppRequest, caller: dict = Depends(get_verified_user)):
+    require_admin(caller)
+    try:
+        return firestore_client.update_app(
+            app_id,
+            label=req.label,
+            granting_roles=req.granting_roles,
+            sort_order=req.sort_order,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.get("/vendors")
 def list_vendors(caller: dict = Depends(get_verified_user)):
     vendors = firestore_client.list_vendors()
