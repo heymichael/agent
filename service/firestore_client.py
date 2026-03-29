@@ -460,6 +460,7 @@ def query_spend_by_vendor_ids(
             continue
         results.append({
             "vendor": data.get("vendorName") or vid,
+            "vendorId": vid,
             "month": data.get("month", ""),
             "amount": float(data.get("totalAmount", 0)),
         })

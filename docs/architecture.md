@@ -235,6 +235,7 @@ The `/health` endpoint is unauthenticated.
 |---|---|---|---|
 | `POST` | `/chat` | Required | Chat with the agent (tool-calling loop) |
 | `GET` | `/health` | None | Health check |
+| `GET` | `/spend` | Required | Monthly spend by vendor. `vendor_ids` optional — omit to return all accessible vendors |
 | `GET` | `/vendors` | Required | List all vendors with full field set |
 | `DELETE` | `/vendors/{vendor_id}` | Required | Delete a vendor (blocked for Bill.com-synced vendors) |
 | `PATCH` | `/vendors/{vendor_id}` | Required | Partial update a vendor |
@@ -243,6 +244,26 @@ The `/health` endpoint is unauthenticated.
 | `POST` | `/users` | `admin` | Create a new user |
 | `PATCH` | `/users/{email}` | `admin` or `finance_admin` | Update user roles/name (`admin`) or access fields (`finance_admin`) |
 | `DELETE` | `/users/{email}` | `admin` | Delete a user |
+
+## Spend visualization threshold
+
+The `GET /spend` endpoint accepts an optional `vendor_ids` query parameter.
+When omitted, it returns spend for all vendors the caller has access to. This
+lets the frontend avoid HTTP 414 errors when the selected vendor set is large.
+
+The **vendors** frontend applies a two-tier threshold (both set to **30**):
+
+1. **URL threshold** — if more than 30 vendor IDs would be sent, the frontend
+   omits `vendor_ids` from the request and filters the response client-side to
+   match the user's selection.
+2. **Visualization threshold** — after fetching, the frontend ranks vendors by
+   total spend across the requested date range. Only the top 30 are shown
+   individually; the rest are aggregated into an **"Other"** bucket displayed
+   in neutral gray (`#b0b0b0`).
+
+Both thresholds are defined in the `vendors` app:
+- URL threshold: `VENDOR_URL_THRESHOLD` in `src/fetchVendorSpend.ts`
+- Visualization grouping: `MAX_VENDORS` in `src/groupSpendRows.ts`
 
 ## MCP server (standalone)
 
