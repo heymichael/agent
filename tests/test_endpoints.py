@@ -51,6 +51,65 @@ def _access_ctx(roles=None, departments=None, vendor_ids=None, denied=None):
     }
 
 
+# ── GET /me ──────────────────────────────────────────────────────────────
+
+SAMPLE_USER = {
+    "email": "test@example.com",
+    "firstName": "Test",
+    "lastName": "User",
+    "roles": ["viewer"],
+    "allowedDepartments": [],
+    "allowedVendorIds": [],
+    "deniedVendorIds": [],
+    "allowedVendors": [],
+}
+
+
+class TestGetCurrentUser:
+
+    def teardown_method(self):
+        _teardown()
+
+    @patch.object(firestore_client, "get_user")
+    def test_returns_current_user(self, mock_get):
+        mock_get.return_value = SAMPLE_USER
+        client = _make_client("test@example.com")
+
+        resp = client.get("/me")
+
+        assert resp.status_code == 200
+        assert resp.json()["email"] == "test@example.com"
+        assert resp.json()["roles"] == ["viewer"]
+        mock_get.assert_called_once_with("test@example.com")
+
+    @patch.object(firestore_client, "get_user")
+    def test_normalizes_email(self, mock_get):
+        mock_get.return_value = SAMPLE_USER
+        client = _make_client("  Test@Example.COM  ")
+
+        resp = client.get("/me")
+
+        assert resp.status_code == 200
+        mock_get.assert_called_once_with("test@example.com")
+
+    @patch.object(firestore_client, "get_user")
+    def test_user_not_found_returns_404(self, mock_get):
+        mock_get.return_value = None
+        client = _make_client("nobody@example.com")
+
+        resp = client.get("/me")
+
+        assert resp.status_code == 404
+
+    def test_unauthenticated_returns_401(self):
+        app.dependency_overrides.clear()
+        client = TestClient(app)
+
+        resp = client.get("/me")
+
+        assert resp.status_code == 401
+
+
 # ── GET /vendors ─────────────────────────────────────────────────────────
 
 class TestListVendors:

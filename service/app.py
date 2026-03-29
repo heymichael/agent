@@ -163,6 +163,17 @@ def list_users(
     return firestore_client.list_users(role if role else None)
 
 
+@app.get("/me")
+def get_current_user(caller: dict = Depends(get_verified_user)):
+    email = caller.get("email", "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=403, detail="No email in token")
+    user = firestore_client.get_user(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User doc not found")
+    return user
+
+
 @app.get("/users/{email}")
 def get_user(email: str, caller: dict = Depends(get_verified_user)):
     user = firestore_client.get_user(email)
