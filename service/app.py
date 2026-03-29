@@ -240,13 +240,18 @@ def update_vendor(vendor_id: str, updates: dict, caller: dict = Depends(get_veri
 
 @app.get("/spend")
 def get_spend(
-    vendor_ids: list[str] = Query(..., alias="vendor_ids"),
+    vendor_ids: list[str] | None = Query(default=None, alias="vendor_ids"),
     from_month: str = Query(..., alias="from"),
     to_month: str = Query(..., alias="to"),
     caller: dict = Depends(get_verified_user),
 ):
     allowed = _resolve_caller_access(caller)
-    if allowed is not None:
+    if vendor_ids is None or len(vendor_ids) == 0:
+        if allowed is not None:
+            vendor_ids = list(allowed)
+        else:
+            vendor_ids = [doc.id for doc in firestore_client.get_db().collection("vendors").select([]).stream()]
+    elif allowed is not None:
         vendor_ids = [v for v in vendor_ids if v in allowed]
     data = firestore_client.query_spend_by_vendor_ids(vendor_ids, from_month, to_month)
     return {"data": data}
