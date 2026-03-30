@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import uuid
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -198,11 +199,20 @@ def delete_vendor(vendor_id: str) -> bool:
         return cur.fetchone() is not None
 
 
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+        return True
+    except ValueError:
+        return False
+
+
 def resolve_vendor_by_identifier(identifier: str) -> dict | None:
     """Resolve a vendor by UUID, name, or slug. Returns the full API-shaped dict or None."""
-    result = get_vendor(identifier)
-    if result:
-        return result
+    if _is_uuid(identifier):
+        result = get_vendor(identifier)
+        if result:
+            return result
     result = find_vendor_by_name(identifier)
     if result:
         return result
