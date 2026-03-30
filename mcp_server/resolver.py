@@ -4,7 +4,8 @@ Vendor resolution has been consolidated into
 ``service.pg_client.resolve_vendor_by_identifier``.
 
 resolve_filter() validates dynamic filter fields (department, owner) against
-distinct values currently in Postgres.
+distinct values currently in Postgres, with fuzzy matching via
+``service.resolve.resolve_canonical_value``.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from service.pg_client import get_pool
+from service.resolve import resolve_canonical_value
 
 
 # ── Filter validation ────────────────────────────────────────────────────
@@ -39,6 +41,28 @@ FIELD_TO_SQL = {
 }
 
 
+def _resolve_with_candidates(field: str, value: Any, candidates: list[str]) -> dict:
+    """Resolve a value against a list of canonical candidates using fuzzy matching."""
+    result = resolve_canonical_value(str(value), candidates)
+    if not result:
+        return {
+            "status": "invalid_filter",
+            "field": field,
+            "provided": value,
+            "valid_values": sorted(candidates),
+        }
+    if result.match in ("exact", "close"):
+        return {"status": "ok", "field": field, "value": result.value}
+    return {
+        "status": "did_you_mean",
+        "field": field,
+        "provided": value,
+        "suggestion": result.value,
+        "alternatives": result.alternatives,
+        "valid_values": sorted(candidates),
+    }
+
+
 def resolve_filter(field: str, value: Any) -> dict:
     """Validate a single filter field+value.
 
@@ -49,16 +73,16 @@ def resolve_filter(field: str, value: Any) -> dict:
     Returns one of::
 
         {"status": "ok", "field": "...", "value": <canonical>}
+        {"status": "did_you_mean", "field": "...", "suggestion": "...", ...}
         {"status": "invalid_filter", "field": "...", "provided": "...", "valid_values": [...]}
     """
     if field in ENUM_FIELDS:
         valid = ENUM_FIELDS[field]
         if value in valid:
             return {"status": "ok", "field": field, "value": value}
-        if isinstance(value, str):
-            for v in valid:
-                if isinstance(v, str) and v.lower() == value.lower():
-                    return {"status": "ok", "field": field, "value": v}
+        str_candidates = [v for v in valid if isinstance(v, str)]
+        if isinstance(value, str) and str_candidates:
+            return _resolve_with_candidates(field, value, str_candidates)
         return {
             "status": "invalid_filter",
             "field": field,
@@ -93,23 +117,9 @@ def _resolve_dynamic_field(field: str, value: Any) -> dict:
             "LEFT JOIN users uo ON uo.id = v.owner_id "
             f"WHERE {sql_col} IS NOT NULL"
         ).fetchall()
-    distinct = {str(r["val"]) for r in rows}
+    candidates = [str(r["val"]) for r in rows]
 
-    value_str = str(value)
-
-    if value_str in distinct:
-        return {"status": "ok", "field": field, "value": value_str}
-
-    for dv in distinct:
-        if dv.lower() == value_str.lower():
-            return {"status": "ok", "field": field, "value": dv}
-
-    return {
-        "status": "invalid_filter",
-        "field": field,
-        "provided": value,
-        "valid_values": sorted(distinct),
-    }
+    return _resolve_with_candidates(field, value, candidates)
 
 
 def validate_filters(filters: dict | None) -> dict | None:

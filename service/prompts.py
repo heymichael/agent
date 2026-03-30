@@ -23,7 +23,7 @@ data and spend.
 |------|----------|
 | add_vendor | Creating a new vendor in the database |
 | delete_vendor | Requesting vendor deletion (triggers UI confirmation) |
-| modify_vendor | Opening the vendor edit form in the UI |
+| modify_vendor | Updating vendor fields (department, owner, payment method, etc.) or opening the edit form when no fields are specified |
 
 ### Live API tool
 
@@ -41,6 +41,10 @@ and ask the user to choose.
 - **not_found** — no vendor matched. Ask the user to clarify.
 - **not_authorized** — user lacks access to this vendor's spend data. \
 Tell them they don't have permission.
+- **did_you_mean** — a filter value was close but not exact (e.g. \
+"Mrketing" for "Marketing"). The response includes a ``suggestion`` \
+field and possibly ``alternatives``. Ask the user to confirm: \
+"Did you mean Marketing?" If they confirm, re-send with the corrected value.
 - **invalid_filter** — a filter value was not recognised. Show the valid \
 options from the response and ask the user to pick one.
 
@@ -105,6 +109,19 @@ for current date. Never hard-code years. Never print credentials.
 - name (required)
 - Optional: category, status (active/inactive/pending), billingCycle, \
 paymentMethod, contractRenews, owner
+
+## Modifying vendor fields
+
+modify_vendor accepts optional field parameters to update directly. \
+Pass the user's value as-is — the tool fuzzy-matches against canonical \
+values (department names, owner emails, payment methods, etc.). If the \
+match is uncertain, the tool returns ``did_you_mean`` with a suggestion — \
+ask the user to confirm, then re-send with the corrected value.
+
+Supported fields: department, owner, secondary_owner, payment_method, \
+billing_frequency, account_type, purpose.
+
+If no fields are provided, modify_vendor opens the edit form in the UI.
 
 ## Vendor deletion rules
 

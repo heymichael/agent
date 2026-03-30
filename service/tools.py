@@ -241,13 +241,45 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "modify_vendor",
-            "description": "Open the vendor edit modal in the UI. Does not update fields directly — opens the edit form.",
+            "description": (
+                "Update vendor fields directly, or open the edit form if no "
+                "fields are provided. When fields are provided, the update is "
+                "applied immediately without opening the form."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "identifier": {
                         "type": "string",
                         "description": "Vendor name or ID to edit",
+                    },
+                    "department": {
+                        "type": "string",
+                        "description": "Department name (fuzzy-matched against canonical values)",
+                    },
+                    "owner": {
+                        "type": "string",
+                        "description": "Owner email (fuzzy-matched against canonical values)",
+                    },
+                    "secondary_owner": {
+                        "type": "string",
+                        "description": "Secondary owner email (fuzzy-matched against canonical values)",
+                    },
+                    "payment_method": {
+                        "type": "string",
+                        "description": "Payment method: Check, ACH, CreditCard, Wire, PayPal",
+                    },
+                    "billing_frequency": {
+                        "type": "string",
+                        "description": "Billing frequency: monthly, annual, usage-based",
+                    },
+                    "account_type": {
+                        "type": "string",
+                        "description": "Account type: Business, Individual",
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "description": "Vendor purpose/description",
                     },
                 },
                 "required": ["identifier"],
@@ -378,17 +410,109 @@ def execute_delete_vendor(args: dict, caller_email: str = "") -> str:
     })
 
 
+def _resolve_field_value(field_name: str, value: str, candidates: list[str]) -> dict | None:
+    """Resolve a field value against canonical candidates.
+
+    Returns None on success (value is resolved in-place via the returned
+    canonical string), or an error dict to return to the caller.
+    """
+    from service.resolve import resolve_canonical_value
+    match = resolve_canonical_value(value, candidates)
+    if not match:
+        return {"ok": False, "error": f"Unknown {field_name}: '{value}'", "valid_values": sorted(candidates)}
+    if match.match in ("exact", "close"):
+        return None  # caller reads match.value
+    return {
+        "ok": False,
+        "did_you_mean": match.value,
+        "field": field_name,
+        "provided": value,
+        "alternatives": match.alternatives,
+    }
+
+
+_FK_FIELD_RESOLVERS = {
+    "department": lambda: [(d["name"], d["id"]) for d in pg_client.list_departments()],
+    "owner": lambda: [(u["email"], u["id"]) for u in pg_client.list_users()],
+    "secondary_owner": lambda: [(u["email"], u["id"]) for u in pg_client.list_users()],
+}
+
+_ENUM_FIELD_VALUES = {
+    "payment_method": ["Check", "ACH", "CreditCard", "Wire", "PayPal"],
+    "billing_frequency": ["monthly", "annual", "usage-based"],
+    "account_type": ["Business", "Individual"],
+}
+
+_DIRECT_FIELDS = {"purpose"}
+
+
 def execute_modify_vendor(args: dict, caller_email: str = "") -> str:
     result = pg_client.resolve_vendor_by_identifier(args["identifier"])
     if not result:
         return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
     vendor = result.vendor
-    return json.dumps({
-        "ok": True,
-        **_match_response(result),
-        "action": "open_edit",
-        "vendor": {"id": vendor["id"], "name": vendor.get("name", vendor["id"])},
-    })
+
+    field_args = {k: v for k, v in args.items() if k != "identifier" and v is not None}
+    if not field_args:
+        return json.dumps({
+            "ok": True,
+            **_match_response(result),
+            "action": "open_edit",
+            "vendor": {"id": vendor["id"], "name": vendor.get("name", vendor["id"])},
+        })
+
+    from service.resolve import resolve_canonical_value
+    updates = {}
+
+    for field, value in field_args.items():
+        if field in _FK_FIELD_RESOLVERS:
+            pairs = _FK_FIELD_RESOLVERS[field]()
+            candidates = [name for name, _ in pairs]
+            match = resolve_canonical_value(value, candidates)
+            if not match:
+                return json.dumps({
+                    "ok": False, "error": f"Unknown {field}: '{value}'",
+                    "valid_values": sorted(candidates),
+                })
+            if match.match not in ("exact", "close"):
+                return json.dumps({
+                    "ok": False, "did_you_mean": match.value,
+                    "field": field, "provided": value,
+                    "alternatives": match.alternatives,
+                })
+            id_map = {name: uid for name, uid in pairs}
+            updates[f"{field}_id"] = id_map[match.value]
+
+        elif field in _ENUM_FIELD_VALUES:
+            candidates = _ENUM_FIELD_VALUES[field]
+            match = resolve_canonical_value(value, candidates)
+            if not match:
+                return json.dumps({
+                    "ok": False, "error": f"Unknown {field}: '{value}'",
+                    "valid_values": sorted(candidates),
+                })
+            if match.match not in ("exact", "close"):
+                return json.dumps({
+                    "ok": False, "did_you_mean": match.value,
+                    "field": field, "provided": value,
+                    "alternatives": match.alternatives,
+                })
+            updates[field] = match.value
+
+        elif field in _DIRECT_FIELDS:
+            updates[field] = value
+
+    try:
+        updated = pg_client.update_vendor(vendor["id"], updates)
+        return json.dumps({
+            "ok": True,
+            **_match_response(result),
+            "action": "updated",
+            "vendor": {"id": updated["id"], "name": updated.get("name", updated["id"])},
+            "fields_updated": list(field_args.keys()),
+        })
+    except ValueError as exc:
+        return json.dumps({"ok": False, "error": str(exc)})
 
 
 def execute_execute_python(args: dict, caller_email: str = "") -> str:
