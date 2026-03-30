@@ -8,7 +8,7 @@ alwaysApply: true
 This repository is the shared agent service for the haderach platform. It provides a chat backend consumed by frontend chat panels across Haderach apps.
 
 - Keep strict separation of concerns:
-  - This repo owns the agent service implementation, tool definitions, and Firestore CRUD helpers.
+  - This repo owns the agent service implementation, tool definitions, and Postgres CRUD helpers.
   - Platform orchestration, promotion, and cross-app routing checks remain outside this repo.
 - Keep service logic and service tests in this repository; do not add platform orchestration logic here.
 - Keep naming kebab-case for repo/path conventions; use snake_case for Python modules as language convention requires.

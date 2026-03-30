@@ -7,7 +7,7 @@ This service uses Firebase Admin SDK for token verification. All endpoints excep
 1. The frontend obtains an ID token from Firebase Auth (`currentUser.getIdToken()`).
 2. The frontend sends it in the `Authorization` header with every agent API request.
 3. The agent service verifies the token via `firebase_admin.auth.verify_id_token()`.
-4. The verified email from the decoded token is used to load the caller's Firestore user doc and determine their roles and permissions.
+4. The verified email from the decoded token is used to load the caller's Postgres user record and determine their roles and permissions.
 
 ## Rules for adding or modifying endpoints
 

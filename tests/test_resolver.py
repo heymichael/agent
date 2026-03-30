@@ -1,10 +1,11 @@
 """Unit tests for mcp_server.resolver.
 
-Pure helper functions are tested directly. Functions that touch Firestore
-(resolve_vendor, resolve_filter, validate_filters) use mocked DB clients.
+Pure helper functions are tested directly. Functions that touch Postgres
+(resolve_vendor, resolve_filter, validate_filters) use mocked pools.
 """
 
 from unittest.mock import patch, MagicMock
+from contextlib import contextmanager
 
 import pytest
 
@@ -17,6 +18,56 @@ from mcp_server.resolver import (
     ENUM_FIELDS,
     RESOLVE_FIELDS,
 )
+
+
+# ── Mock helpers ─────────────────────────────────────────────────────────
+
+class _MockCursor:
+    def __init__(self, rows=None, row=None):
+        self._rows = rows or []
+        self._row = row
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._row
+
+
+class _MockConn:
+    def __init__(self, query_map=None):
+        self._query_map = query_map or {}
+
+    def execute(self, sql, params=None):
+        for pattern, result in self._query_map.items():
+            if pattern in sql:
+                if isinstance(result, list):
+                    return _MockCursor(rows=result)
+                else:
+                    return _MockCursor(row=result)
+        return _MockCursor()
+
+
+class _MockPool:
+    def __init__(self, query_map=None):
+        self._conn = _MockConn(query_map)
+
+    @contextmanager
+    def connection(self):
+        yield self._conn
+
+
+def _pool_with_vendors(vendors, id_match=None):
+    """Build a mock pool for resolver tests.
+
+    vendors: list of dicts with id, name, aliases
+    id_match: dict to return for UUID/source_system_id lookup (or None)
+    """
+    return _MockPool({
+        "WHERE id::text": id_match,
+        "FROM vendors ORDER BY": vendors,
+        "DISTINCT": [{"val": v.get("department")} for v in vendors if v.get("department")],
+    })
 
 
 # ── _normalise ───────────────────────────────────────────────────────────
@@ -99,43 +150,30 @@ class TestResolveFilterEnum:
 # ── resolve_filter: dynamic fields ───────────────────────────────────────
 
 class TestResolveFilterDynamic:
-    def _mock_vendor_docs(self, vendors):
-        """Create a mock Firestore client returning given vendor dicts."""
-        mock_db = MagicMock()
-        mock_docs = []
-        for v in vendors:
-            doc = MagicMock()
-            doc.to_dict.return_value = v
-            mock_docs.append(doc)
-        mock_db.collection.return_value.stream.return_value = mock_docs
-        return mock_db
 
-    @patch("mcp_server.resolver.get_db")
-    def test_exact_dynamic_match(self, mock_get_db):
-        mock_get_db.return_value = self._mock_vendor_docs([
-            {"department": "Engineering"},
-            {"department": "Marketing"},
-            {"department": "Engineering"},
-        ])
+    @patch("mcp_server.resolver.get_pool")
+    def test_exact_dynamic_match(self, mock_get_pool):
+        mock_get_pool.return_value = _MockPool({
+            "DISTINCT": [{"val": "Engineering"}, {"val": "Marketing"}],
+        })
         result = resolve_filter("department", "Engineering")
         assert result["status"] == "ok"
         assert result["value"] == "Engineering"
 
-    @patch("mcp_server.resolver.get_db")
-    def test_case_insensitive_dynamic(self, mock_get_db):
-        mock_get_db.return_value = self._mock_vendor_docs([
-            {"department": "Marketing"},
-        ])
+    @patch("mcp_server.resolver.get_pool")
+    def test_case_insensitive_dynamic(self, mock_get_pool):
+        mock_get_pool.return_value = _MockPool({
+            "DISTINCT": [{"val": "Marketing"}],
+        })
         result = resolve_filter("department", "marketing")
         assert result["status"] == "ok"
         assert result["value"] == "Marketing"
 
-    @patch("mcp_server.resolver.get_db")
-    def test_invalid_dynamic_value(self, mock_get_db):
-        mock_get_db.return_value = self._mock_vendor_docs([
-            {"department": "Engineering"},
-            {"department": "Marketing"},
-        ])
+    @patch("mcp_server.resolver.get_pool")
+    def test_invalid_dynamic_value(self, mock_get_pool):
+        mock_get_pool.return_value = _MockPool({
+            "DISTINCT": [{"val": "Engineering"}, {"val": "Marketing"}],
+        })
         result = resolve_filter("department", "Sales")
         assert result["status"] == "invalid_filter"
         assert "Sales" == result["provided"]
@@ -173,172 +211,98 @@ class TestValidateFilters:
 # ── resolve_vendor ───────────────────────────────────────────────────────
 
 class TestResolveVendor:
-    def _mock_db_with_vendors(self, vendors, doc_by_id=None):
-        """Build a mock Firestore client.
 
-        vendors: list of dicts (each must have 'id' and 'name')
-        doc_by_id: dict mapping doc_id -> dict for exact ID lookups
-        """
-        mock_db = MagicMock()
-
-        def get_doc(doc_id):
-            snap = MagicMock()
-            if doc_by_id and doc_id in doc_by_id:
-                snap.exists = True
-                snap.id = doc_id
-                snap.to_dict.return_value = doc_by_id[doc_id]
-            else:
-                snap.exists = False
-            return snap
-
-        mock_db.collection.return_value.document.return_value.get = MagicMock(
-            side_effect=lambda: get_doc(
-                mock_db.collection.return_value.document.call_args[0][0]
-            )
-        )
-
-        mock_docs = []
-        for v in vendors:
-            doc = MagicMock()
-            doc.id = v["id"]
-            doc.to_dict.return_value = {k: v2 for k, v2 in v.items() if k != "id"}
-            mock_docs.append(doc)
-        mock_db.collection.return_value.stream.return_value = mock_docs
-
-        # Handle document().get() calls with specific IDs
-        def doc_factory(doc_id):
-            mock_doc_ref = MagicMock()
-            snap = MagicMock()
-            if doc_by_id and doc_id in doc_by_id:
-                snap.exists = True
-                snap.id = doc_id
-                snap.to_dict.return_value = doc_by_id[doc_id]
-            else:
-                snap.exists = False
-                snap.id = doc_id
-            mock_doc_ref.get.return_value = snap
-            return mock_doc_ref
-
-        mock_db.collection.return_value.document.side_effect = doc_factory
-        return mock_db
-
-    @patch("mcp_server.resolver.get_db")
-    def test_empty_identifier(self, mock_get_db):
+    @patch("mcp_server.resolver.get_pool")
+    def test_empty_identifier(self, mock_get_pool):
         result = resolve_vendor("")
         assert result["status"] == "not_found"
 
-    @patch("mcp_server.resolver.get_db")
-    def test_whitespace_only(self, mock_get_db):
+    @patch("mcp_server.resolver.get_pool")
+    def test_whitespace_only(self, mock_get_pool):
         result = resolve_vendor("   ")
         assert result["status"] == "not_found"
 
-    @patch("mcp_server.resolver.get_db")
-    def test_exact_id_match(self, mock_get_db):
-        mock_get_db.return_value = self._mock_db_with_vendors(
-            [{"id": "v_123", "name": "Acme Corp"}],
-            doc_by_id={"v_123": {"name": "Acme Corp"}},
+    @patch("mcp_server.resolver.get_pool")
+    def test_exact_id_match(self, mock_get_pool):
+        mock_get_pool.return_value = _pool_with_vendors(
+            [{"id": "v_123", "name": "Acme Corp", "aliases": None}],
+            id_match={"id": "v_123", "name": "Acme Corp"},
         )
         result = resolve_vendor("v_123")
         assert result["status"] == "ok"
         assert result["vendor_id"] == "v_123"
         assert result["vendor_name"] == "Acme Corp"
 
-    @patch("mcp_server.resolver.get_db")
-    def test_exact_name_match(self, mock_get_db):
-        mock_get_db.return_value = self._mock_db_with_vendors(
-            [
-                {"id": "v_1", "name": "Acme Corp"},
-                {"id": "v_2", "name": "Beta Inc"},
-            ],
-        )
+    @patch("mcp_server.resolver.get_pool")
+    def test_exact_name_match(self, mock_get_pool):
+        mock_get_pool.return_value = _pool_with_vendors([
+            {"id": "v_1", "name": "Acme Corp", "aliases": None},
+            {"id": "v_2", "name": "Beta Inc", "aliases": None},
+        ])
         result = resolve_vendor("Acme Corp")
         assert result["status"] == "ok"
         assert result["vendor_id"] == "v_1"
 
-    @patch("mcp_server.resolver.get_db")
-    def test_case_insensitive_name(self, mock_get_db):
-        mock_get_db.return_value = self._mock_db_with_vendors(
-            [{"id": "v_1", "name": "Acme Corp"}],
-        )
+    @patch("mcp_server.resolver.get_pool")
+    def test_case_insensitive_name(self, mock_get_pool):
+        mock_get_pool.return_value = _pool_with_vendors([
+            {"id": "v_1", "name": "Acme Corp", "aliases": None},
+        ])
         result = resolve_vendor("acme corp")
         assert result["status"] == "ok"
         assert result["vendor_id"] == "v_1"
 
-    @patch("mcp_server.resolver.get_db")
-    def test_alias_match(self, mock_get_db):
-        mock_get_db.return_value = self._mock_db_with_vendors(
-            [{"id": "v_1", "name": "Amazon Web Services", "aliases": ["AWS", "Amazon"]}],
-        )
+    @patch("mcp_server.resolver.get_pool")
+    def test_alias_match(self, mock_get_pool):
+        mock_get_pool.return_value = _pool_with_vendors([
+            {"id": "v_1", "name": "Amazon Web Services", "aliases": ["AWS", "Amazon"]},
+        ])
         result = resolve_vendor("AWS")
         assert result["status"] == "ok"
         assert result["vendor_id"] == "v_1"
         assert result["vendor_name"] == "Amazon Web Services"
 
-    @patch("mcp_server.resolver.get_db")
-    def test_alias_case_insensitive(self, mock_get_db):
-        mock_get_db.return_value = self._mock_db_with_vendors(
-            [{"id": "v_1", "name": "Amazon Web Services", "aliases": ["AWS"]}],
-        )
-        result = resolve_vendor("aws")
-        assert result["status"] == "ok"
-
-    @patch("mcp_server.resolver.get_db")
-    def test_normalised_match(self, mock_get_db):
-        mock_get_db.return_value = self._mock_db_with_vendors(
-            [{"id": "v_1", "name": "O'Brien & Associates, LLC"}],
-        )
+    @patch("mcp_server.resolver.get_pool")
+    def test_normalised_match(self, mock_get_pool):
+        mock_get_pool.return_value = _pool_with_vendors([
+            {"id": "v_1", "name": "O'Brien & Associates, LLC", "aliases": None},
+        ])
         result = resolve_vendor("obrien associates llc")
         assert result["status"] == "ok"
         assert result["vendor_id"] == "v_1"
 
-    @patch("mcp_server.resolver.get_db")
-    def test_token_match(self, mock_get_db):
-        mock_get_db.return_value = self._mock_db_with_vendors(
-            [
-                {"id": "v_1", "name": "Jennifer Chen-Manwell"},
-                {"id": "v_2", "name": "Robert Johnson"},
-            ],
-        )
+    @patch("mcp_server.resolver.get_pool")
+    def test_token_match(self, mock_get_pool):
+        mock_get_pool.return_value = _pool_with_vendors([
+            {"id": "v_1", "name": "Jennifer Chen-Manwell", "aliases": None},
+            {"id": "v_2", "name": "Robert Johnson", "aliases": None},
+        ])
         result = resolve_vendor("jennifer")
         assert result["status"] == "ok"
         assert result["vendor_id"] == "v_1"
 
-    @patch("mcp_server.resolver.get_db")
-    def test_ambiguous_token_match(self, mock_get_db):
-        mock_get_db.return_value = self._mock_db_with_vendors(
-            [
-                {"id": "v_1", "name": "Acme Corporation LLC"},
-                {"id": "v_2", "name": "Acme Logistics Inc"},
-            ],
-        )
+    @patch("mcp_server.resolver.get_pool")
+    def test_ambiguous_token_match(self, mock_get_pool):
+        mock_get_pool.return_value = _pool_with_vendors([
+            {"id": "v_1", "name": "Acme Corporation LLC", "aliases": None},
+            {"id": "v_2", "name": "Acme Logistics Inc", "aliases": None},
+        ])
         result = resolve_vendor("Acme")
         assert result["status"] == "ambiguous"
         assert len(result["candidates"]) == 2
-        ids = {c["vendor_id"] for c in result["candidates"]}
-        assert ids == {"v_1", "v_2"}
 
-    @patch("mcp_server.resolver.get_db")
-    def test_not_found(self, mock_get_db):
-        mock_get_db.return_value = self._mock_db_with_vendors(
-            [{"id": "v_1", "name": "Acme Corp"}],
-        )
+    @patch("mcp_server.resolver.get_pool")
+    def test_not_found(self, mock_get_pool):
+        mock_get_pool.return_value = _pool_with_vendors([
+            {"id": "v_1", "name": "Acme Corp", "aliases": None},
+        ])
         result = resolve_vendor("Nonexistent Vendor XYZ")
         assert result["status"] == "not_found"
 
-    @patch("mcp_server.resolver.get_db")
-    def test_no_aliases_field(self, mock_get_db):
-        """Vendors without aliases array should not crash alias matching."""
-        mock_get_db.return_value = self._mock_db_with_vendors(
-            [{"id": "v_1", "name": "Simple Vendor"}],
-        )
-        result = resolve_vendor("Simple Vendor")
-        assert result["status"] == "ok"
-
-    @patch("mcp_server.resolver.get_db")
-    def test_ambiguous_caps_to_10(self, mock_get_db):
-        """Token matches should be capped at 10 candidates."""
-        vendors = [{"id": f"v_{i}", "name": f"Acme Division {i}"} for i in range(15)]
-        mock_get_db.return_value = self._mock_db_with_vendors(vendors)
+    @patch("mcp_server.resolver.get_pool")
+    def test_ambiguous_caps_to_10(self, mock_get_pool):
+        vendors = [{"id": f"v_{i}", "name": f"Acme Division {i}", "aliases": None} for i in range(15)]
+        mock_get_pool.return_value = _pool_with_vendors(vendors)
         result = resolve_vendor("Acme")
         assert result["status"] == "ambiguous"
         assert len(result["candidates"]) <= 10

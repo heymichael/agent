@@ -1,11 +1,13 @@
-"""Nightly sync: AWS Cost Explorer → Firestore vendor_spend collection.
+"""Nightly sync: AWS Cost Explorer → Postgres vendor_monthly_spend table.
 
 Calls the AWS Cost Explorer API to fetch monthly spend for the last 12
-months, denormalizes vendor metadata from the vendors collection, and
-writes monthly spend summaries to the vendor_spend collection.
+months, ensures the 'aws' vendor row exists, and upserts monthly spend
+summaries into vendor_monthly_spend.
 
-Idempotent: each run overwrites the spend docs for all months returned
-by the API. Doc IDs are aws_{YYYY-MM}.
+No denormalization — vendor metadata lives only on the vendors table.
+
+Idempotent: each run overwrites spend for all months returned by the API
+via ON CONFLICT ... DO UPDATE.
 
 Usage:
     python -m service.sync_aws_spend
@@ -15,43 +17,32 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timezone
-from dateutil.relativedelta import relativedelta
+from datetime import date, datetime, timezone
 
 import boto3
+from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
-from google.cloud import firestore
 
 load_dotenv(interpolate=False)
+
+from .pg_client import get_pool
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-VENDOR_SPEND_COLLECTION = "vendor_spend"
-VENDORS_COLLECTION = "vendors"
-AWS_VENDOR_DOC_ID = "aws"
-
-DENORMALIZED_FIELDS = [
-    "paymentMethod",
-    "billingFrequency",
-    "department",
-    "owner",
-    "track1099",
-    "accountType",
-    "purpose",
-    "spendType",
-    "hide",
-]
+AWS_SOURCE_SYSTEM = "aws-ce"
+AWS_SOURCE_SYSTEM_ID = "aws"
+AWS_VENDOR_NAME = "AWS"
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _fetch_monthly_costs(months: int = 12) -> list[dict]:
     """Fetch monthly unblended costs from AWS Cost Explorer.
 
-    Returns a list of dicts: [{"month": "YYYY-MM", "totalAmount": float}, ...]
+    Returns a list of dicts: [{"date": date, "totalAmount": float}, ...]
     """
     creds = json.loads(os.environ["VENDOR_AWS_BILLING_CREDENTIALS"])
     ce = boto3.client(
@@ -76,65 +67,66 @@ def _fetch_monthly_costs(months: int = 12) -> list[dict]:
 
     results = []
     for period in response["ResultsByTime"]:
-        month = period["TimePeriod"]["Start"][:7]
+        period_start = period["TimePeriod"]["Start"]
+        parts = period_start.split("-")
+        month_date = date(int(parts[0]), int(parts[1]), 1)
         amount = round(float(period["Total"]["UnblendedCost"]["Amount"]), 2)
-        results.append({"month": month, "totalAmount": amount})
+        results.append({"date": month_date, "totalAmount": amount})
 
     return results
 
 
-def _load_vendor_metadata(db: firestore.Client) -> dict:
-    """Read denormalized fields from the AWS vendor doc."""
-    snap = db.collection(VENDORS_COLLECTION).document(AWS_VENDOR_DOC_ID).get()
-    if not snap.exists:
-        logger.warning("Vendor doc '%s' not found, skipping metadata", AWS_VENDOR_DOC_ID)
-        return {}
+_ENSURE_VENDOR_SQL = """
+    INSERT INTO vendors (source_system, source_system_id, name, synced_at, created_at, modified_at)
+    VALUES (%s, %s, %s, %s, %s, %s)
+    ON CONFLICT (source_system, source_system_id)
+    DO UPDATE SET synced_at = EXCLUDED.synced_at
+    RETURNING id
+"""
 
-    data = snap.to_dict()
-    return {field: data.get(field) for field in DENORMALIZED_FIELDS}
+_UPSERT_SPEND_SQL = """
+    INSERT INTO vendor_monthly_spend (vendor_id, date, total_amount, bill_count, synced_at)
+    VALUES (%s, %s, %s, %s, %s)
+    ON CONFLICT (vendor_id, date)
+    DO UPDATE SET total_amount = EXCLUDED.total_amount,
+                  bill_count   = EXCLUDED.bill_count,
+                  synced_at    = EXCLUDED.synced_at
+"""
 
 
 def sync():
-    """Run the full AWS Cost Explorer → Firestore vendor_spend sync."""
+    """Run the full AWS Cost Explorer → Postgres vendor_monthly_spend sync."""
     start = time.time()
     logger.info("Starting AWS spend sync")
 
     monthly_costs = _fetch_monthly_costs(months=12)
     logger.info("Fetched %d months of cost data from AWS", len(monthly_costs))
 
-    db = firestore.Client()
+    pool = get_pool()
+    now = _now()
 
-    vendor_ref = db.collection(VENDORS_COLLECTION).document(AWS_VENDOR_DOC_ID)
-    vendor_ref.set({"nameLower": "aws-api"}, merge=True)
+    with pool.connection() as conn:
+        row = conn.execute(_ENSURE_VENDOR_SQL, (
+            AWS_SOURCE_SYSTEM,
+            AWS_SOURCE_SYSTEM_ID,
+            AWS_VENDOR_NAME,
+            now, now, now,
+        )).fetchone()
+        vendor_uuid = str(row["id"])
+        logger.info("AWS vendor row: %s", vendor_uuid)
 
-    meta = _load_vendor_metadata(db)
-
-    now = _now_iso()
-    batch = db.batch()
-
-    for cost in monthly_costs:
-        doc_id = f"{AWS_VENDOR_DOC_ID}_{cost['month']}"
-        ref = db.collection(VENDOR_SPEND_COLLECTION).document(doc_id)
-
-        doc = {
-            "vendorId": AWS_VENDOR_DOC_ID,
-            "vendorName": "AWS-API",
-            "month": cost["month"],
-            "totalAmount": cost["totalAmount"],
-            "billCount": 1,
-            "toolCall": "aws-ce",
-            "lastSyncedAt": now,
-        }
-
-        for field in DENORMALIZED_FIELDS:
-            doc[field] = meta.get(field)
-
-        batch.set(ref, doc)
-
-    batch.commit()
+        with conn.cursor() as cur:
+            for cost in monthly_costs:
+                cur.execute(_UPSERT_SPEND_SQL, (
+                    vendor_uuid,
+                    cost["date"],
+                    cost["totalAmount"],
+                    1,
+                    now,
+                ))
 
     elapsed = time.time() - start
-    logger.info("AWS spend sync complete: %d docs written in %.1fs", len(monthly_costs), elapsed)
+    logger.info("AWS spend sync complete: %d rows upserted in %.1fs", len(monthly_costs), elapsed)
 
 
 if __name__ == "__main__":
