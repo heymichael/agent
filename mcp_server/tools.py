@@ -13,14 +13,38 @@ from __future__ import annotations
 
 from typing import Any
 
-from service.pg_client import get_pool, get_vendor
-from .resolver import resolve_vendor, validate_filters, FIELD_TO_SQL
+from service.pg_client import get_pool, get_vendor, resolve_vendor_by_identifier
+from .resolver import validate_filters, FIELD_TO_SQL
 from .period_parser import parse_period, PeriodParseError
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 CallerContext = dict[str, Any] | None
+
+
+def _resolve_or_ambiguous(vendor_input: str) -> dict | None:
+    """Resolve a vendor input, returning an ambiguous/not_found response dict
+    if resolution fails, or None on success (caller reads result from the
+    returned VendorMatch).
+
+    Returns a tuple of (error_response | None, VendorMatch | None).
+    """
+    from service.pg_client import VendorMatch  # avoid circular at module level
+    result = resolve_vendor_by_identifier(vendor_input)
+    if not result:
+        return {"status": "not_found", "message": f"No vendor matched '{vendor_input}'."}, None
+    if result.match == "disambiguate" or (result.match == "fuzzy" and result.alternatives):
+        return {
+            "status": "ambiguous",
+            "candidates": [
+                {"vendor_id": result.vendor["id"], "vendor_name": result.vendor.get("name", result.vendor["id"])}
+            ] + [
+                {"vendor_id": a["id"], "vendor_name": a.get("name", a["id"])}
+                for a in result.alternatives
+            ],
+        }, None
+    return None, result
 
 _SPEND_BASE_JOIN = """
     FROM vendor_monthly_spend s
@@ -140,19 +164,16 @@ def handle_vendor_lookup(args: dict, caller_context: CallerContext = None) -> di
     if not vendor_input:
         return {"status": "not_found", "message": "No vendor specified."}
 
-    resolved = resolve_vendor(vendor_input)
-    if resolved["status"] != "ok":
-        return resolved
-
-    vendor = get_vendor(resolved["vendor_id"])
-    if not vendor:
-        return {"status": "not_found", "message": f"Vendor '{resolved['vendor_id']}' not found."}
+    err, result = _resolve_or_ambiguous(vendor_input)
+    if err:
+        return err
 
     return {
         "status": "ok",
-        "vendor_id": resolved["vendor_id"],
-        "vendor_name": resolved["vendor_name"],
-        "data": vendor,
+        "vendor_id": result.vendor["id"],
+        "vendor_name": result.vendor.get("name", result.vendor["id"]),
+        "match": result.match,
+        "data": result.vendor,
     }
 
 
@@ -253,11 +274,11 @@ def handle_spend_by_vendor(args: dict, caller_context: CallerContext = None) -> 
     vendor_id = None
     vendor_name = None
     if vendor_input:
-        resolved = resolve_vendor(vendor_input)
-        if resolved["status"] != "ok":
-            return resolved
-        vendor_id = resolved["vendor_id"]
-        vendor_name = resolved["vendor_name"]
+        err, result = _resolve_or_ambiguous(vendor_input)
+        if err:
+            return err
+        vendor_id = result.vendor["id"]
+        vendor_name = result.vendor.get("name", result.vendor["id"])
 
         auth_err = _check_spend_auth(caller_context, vendor_id, vendor_name)
         if auth_err:
