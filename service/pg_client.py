@@ -147,28 +147,31 @@ def find_vendor_by_name(name: str) -> dict | None:
 
 FUZZY_AUTO_ACCEPT = 0.6
 FUZZY_SUGGEST = 0.25
+SIMILAR_THRESHOLD = 0.4
 
 
-def find_vendor_fuzzy(name: str) -> tuple[dict, float] | None:
-    """Find the closest vendor by trigram similarity (requires pg_trgm).
+def find_vendors_similar(name: str, threshold: float = FUZZY_SUGGEST,
+                         limit: int = 5) -> list[tuple[dict, float]]:
+    """Find vendors by trigram similarity (requires pg_trgm).
 
-    Returns (vendor_dict, similarity_score) or None if nothing scores
-    above FUZZY_SUGGEST.
+    Returns a list of (vendor_dict, similarity_score) tuples sorted by
+    descending score, filtered to scores above *threshold*.
     """
     pool = get_pool()
     with pool.connection() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             f"""SELECT sub.*, similarity(LOWER(sub.name), LOWER(%s)) AS sim_score
                 FROM ({_VENDOR_LIST_SQL}) sub
                 WHERE similarity(LOWER(sub.name), LOWER(%s)) > %s
                 ORDER BY sim_score DESC
-                LIMIT 1""",
-            (name, name, FUZZY_SUGGEST),
-        ).fetchone()
-    if not row:
-        return None
-    score = float(row.pop("sim_score"))
-    return _vendor_row_to_dict(row), score
+                LIMIT %s""",
+            (name, name, threshold, limit),
+        ).fetchall()
+    results = []
+    for row in rows:
+        score = float(row.pop("sim_score"))
+        results.append((_vendor_row_to_dict(row), score))
+    return results
 
 
 def add_vendor(data: dict) -> dict:
@@ -233,32 +236,62 @@ def _is_uuid(value: str) -> bool:
         return False
 
 
-def resolve_vendor_by_identifier(identifier: str) -> tuple[dict, str] | None:
+class VendorMatch:
+    """Result of resolve_vendor_by_identifier."""
+    __slots__ = ("vendor", "match", "alternatives")
+
+    def __init__(self, vendor: dict, match: str,
+                 alternatives: list[dict] | None = None):
+        self.vendor = vendor
+        self.match = match
+        self.alternatives = alternatives or []
+
+
+def resolve_vendor_by_identifier(identifier: str) -> VendorMatch | None:
     """Resolve a vendor by UUID, name, slug, or fuzzy match.
 
-    Returns (vendor_dict, match_type) where match_type is:
-      "exact"  — UUID or exact name hit
-      "close"  — fuzzy score >= FUZZY_AUTO_ACCEPT (safe to proceed)
-      "fuzzy"  — fuzzy score >= FUZZY_SUGGEST (ask user to confirm)
-    Returns None if nothing matches.
+    Returns a VendorMatch with:
+      vendor       — best-matching vendor dict
+      match        — "exact", "close", or "fuzzy"
+      alternatives — other similar vendors the user might have meant
+
+    When alternatives are present, the caller should confirm even on
+    exact matches (e.g., "Interexy" vs "Interexy LLC").
     """
+    vendor = None
+    match_type = None
+
     if _is_uuid(identifier):
-        result = get_vendor(identifier)
-        if result:
-            return result, "exact"
-    result = find_vendor_by_name(identifier)
-    if result:
-        return result, "exact"
-    slug = _slugify(identifier)
-    if slug != identifier:
-        result = find_vendor_by_name(slug)
-        if result:
-            return result, "exact"
-    fuzzy = find_vendor_fuzzy(identifier)
-    if fuzzy:
-        vendor, score = fuzzy
-        return vendor, "close" if score >= FUZZY_AUTO_ACCEPT else "fuzzy"
-    return None
+        vendor = get_vendor(identifier)
+        if vendor:
+            return VendorMatch(vendor, "exact")
+
+    vendor = find_vendor_by_name(identifier)
+    if vendor:
+        match_type = "exact"
+    else:
+        slug = _slugify(identifier)
+        if slug != identifier:
+            vendor = find_vendor_by_name(slug)
+            if vendor:
+                match_type = "exact"
+
+    if not vendor:
+        similar = find_vendors_similar(identifier)
+        if not similar:
+            return None
+        best, score = similar[0]
+        match_type = "close" if score >= FUZZY_AUTO_ACCEPT else "fuzzy"
+        alternatives = [v for v, _ in similar[1:]]
+        return VendorMatch(best, match_type, alternatives)
+
+    similar = find_vendors_similar(identifier, threshold=SIMILAR_THRESHOLD)
+    alternatives = [
+        v for v, _ in similar if v["id"] != vendor["id"]
+    ]
+    if alternatives:
+        match_type = "disambiguate"
+    return VendorMatch(vendor, match_type, alternatives)
 
 
 def _slugify(name: str) -> str:
