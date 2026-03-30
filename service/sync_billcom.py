@@ -1,8 +1,8 @@
-"""Nightly sync: Bill.com vendors → Firestore vendors collection.
+"""Nightly sync: Bill.com vendors → Postgres vendors table.
 
-Paginates the Bill.com v3 /vendors endpoint and merge-writes each vendor
-into Firestore. Only synced fields are touched — app-managed and contract
-fields are preserved via merge=True.
+Paginates the Bill.com v3 /vendors endpoint and upserts each vendor
+into Postgres. Only synced fields are touched — app-managed and contract
+fields are preserved via ON CONFLICT ... DO UPDATE on synced columns only.
 
 Usage:
     python -m service.sync_billcom
@@ -14,44 +14,22 @@ from datetime import datetime, timezone
 
 import requests
 from dotenv import load_dotenv
-from google.cloud import firestore
 
 load_dotenv(interpolate=False)
 
 from .billcom_auth import billcom_login
+from .pg_client import get_pool
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-VENDORS_COLLECTION = "vendors"
 
-APP_MANAGED_FIELDS = [
-    "owner",
-    "secondaryOwner",
-    "department",
-    "purpose",
-    "spendType",
-    "aliases",
-]
-
-CONTRACT_FIELDS = [
-    "contractStartDate",
-    "contractEndDate",
-    "contractLengthMonths",
-    "autoRenew",
-    "renewalRate",
-    "renewalNoticeDays",
-    "billingFrequency",
-    "terminationTerms",
-]
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _paginate_vendors(base: str, headers: dict) -> list[dict]:
-    """Fetch all vendors from Bill.com, handling pagination correctly."""
+    """Fetch all vendors from Bill.com, handling pagination."""
     vendors: list[dict] = []
     next_page = None
 
@@ -77,23 +55,22 @@ def _paginate_vendors(base: str, headers: dict) -> list[dict]:
     return vendors
 
 
-def _extract_synced_fields(vendor: dict) -> dict:
-    """Extract the fields we sync from a Bill.com vendor object."""
-    return {
-        "id": vendor["id"],
-        "name": vendor.get("name", ""),
-        "billcomId": vendor["id"],
-        "nameLower": vendor.get("name", "").lower(),
-        "paymentMethod": vendor.get("paymentInformation", {}).get("payByType"),
-        "accountType": vendor.get("accountType"),
-        "track1099": vendor.get("additionalInfo", {}).get("track1099", False),
-        "toolCall": "billcom",
-        "lastSyncedAt": _now_iso(),
-    }
+_UPSERT_SQL = """
+    INSERT INTO vendors (source_system, source_system_id, name, payment_method,
+                         account_type, track_1099, synced_at, created_at, modified_at)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (source_system, source_system_id)
+    DO UPDATE SET name           = EXCLUDED.name,
+                  payment_method = EXCLUDED.payment_method,
+                  account_type   = EXCLUDED.account_type,
+                  track_1099     = EXCLUDED.track_1099,
+                  synced_at      = EXCLUDED.synced_at,
+                  modified_at    = EXCLUDED.modified_at
+"""
 
 
 def sync():
-    """Run the full Bill.com → Firestore vendor sync."""
+    """Run the full Bill.com → Postgres vendor sync."""
     start = time.time()
     logger.info("Starting Bill.com vendor sync")
 
@@ -103,31 +80,32 @@ def sync():
     vendors = _paginate_vendors(base, headers)
     logger.info("Fetched %d vendors from Bill.com in %.1fs", len(vendors), time.time() - start)
 
-    db = firestore.Client()
+    pool = get_pool()
+    now = _now()
     written = 0
-    batch = db.batch()
-    batch_size = 0
 
-    for vendor in vendors:
-        doc_id = vendor["id"]
-        ref = db.collection(VENDORS_COLLECTION).document(doc_id)
-        synced = _extract_synced_fields(vendor)
-        batch.set(ref, synced, merge=True)
-        batch_size += 1
-        written += 1
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            for vendor in vendors:
+                payment_info = vendor.get("paymentInformation") or {}
+                cur.execute(_UPSERT_SQL, (
+                    "billcom",
+                    vendor["id"],
+                    vendor.get("name", ""),
+                    payment_info.get("payByType"),
+                    vendor.get("accountType"),
+                    vendor.get("additionalInfo", {}).get("track1099", False),
+                    now,
+                    now,
+                    now,
+                ))
+                written += 1
 
-        if batch_size >= 400:
-            batch.commit()
-            logger.info("Committed batch of %d (total %d/%d)", batch_size, written, len(vendors))
-            batch = db.batch()
-            batch_size = 0
-
-    if batch_size > 0:
-        batch.commit()
-        logger.info("Committed final batch of %d", batch_size)
+                if written % 100 == 0:
+                    logger.info("  upserted %d/%d vendors", written, len(vendors))
 
     elapsed = time.time() - start
-    logger.info("Sync complete: %d vendors written in %.1fs", written, elapsed)
+    logger.info("Sync complete: %d vendors upserted in %.1fs", written, elapsed)
 
 
 if __name__ == "__main__":

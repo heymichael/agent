@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Seed the Firestore `apps` collection from the current hardcoded catalog.
+"""Seed the Postgres `apps` and `app_granting_roles` tables.
 
 Usage:
     cd agent
     source .venv/bin/activate
-    python scripts/seed_apps.py [--dry-run]
+    DATABASE_URL="postgresql://..." python scripts/seed_apps.py [--dry-run]
 """
 
 import argparse
@@ -16,11 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dotenv import load_dotenv
 load_dotenv(interpolate=False)
 
-from google.cloud import firestore
+from service.pg_client import get_pool
 
 APPS = [
     {
-        "id": "card",
+        "slug": "card",
         "label": "Card",
         "path": "/card/",
         "type": "app",
@@ -28,7 +28,7 @@ APPS = [
         "sort_order": 1,
     },
     {
-        "id": "stocks",
+        "slug": "stocks",
         "label": "Commodities",
         "path": "/stocks/",
         "type": "app",
@@ -36,7 +36,7 @@ APPS = [
         "sort_order": 2,
     },
     {
-        "id": "vendors",
+        "slug": "vendors",
         "label": "Vendors",
         "path": "/vendors/",
         "type": "app",
@@ -44,7 +44,7 @@ APPS = [
         "sort_order": 3,
     },
     {
-        "id": "system_administration",
+        "slug": "system_administration",
         "label": "System",
         "path": "/admin/system/",
         "type": "admin",
@@ -52,7 +52,7 @@ APPS = [
         "sort_order": 1,
     },
     {
-        "id": "vendor_administration",
+        "slug": "vendor_administration",
         "label": "Vendors",
         "path": "/admin/vendors/",
         "type": "admin",
@@ -63,30 +63,44 @@ APPS = [
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Seed Firestore apps collection")
+    parser = argparse.ArgumentParser(description="Seed Postgres apps table")
     parser.add_argument("--dry-run", action="store_true", help="Print without writing")
     args = parser.parse_args()
 
-    db = firestore.Client()
-    collection = db.collection("apps")
+    if args.dry_run:
+        for app in APPS:
+            print(f"[dry-run] Would upsert app '{app['slug']}': {app}")
+        print("\nDry run complete — no writes made.")
+        return
 
-    for app in APPS:
-        app_id = app["id"]
-        doc_data = {k: v for k, v in app.items() if k != "id"}
+    pool = get_pool()
+    with pool.connection() as conn:
+        for app in APPS:
+            row = conn.execute(
+                """INSERT INTO apps (slug, label, path, type, sort_order, icon)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (slug) DO UPDATE
+                     SET label = EXCLUDED.label,
+                         path = EXCLUDED.path,
+                         type = EXCLUDED.type,
+                         sort_order = EXCLUDED.sort_order
+                   RETURNING id""",
+                (app["slug"], app["label"], app["path"], app["type"], app["sort_order"], None),
+            ).fetchone()
+            app_id = str(row["id"])
 
-        if args.dry_run:
-            print(f"[dry-run] Would write apps/{app_id}: {doc_data}")
-            continue
+            conn.execute("DELETE FROM app_granting_roles WHERE app_id = %s", (app_id,))
+            for role_name in app.get("granting_roles", []):
+                conn.execute(
+                    """INSERT INTO app_granting_roles (app_id, role_id)
+                       SELECT %s, r.id FROM roles r WHERE r.name = %s
+                       ON CONFLICT DO NOTHING""",
+                    (app_id, role_name),
+                )
 
-        ref = collection.document(app_id)
-        existing = ref.get()
-        if existing.exists:
-            print(f"  exists  apps/{app_id} — skipping")
-        else:
-            ref.set(doc_data)
-            print(f"  created apps/{app_id}")
+            print(f"  upserted apps/{app['slug']} ({app_id}) roles={app.get('granting_roles', [])}")
 
-    print("\nDone." if not args.dry_run else "\nDry run complete — no writes made.")
+    print("\nDone.")
 
 
 if __name__ == "__main__":

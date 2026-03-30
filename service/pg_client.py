@@ -1,6 +1,6 @@
 """Postgres database client for all data access.
 
-Replaces firestore_client.py. Uses psycopg3 with a connection pool.
+Postgres database client. Uses psycopg3 with a connection pool.
 All functions preserve the return shapes expected by app.py, service/tools.py,
 and mcp_server/tools.py so callers require only an import swap.
 """
@@ -21,7 +21,7 @@ _pool: ConnectionPool | None = None
 def get_pool() -> ConnectionPool:
     global _pool
     if _pool is None:
-        conninfo = os.environ["POSTGRES_CONNECTION"]
+        conninfo = os.environ["DATABASE_URL"]
         _pool = ConnectionPool(conninfo, min_size=1, max_size=10, kwargs={"row_factory": dict_row})
     return _pool
 
@@ -188,6 +188,20 @@ def delete_vendor(vendor_id: str) -> bool:
     with pool.connection() as conn:
         cur = conn.execute("DELETE FROM vendors WHERE id = %s RETURNING id", (vendor_id,))
         return cur.fetchone() is not None
+
+
+def resolve_vendor_by_identifier(identifier: str) -> dict | None:
+    """Resolve a vendor by UUID, name, or slug. Returns the full API-shaped dict or None."""
+    result = get_vendor(identifier)
+    if result:
+        return result
+    result = find_vendor_by_name(identifier)
+    if result:
+        return result
+    slug = _slugify(identifier)
+    if slug != identifier:
+        return find_vendor_by_name(slug)
+    return None
 
 
 def _slugify(name: str) -> str:
@@ -481,8 +495,7 @@ def delete_user(email: str) -> bool:
 def get_user_access_context(email: str) -> dict | None:
     """Load a user's access control fields for spend filtering.
 
-    Returns the same shape as the old firestore_client version:
-    {roles, allowed_departments, allowed_vendor_ids, denied_vendor_ids}
+    Returns {roles, allowed_departments, allowed_vendor_ids, denied_vendor_ids}.
     """
     pool = get_pool()
     normalized = email.strip().lower()

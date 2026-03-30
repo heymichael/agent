@@ -1,11 +1,14 @@
-"""Nightly sync: Bill.com bills → Firestore vendor_spend collection.
+"""Nightly sync: Bill.com bills → Postgres vendor_monthly_spend table.
 
 Paginates the Bill.com v3 /bills endpoint, aggregates by vendor + month,
-denormalizes key vendor metadata from the vendors collection, and writes
-monthly spend summaries to the top-level vendor_spend collection.
+resolves Bill.com vendor IDs to internal UUIDs via the vendors table, and
+upserts monthly spend summaries.
 
-Idempotent: each run overwrites the spend docs for all months found in
-the bill data. Doc IDs are {vendorId}_{YYYY-MM}.
+No denormalization — vendor metadata lives only on the vendors table and
+is JOINed at query time.
+
+Idempotent: each run overwrites spend for all vendor-month pairs found
+in the bill data via ON CONFLICT ... DO UPDATE.
 
 Usage:
     python -m service.sync_billcom_spend
@@ -14,37 +17,22 @@ Usage:
 import logging
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import requests
 from dotenv import load_dotenv
-from google.cloud import firestore
 
 load_dotenv(interpolate=False)
 
 from .billcom_auth import billcom_login
+from .pg_client import get_pool
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-VENDOR_SPEND_COLLECTION = "vendor_spend"
-VENDORS_COLLECTION = "vendors"
 
-DENORMALIZED_FIELDS = [
-    "paymentMethod",
-    "billingFrequency",
-    "department",
-    "owner",
-    "track1099",
-    "accountType",
-    "purpose",
-    "spendType",
-    "hide",
-]
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _paginate_bills(base: str, headers: dict) -> list[dict]:
@@ -82,13 +70,13 @@ def _paginate_bills(base: str, headers: dict) -> list[dict]:
 
 
 def _aggregate_bills(bills: list[dict]) -> dict[tuple[str, str], dict]:
-    """Group bills by (vendorId, YYYY-MM) and compute totals.
+    """Group bills by (Bill.com vendorId, YYYY-MM) and compute totals.
 
-    Returns a dict keyed by (vendorId, month) with values:
-        {"totalAmount": float, "billCount": int, "vendorName": str}
+    Returns a dict keyed by (billcom_vendor_id, month_str) with values:
+        {"totalAmount": float, "billCount": int}
     """
     buckets: dict[tuple[str, str], dict] = defaultdict(
-        lambda: {"totalAmount": 0.0, "billCount": 0, "vendorName": ""}
+        lambda: {"totalAmount": 0.0, "billCount": 0}
     )
 
     skipped = 0
@@ -105,7 +93,6 @@ def _aggregate_bills(bills: list[dict]) -> dict[tuple[str, str], dict]:
         key = (vendor_id, month)
         buckets[key]["totalAmount"] = round(buckets[key]["totalAmount"] + amount, 2)
         buckets[key]["billCount"] += 1
-        buckets[key]["vendorName"] = bill.get("vendorName", "")
 
     if skipped:
         logger.warning("Skipped %d bills missing vendorId or dueDate", skipped)
@@ -113,29 +100,39 @@ def _aggregate_bills(bills: list[dict]) -> dict[tuple[str, str], dict]:
     return dict(buckets)
 
 
-def _load_vendor_metadata(db: firestore.Client, vendor_ids: set[str]) -> dict[str, dict]:
-    """Batch-read vendor docs to grab denormalized fields."""
-    metadata: dict[str, dict] = {}
+def _resolve_vendor_uuids(conn, billcom_ids: set[str]) -> dict[str, str]:
+    """Map Bill.com vendor IDs → internal UUIDs. Returns {billcom_id: uuid}."""
+    if not billcom_ids:
+        return {}
 
-    vendor_id_list = list(vendor_ids)
-    for i in range(0, len(vendor_id_list), 100):
-        chunk = vendor_id_list[i : i + 100]
-        refs = [db.collection(VENDORS_COLLECTION).document(vid) for vid in chunk]
-        snapshots = db.get_all(refs)
-        for snap in snapshots:
-            if snap.exists:
-                data = snap.to_dict()
-                extracted = {}
-                for field in DENORMALIZED_FIELDS:
-                    if field in data:
-                        extracted[field] = data[field]
-                metadata[snap.id] = extracted
+    rows = conn.execute(
+        """SELECT source_system_id, id::text
+           FROM vendors
+           WHERE source_system = 'billcom'
+             AND source_system_id = ANY(%s)""",
+        (list(billcom_ids),),
+    ).fetchall()
+    return {r["source_system_id"]: r["id"] for r in rows}
 
-    return metadata
+
+_UPSERT_SPEND_SQL = """
+    INSERT INTO vendor_monthly_spend (vendor_id, date, total_amount, bill_count, synced_at)
+    VALUES (%s, %s, %s, %s, %s)
+    ON CONFLICT (vendor_id, date)
+    DO UPDATE SET total_amount = EXCLUDED.total_amount,
+                  bill_count   = EXCLUDED.bill_count,
+                  synced_at    = EXCLUDED.synced_at
+"""
+
+
+def _month_to_date(month_str: str) -> date:
+    """Convert 'YYYY-MM' to a date on the first of that month."""
+    parts = month_str.split("-")
+    return date(int(parts[0]), int(parts[1]), 1)
 
 
 def sync():
-    """Run the full Bill.com bills → Firestore vendor_spend sync."""
+    """Run the full Bill.com bills → Postgres vendor_monthly_spend sync."""
     start = time.time()
     logger.info("Starting Bill.com spend sync")
 
@@ -149,50 +146,47 @@ def sync():
     aggregated = _aggregate_bills(bills)
     logger.info("Aggregated into %d vendor-month buckets", len(aggregated))
 
-    vendor_ids = {vid for vid, _ in aggregated.keys()}
-    db = firestore.Client()
-    vendor_meta = _load_vendor_metadata(db, vendor_ids)
-    logger.info("Loaded metadata for %d/%d vendors", len(vendor_meta), len(vendor_ids))
+    billcom_ids = {vid for vid, _ in aggregated.keys()}
 
-    now = _now_iso()
+    pool = get_pool()
+    now = _now()
     written = 0
-    batch = db.batch()
-    batch_size = 0
+    skipped_unmapped = 0
 
-    for (vendor_id, month), totals in aggregated.items():
-        doc_id = f"{vendor_id}_{month}"
-        ref = db.collection(VENDOR_SPEND_COLLECTION).document(doc_id)
+    with pool.connection() as conn:
+        uuid_map = _resolve_vendor_uuids(conn, billcom_ids)
+        unmapped = billcom_ids - set(uuid_map.keys())
+        if unmapped:
+            logger.warning(
+                "%d Bill.com vendor IDs have no match in vendors table (run sync_billcom first): %s",
+                len(unmapped),
+                list(unmapped)[:10],
+            )
 
-        doc = {
-            "vendorId": vendor_id,
-            "vendorName": totals["vendorName"],
-            "month": month,
-            "totalAmount": totals["totalAmount"],
-            "billCount": totals["billCount"],
-            "toolCall": "billcom",
-            "lastSyncedAt": now,
-        }
+        with conn.cursor() as cur:
+            for (billcom_id, month_str), totals in aggregated.items():
+                internal_id = uuid_map.get(billcom_id)
+                if not internal_id:
+                    skipped_unmapped += 1
+                    continue
 
-        meta = vendor_meta.get(vendor_id, {})
-        for field in DENORMALIZED_FIELDS:
-            doc[field] = meta.get(field)
+                cur.execute(_UPSERT_SPEND_SQL, (
+                    internal_id,
+                    _month_to_date(month_str),
+                    totals["totalAmount"],
+                    totals["billCount"],
+                    now,
+                ))
+                written += 1
 
-        batch.set(ref, doc)
-        batch_size += 1
-        written += 1
-
-        if batch_size >= 400:
-            batch.commit()
-            logger.info("Committed batch of %d (total %d/%d)", batch_size, written, len(aggregated))
-            batch = db.batch()
-            batch_size = 0
-
-    if batch_size > 0:
-        batch.commit()
-        logger.info("Committed final batch of %d", batch_size)
+                if written % 200 == 0:
+                    logger.info("  upserted %d spend rows", written)
 
     elapsed = time.time() - start
-    logger.info("Spend sync complete: %d docs written in %.1fs", written, elapsed)
+    logger.info(
+        "Spend sync complete: %d rows upserted, %d skipped (unmapped vendors) in %.1fs",
+        written, skipped_unmapped, elapsed,
+    )
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """Tests for REST endpoints with per-user access control.
 
 Uses FastAPI TestClient with dependency overrides for auth and
-@patch for Firestore access, matching the mocking style in test_tools.py.
+@patch for Postgres access via pg_client.
 """
 
 from unittest.mock import patch, MagicMock
@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from service.app import app, get_verified_user
-from service import firestore_client
+from service import pg_client
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ class TestGetCurrentUser:
     def teardown_method(self):
         _teardown()
 
-    @patch.object(firestore_client, "get_user")
+    @patch.object(pg_client, "get_user")
     def test_returns_current_user(self, mock_get):
         mock_get.return_value = SAMPLE_USER
         client = _make_client("test@example.com")
@@ -82,7 +82,7 @@ class TestGetCurrentUser:
         assert resp.json()["roles"] == ["viewer"]
         mock_get.assert_called_once_with("test@example.com")
 
-    @patch.object(firestore_client, "get_user")
+    @patch.object(pg_client, "get_user")
     def test_normalizes_email(self, mock_get):
         mock_get.return_value = SAMPLE_USER
         client = _make_client("  Test@Example.COM  ")
@@ -92,7 +92,7 @@ class TestGetCurrentUser:
         assert resp.status_code == 200
         mock_get.assert_called_once_with("test@example.com")
 
-    @patch.object(firestore_client, "get_user")
+    @patch.object(pg_client, "get_user")
     def test_user_not_found_returns_404(self, mock_get):
         mock_get.return_value = None
         client = _make_client("nobody@example.com")
@@ -117,9 +117,9 @@ class TestListVendors:
     def teardown_method(self):
         _teardown()
 
-    @patch.object(firestore_client, "resolve_effective_vendor_ids")
-    @patch.object(firestore_client, "get_user_access_context")
-    @patch.object(firestore_client, "list_vendors")
+    @patch.object(pg_client, "resolve_effective_vendor_ids")
+    @patch.object(pg_client, "get_user_access_context")
+    @patch.object(pg_client, "list_vendors")
     def test_finance_admin_sees_all(self, mock_list, mock_access, mock_resolve):
         mock_list.return_value = SAMPLE_VENDORS
         mock_access.return_value = _access_ctx(roles=["finance_admin"])
@@ -131,9 +131,9 @@ class TestListVendors:
         assert len(resp.json()) == 3
         mock_resolve.assert_not_called()
 
-    @patch.object(firestore_client, "resolve_effective_vendor_ids")
-    @patch.object(firestore_client, "get_user_access_context")
-    @patch.object(firestore_client, "list_vendors")
+    @patch.object(pg_client, "resolve_effective_vendor_ids")
+    @patch.object(pg_client, "get_user_access_context")
+    @patch.object(pg_client, "list_vendors")
     def test_restricted_user_sees_allowed_only(self, mock_list, mock_access, mock_resolve):
         mock_list.return_value = SAMPLE_VENDORS
         mock_access.return_value = _access_ctx(departments=["Engineering"])
@@ -146,9 +146,9 @@ class TestListVendors:
         ids = [v["id"] for v in resp.json()]
         assert ids == ["v_acme", "v_gamma"]
 
-    @patch.object(firestore_client, "resolve_effective_vendor_ids")
-    @patch.object(firestore_client, "get_user_access_context")
-    @patch.object(firestore_client, "list_vendors")
+    @patch.object(pg_client, "resolve_effective_vendor_ids")
+    @patch.object(pg_client, "get_user_access_context")
+    @patch.object(pg_client, "list_vendors")
     def test_no_user_doc_sees_nothing(self, mock_list, mock_access, mock_resolve):
         mock_list.return_value = SAMPLE_VENDORS
         mock_access.return_value = None
@@ -168,9 +168,9 @@ class TestListVendors:
 
         assert resp.status_code == 401
 
-    @patch.object(firestore_client, "resolve_effective_vendor_ids")
-    @patch.object(firestore_client, "get_user_access_context")
-    @patch.object(firestore_client, "list_vendors")
+    @patch.object(pg_client, "resolve_effective_vendor_ids")
+    @patch.object(pg_client, "get_user_access_context")
+    @patch.object(pg_client, "list_vendors")
     def test_denied_vendor_excluded(self, mock_list, mock_access, mock_resolve):
         mock_list.return_value = SAMPLE_VENDORS
         mock_access.return_value = _access_ctx(
@@ -194,9 +194,9 @@ class TestGetSpend:
     def teardown_method(self):
         _teardown()
 
-    @patch.object(firestore_client, "query_spend_by_vendor_ids")
-    @patch.object(firestore_client, "resolve_effective_vendor_ids")
-    @patch.object(firestore_client, "get_user_access_context")
+    @patch.object(pg_client, "query_spend_by_vendor_ids")
+    @patch.object(pg_client, "resolve_effective_vendor_ids")
+    @patch.object(pg_client, "get_user_access_context")
     def test_finance_admin_gets_all_requested(self, mock_access, mock_resolve, mock_spend):
         mock_access.return_value = _access_ctx(roles=["finance_admin"])
         mock_spend.return_value = SAMPLE_SPEND[:2]
@@ -213,9 +213,9 @@ class TestGetSpend:
         mock_spend.assert_called_once_with(["v_acme"], "2026-01", "2026-02")
         mock_resolve.assert_not_called()
 
-    @patch.object(firestore_client, "query_spend_by_vendor_ids")
-    @patch.object(firestore_client, "resolve_effective_vendor_ids")
-    @patch.object(firestore_client, "get_user_access_context")
+    @patch.object(pg_client, "query_spend_by_vendor_ids")
+    @patch.object(pg_client, "resolve_effective_vendor_ids")
+    @patch.object(pg_client, "get_user_access_context")
     def test_restricted_user_intersects_with_effective_set(self, mock_access, mock_resolve, mock_spend):
         mock_access.return_value = _access_ctx(departments=["Engineering"])
         mock_resolve.return_value = ["v_acme", "v_gamma"]
@@ -231,9 +231,9 @@ class TestGetSpend:
         assert resp.status_code == 200
         mock_spend.assert_called_once_with(["v_acme"], "2026-01", "2026-01")
 
-    @patch.object(firestore_client, "query_spend_by_vendor_ids")
-    @patch.object(firestore_client, "resolve_effective_vendor_ids")
-    @patch.object(firestore_client, "get_user_access_context")
+    @patch.object(pg_client, "query_spend_by_vendor_ids")
+    @patch.object(pg_client, "resolve_effective_vendor_ids")
+    @patch.object(pg_client, "get_user_access_context")
     def test_no_user_doc_returns_empty(self, mock_access, mock_resolve, mock_spend):
         mock_access.return_value = None
         mock_spend.return_value = []
@@ -268,9 +268,9 @@ class TestGetSpend:
 
         assert resp.status_code == 401
 
-    @patch.object(firestore_client, "query_spend_by_vendor_ids")
-    @patch.object(firestore_client, "resolve_effective_vendor_ids")
-    @patch.object(firestore_client, "get_user_access_context")
+    @patch.object(pg_client, "query_spend_by_vendor_ids")
+    @patch.object(pg_client, "resolve_effective_vendor_ids")
+    @patch.object(pg_client, "get_user_access_context")
     def test_response_shape(self, mock_access, mock_resolve, mock_spend):
         mock_access.return_value = _access_ctx(roles=["finance_admin"])
         mock_spend.return_value = [

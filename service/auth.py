@@ -1,6 +1,7 @@
 """Firebase ID token verification for FastAPI endpoints."""
 
 import logging
+import os
 
 import firebase_admin
 from firebase_admin import auth as firebase_auth
@@ -8,7 +9,9 @@ from fastapi import HTTPException, Request
 
 logger = logging.getLogger(__name__)
 
-if not firebase_admin._apps:
+_DEV_AUTH_EMAIL = os.environ.get("DEV_AUTH_EMAIL")
+
+if not _DEV_AUTH_EMAIL and not firebase_admin._apps:
     firebase_admin.initialize_app()
 
 
@@ -18,7 +21,13 @@ def get_verified_user(request: Request) -> dict:
     Reads the Authorization header, verifies the token with Firebase Admin SDK,
     and returns the decoded token dict (contains 'email', 'uid', etc.).
     Raises 401 if the header is missing/malformed or the token is invalid.
+
+    When DEV_AUTH_EMAIL is set, skips token verification entirely and returns
+    a synthetic token for that email. Never set this in production.
     """
+    if _DEV_AUTH_EMAIL:
+        return {"email": _DEV_AUTH_EMAIL, "uid": "dev-local"}
+
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
         raise HTTPException(

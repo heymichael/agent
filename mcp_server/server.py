@@ -29,7 +29,7 @@ async def vendor_lookup(vendor: str) -> dict:
 
     Returns the full vendor profile including metadata, contract fields,
     and payment information. Accepts partial names, abbreviations (e.g.
-    "AWS"), or Firestore document IDs.
+    "AWS"), or UUIDs.
     """
     return handle_vendor_lookup({"vendor": vendor})
 
@@ -49,7 +49,7 @@ async def vendor_count(
             paymentMethod (Check, ACH, CreditCard, Wire, PayPal),
             accountType (Business, Individual), track1099 (true/false),
             billingFrequency (monthly, annual, usage-based),
-            toolCall (billcom, aws-ce, manual), department, owner.
+            sourceSystem (billcom, aws-ce, manual), department, owner.
     """
     return handle_vendor_count({"group_by": group_by, "filters": filters})
 
@@ -101,7 +101,7 @@ async def spend_by_dimension(
 
     Args:
         dimension: Field to group by. Options: paymentMethod, accountType,
-            track1099, billingFrequency, toolCall, department, owner,
+            track1099, billingFrequency, sourceSystem, department, owner,
             vendorName.
         period: Time period (same formats as spend_total).
         filters: Exact-match filters to narrow results before grouping.

@@ -27,7 +27,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Compile check
-        run: python -m py_compile service/app.py service/firestore_client.py service/auth.py service/tools.py
+        run: python -m py_compile service/app.py service/pg_client.py service/auth.py service/tools.py
 
       - name: Run tests
         run: python -m pytest tests/ -x -q

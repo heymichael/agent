@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
-"""Bulk-update vendor department fields from a CSV file.
+"""Bulk-update vendor department assignments from a CSV file.
+
+Creates departments on-the-fly and sets vendors.department_id via
+source_system_id lookup.
 
 Usage:
-    python scripts/seed_departments.py path/to/departments.csv
+    cd agent
+    source .venv/bin/activate
+    DATABASE_URL="postgresql://..." python scripts/seed_departments.py path/to/departments.csv
 
 CSV format (tab or comma separated, with header row):
     id,department
     00902ABC...,Engineering
     00902DEF...,Marketing
 
-Requires GCP Application Default Credentials for Firestore access.
+The `id` column is the Bill.com vendor ID (source_system_id).
 """
+
 import csv
 import sys
-from datetime import datetime, timezone
+from pathlib import Path
 
-from google.cloud import firestore
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-VENDORS_COLLECTION = "vendors"
+from dotenv import load_dotenv
+load_dotenv(interpolate=False)
+
+from service.pg_client import get_pool
 
 
 def main():
@@ -26,7 +35,6 @@ def main():
         sys.exit(1)
 
     csv_path = sys.argv[1]
-    db = firestore.Client()
 
     with open(csv_path, newline="") as f:
         sample = f.read(2048)
@@ -38,45 +46,41 @@ def main():
             print(f"ERROR: CSV must have 'id' and 'department' columns. Found: {reader.fieldnames}")
             sys.exit(1)
 
-        rows = [(r["id"].strip(), r["department"].strip()) for r in reader if r["id"].strip() and r["department"].strip()]
+        rows = [
+            (r["id"].strip(), r["department"].strip())
+            for r in reader
+            if r["id"].strip() and r["department"].strip()
+        ]
 
     print(f"Loaded {len(rows)} vendor-department mappings from {csv_path}")
 
-    batch = db.batch()
-    batch_count = 0
+    pool = get_pool()
     updated = 0
-    skipped = 0
     not_found = 0
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    for vendor_id, department in rows:
-        ref = db.collection(VENDORS_COLLECTION).document(vendor_id)
-        snap = ref.get()
-        if not snap.exists:
-            print(f"  SKIP (not found): {vendor_id}")
-            not_found += 1
-            continue
+    with pool.connection() as conn:
+        for source_system_id, dept_name in rows:
+            dept_row = conn.execute(
+                """INSERT INTO departments (name) VALUES (%s)
+                   ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+                   RETURNING id""",
+                (dept_name,),
+            ).fetchone()
+            dept_id = str(dept_row["id"])
 
-        current = snap.to_dict().get("department")
-        if current == department:
-            skipped += 1
-            continue
+            cur = conn.execute(
+                """UPDATE vendors SET department_id = %s, modified_at = now()
+                   WHERE source_system = 'billcom' AND source_system_id = %s
+                   RETURNING id""",
+                (dept_id, source_system_id),
+            )
+            if cur.fetchone():
+                updated += 1
+            else:
+                print(f"  SKIP (not found): {source_system_id}")
+                not_found += 1
 
-        batch.update(ref, {"department": department, "modified_at": now})
-        batch_count += 1
-        updated += 1
-
-        if batch_count >= 400:
-            batch.commit()
-            print(f"  Committed batch of {batch_count}")
-            batch = db.batch()
-            batch_count = 0
-
-    if batch_count > 0:
-        batch.commit()
-        print(f"  Committed final batch of {batch_count}")
-
-    print(f"\nDone: {updated} updated, {skipped} already correct, {not_found} not found")
+    print(f"\nDone: {updated} updated, {not_found} not found")
 
 
 if __name__ == "__main__":

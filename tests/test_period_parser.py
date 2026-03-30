@@ -1,6 +1,6 @@
 """Unit tests for mcp_server.period_parser.
 
-All functions are pure — no Firestore or network access required.
+All functions are pure — no database or network access required.
 """
 
 from datetime import date

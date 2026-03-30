@@ -1,35 +1,39 @@
-"""Intent-aligned vendor analytics tool handlers.
+"""Intent-aligned vendor analytics tool handlers — SQL-backed.
 
 Each handler accepts a dict of parameters (from LLM tool call) and an optional
 ``caller_context`` for spend-level access control.  All handlers return a dict
 with a ``status`` field — one of ``ok``, ``ambiguous``, ``not_found``,
 ``not_authorized``, or ``invalid_filter``.
 
-The handlers delegate to:
-    * ``resolver.resolve_vendor`` — vendor name/ID/alias resolution
-    * ``resolver.validate_filters`` — enum + dynamic filter validation
-    * ``period_parser.parse_period`` — period string → month range
-    * ``service.firestore_client`` — Firestore queries
+All aggregation is pushed down to Postgres via SQL queries — no Python-side
+streaming or in-memory aggregation.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from service.firestore_client import (
-    get_db,
-    VENDORS_COLLECTION,
-    VENDOR_SPEND_COLLECTION,
-    SEARCH_RETURN_FIELDS,
-    get_hidden_vendor_ids,
-)
-from .resolver import resolve_vendor, validate_filters
+from service.pg_client import get_pool, get_vendor
+from .resolver import resolve_vendor, validate_filters, FIELD_TO_SQL
 from .period_parser import parse_period, PeriodParseError
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 CallerContext = dict[str, Any] | None
+
+_SPEND_BASE_JOIN = """
+    FROM vendor_monthly_spend s
+    JOIN vendors v ON v.id = s.vendor_id
+    LEFT JOIN departments d ON d.id = v.department_id
+    LEFT JOIN users uo ON uo.id = v.owner_id
+"""
+
+_VENDOR_BASE_JOIN = """
+    FROM vendors v
+    LEFT JOIN departments d ON d.id = v.department_id
+    LEFT JOIN users uo ON uo.id = v.owner_id
+"""
 
 
 def _period_or_error(period: str | None) -> tuple[str | None, str | None] | dict:
@@ -50,9 +54,6 @@ def _check_spend_auth(
     vendor_id: str | None = None,
     vendor_name: str | None = None,
 ) -> dict | None:
-    """Check if caller is authorised for spend data. Returns an error dict
-    or None if authorised.  When ``caller_context`` is None, access is
-    unrestricted (dev/admin use)."""
     if caller_context is None:
         return None
     if caller_context.get("is_finance_admin"):
@@ -67,74 +68,74 @@ def _check_spend_auth(
     return None
 
 
-def _filter_allowed_spend_docs(
-    docs: list[dict],
-    caller_context: CallerContext,
-) -> list[dict]:
-    """For aggregate queries, silently scope docs to the caller's allowed
-    vendor IDs.  Finance admins and None contexts pass through unfiltered."""
-    if caller_context is None:
-        return docs
-    if caller_context.get("is_finance_admin"):
-        return docs
-    allowed = set(caller_context.get("allowed_vendor_ids") or [])
-    if not allowed:
-        return []
-    return [d for d in docs if d.get("vendorId") in allowed]
+def _month_to_date(month_str: str) -> str:
+    """Convert 'YYYY-MM' to 'YYYY-MM-01' for SQL date comparison."""
+    return f"{month_str}-01"
 
 
-def _apply_filters(data: dict, filters: dict) -> bool:
-    """Return True if *data* matches all filter conditions."""
-    for field, value in filters.items():
-        if data.get(field) != value:
-            return False
-    return True
-
-
-def _load_spend_docs(
+def _build_where(
+    filters: dict,
     start_month: str | None,
     end_month: str | None,
     vendor_id: str | None = None,
-) -> list[dict]:
-    """Stream spend docs from Firestore with optional month range and vendor filter.
+    caller_context: CallerContext = None,
+) -> tuple[str, list]:
+    """Build a WHERE clause from filters, period, vendor, and access control.
 
-    When vendor_id is provided, queries only by vendorId (single-field index)
-    and filters the month range in Python to avoid requiring a composite index.
+    Returns (where_sql, params) — the SQL starts with ' WHERE 1=1'.
     """
-    db = get_db()
-    hidden_ids = get_hidden_vendor_ids()
-    ref = db.collection(VENDOR_SPEND_COLLECTION)
+    clauses = ["1=1"]
+    params: list = []
+
+    if start_month:
+        clauses.append("s.date >= %s")
+        params.append(_month_to_date(start_month))
+    if end_month:
+        clauses.append("s.date <= %s")
+        params.append(_month_to_date(end_month))
 
     if vendor_id:
-        ref = ref.where("vendorId", "==", vendor_id)
-    elif start_month or end_month:
-        if start_month and end_month and start_month == end_month:
-            ref = ref.where("month", "==", start_month)
-        else:
-            if start_month:
-                ref = ref.where("month", ">=", start_month)
-            if end_month:
-                ref = ref.where("month", "<=", end_month)
+        clauses.append("s.vendor_id = %s")
+        params.append(vendor_id)
 
-    results = []
-    for doc in ref.stream():
-        data = doc.to_dict()
-        if data.get("vendorId") in hidden_ids:
-            continue
-        month = data.get("month", "")
-        if vendor_id and start_month and month < start_month:
-            continue
-        if vendor_id and end_month and month > end_month:
-            continue
-        results.append(data)
-    return results
+    for field, value in filters.items():
+        sql_col = FIELD_TO_SQL.get(field)
+        if sql_col:
+            clauses.append(f"{sql_col} = %s")
+            params.append(value)
+
+    if caller_context and not caller_context.get("is_finance_admin"):
+        allowed = caller_context.get("allowed_vendor_ids") or []
+        if not allowed:
+            clauses.append("FALSE")
+        else:
+            clauses.append("s.vendor_id = ANY(%s::uuid[])")
+            params.append(allowed)
+
+    return " WHERE " + " AND ".join(clauses), params
+
+
+def _build_vendor_where(
+    filters: dict,
+    caller_context: CallerContext = None,
+) -> tuple[str, list]:
+    """Build a WHERE clause for vendor-only queries (no spend table)."""
+    clauses = ["1=1"]
+    params: list = []
+
+    for field, value in filters.items():
+        sql_col = FIELD_TO_SQL.get(field)
+        if sql_col:
+            clauses.append(f"{sql_col} = %s")
+            params.append(value)
+
+    return " WHERE " + " AND ".join(clauses), params
 
 
 # ── Tool handlers ────────────────────────────────────────────────────────
 
 def handle_vendor_lookup(args: dict, caller_context: CallerContext = None) -> dict:
-    """Look up a single vendor by name, ID, or alias. Returns the full
-    vendor profile.  Unrestricted — no spend filtering applied."""
+    """Look up a single vendor by name, ID, or alias."""
     vendor_input = args.get("vendor", "")
     if not vendor_input:
         return {"status": "not_found", "message": "No vendor specified."}
@@ -143,22 +144,15 @@ def handle_vendor_lookup(args: dict, caller_context: CallerContext = None) -> di
     if resolved["status"] != "ok":
         return resolved
 
-    db = get_db()
-    snap = db.collection(VENDORS_COLLECTION).document(resolved["vendor_id"]).get()
-    if not snap.exists:
-        return {"status": "not_found", "message": f"Vendor doc '{resolved['vendor_id']}' not found."}
-
-    data = snap.to_dict()
-    profile = {"id": snap.id}
-    for f in SEARCH_RETURN_FIELDS:
-        if f in data:
-            profile[f] = data[f]
+    vendor = get_vendor(resolved["vendor_id"])
+    if not vendor:
+        return {"status": "not_found", "message": f"Vendor '{resolved['vendor_id']}' not found."}
 
     return {
         "status": "ok",
         "vendor_id": resolved["vendor_id"],
         "vendor_name": resolved["vendor_name"],
-        "data": profile,
+        "data": vendor,
     }
 
 
@@ -171,38 +165,37 @@ def handle_vendor_count(args: dict, caller_context: CallerContext = None) -> dic
     if filter_err:
         return filter_err
 
-    db = get_db()
-    ref = db.collection(VENDORS_COLLECTION)
-
-    if filters and not group_by:
-        for field, value in filters.items():
-            ref = ref.where(field, "==", value)
-
-    docs = ref.stream()
-    matched: list[dict] = []
-    for doc in docs:
-        data = doc.to_dict()
-        if data.get("hide"):
-            continue
-        if filters and group_by:
-            if not _apply_filters(data, filters):
-                continue
-        matched.append(data)
+    where_sql, params = _build_vendor_where(filters, caller_context)
+    pool = get_pool()
 
     if group_by:
-        counts: dict[str, int] = {}
-        for data in matched:
-            key = str(data.get(group_by, "Unknown"))
-            counts[key] = counts.get(key, 0) + 1
-        return {
-            "status": "ok",
-            "data": {"counts": counts, "total": len(matched)},
-        }
+        group_col = FIELD_TO_SQL.get(group_by)
+        if not group_col:
+            return {
+                "status": "invalid_filter",
+                "field": "group_by",
+                "provided": group_by,
+                "valid_values": list(FIELD_TO_SQL.keys()),
+            }
 
-    return {
-        "status": "ok",
-        "data": {"count": len(matched)},
-    }
+        with pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT COALESCE({group_col}::text, 'Unknown') AS grp, COUNT(*) AS cnt"
+                f" {_VENDOR_BASE_JOIN} {where_sql} GROUP BY grp ORDER BY cnt DESC",
+                params,
+            ).fetchall()
+
+        counts = {r["grp"]: r["cnt"] for r in rows}
+        total = sum(counts.values())
+        return {"status": "ok", "data": {"counts": counts, "total": total}}
+
+    with pool.connection() as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS cnt {_VENDOR_BASE_JOIN} {where_sql}",
+            params,
+        ).fetchone()
+
+    return {"status": "ok", "data": {"count": row["cnt"]}}
 
 
 def handle_spend_total(args: dict, caller_context: CallerContext = None) -> dict:
@@ -219,22 +212,24 @@ def handle_spend_total(args: dict, caller_context: CallerContext = None) -> dict
     if filter_err:
         return filter_err
 
-    docs = _load_spend_docs(start_month, end_month)
-    docs = _filter_allowed_spend_docs(docs, caller_context)
+    where_sql, params = _build_where(filters, start_month, end_month, caller_context=caller_context)
+    pool = get_pool()
 
-    if filters:
-        docs = [d for d in docs if _apply_filters(d, filters)]
-
-    total = round(sum(d.get("totalAmount", 0) for d in docs), 2)
-    bill_count = sum(d.get("billCount", 0) for d in docs)
-    vendor_count = len({d.get("vendorId") for d in docs})
+    with pool.connection() as conn:
+        row = conn.execute(
+            f"SELECT COALESCE(SUM(s.total_amount), 0) AS total,"
+            f" COALESCE(SUM(s.bill_count), 0) AS bills,"
+            f" COUNT(DISTINCT s.vendor_id) AS vendors"
+            f" {_SPEND_BASE_JOIN} {where_sql}",
+            params,
+        ).fetchone()
 
     return {
         "status": "ok",
         "data": {
-            "totalAmount": total,
-            "billCount": bill_count,
-            "vendorCount": vendor_count,
+            "totalAmount": round(float(row["total"]), 2),
+            "billCount": int(row["bills"]),
+            "vendorCount": int(row["vendors"]),
             "period": {"start": start_month, "end": end_month},
         },
     }
@@ -268,19 +263,24 @@ def handle_spend_by_vendor(args: dict, caller_context: CallerContext = None) -> 
         if auth_err:
             return auth_err
 
-    docs = _load_spend_docs(start_month, end_month, vendor_id=vendor_id)
-
-    if not vendor_input:
-        docs = _filter_allowed_spend_docs(docs, caller_context)
-
-    if filters:
-        docs = [d for d in docs if _apply_filters(d, filters)]
+    where_sql, params = _build_where(
+        filters, start_month, end_month,
+        vendor_id=vendor_id, caller_context=caller_context if not vendor_input else None,
+    )
+    pool = get_pool()
 
     if vendor_id:
-        docs.sort(key=lambda r: r.get("month", ""))
+        with pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT TO_CHAR(s.date, 'YYYY-MM') AS month,"
+                f" s.total_amount, s.bill_count"
+                f" {_SPEND_BASE_JOIN} {where_sql} ORDER BY s.date",
+                params,
+            ).fetchall()
+
         months = [
-            {"month": d.get("month"), "totalAmount": d.get("totalAmount", 0), "billCount": d.get("billCount", 0)}
-            for d in docs
+            {"month": r["month"], "totalAmount": float(r["total_amount"]), "billCount": int(r["bill_count"])}
+            for r in rows
         ]
         total = round(sum(m["totalAmount"] for m in months), 2)
         return {
@@ -294,22 +294,27 @@ def handle_spend_by_vendor(args: dict, caller_context: CallerContext = None) -> 
             },
         }
 
-    # All vendors — group by vendor
-    by_vendor: dict[str, dict] = {}
-    for d in docs:
-        vid = d.get("vendorId", "")
-        if vid not in by_vendor:
-            by_vendor[vid] = {"vendor_id": vid, "vendor_name": d.get("vendorName", vid), "totalAmount": 0.0, "billCount": 0}
-        by_vendor[vid]["totalAmount"] = round(by_vendor[vid]["totalAmount"] + d.get("totalAmount", 0), 2)
-        by_vendor[vid]["billCount"] += d.get("billCount", 0)
+    # All vendors — ranked by total
+    with pool.connection() as conn:
+        rows = conn.execute(
+            f"SELECT v.id::text AS vendor_id, v.name AS vendor_name,"
+            f" SUM(s.total_amount) AS total, SUM(s.bill_count) AS bills"
+            f" {_SPEND_BASE_JOIN} {where_sql}"
+            f" GROUP BY v.id, v.name ORDER BY total DESC LIMIT 50",
+            params,
+        ).fetchall()
 
-    results = sorted(by_vendor.values(), key=lambda v: v["totalAmount"], reverse=True)
+    results = [
+        {"vendor_id": r["vendor_id"], "vendor_name": r["vendor_name"],
+         "totalAmount": round(float(r["total"]), 2), "billCount": int(r["bills"])}
+        for r in rows
+    ]
     grand_total = round(sum(v["totalAmount"] for v in results), 2)
 
     return {
         "status": "ok",
         "data": {
-            "vendors": results[:50],
+            "vendors": results,
             "totalVendors": len(results),
             "grandTotal": grand_total,
             "period": {"start": start_month, "end": end_month},
@@ -321,7 +326,11 @@ def handle_spend_by_dimension(args: dict, caller_context: CallerContext = None) 
     """Spend grouped by a single dimension (e.g. paymentMethod, department)."""
     dimension = args.get("dimension")
     if not dimension:
-        return {"status": "invalid_filter", "field": "dimension", "provided": None, "valid_values": _groupable_fields()}
+        return {"status": "invalid_filter", "field": "dimension", "provided": None, "valid_values": list(FIELD_TO_SQL.keys())}
+
+    dim_col = FIELD_TO_SQL.get(dimension)
+    if not dim_col:
+        return {"status": "invalid_filter", "field": "dimension", "provided": dimension, "valid_values": list(FIELD_TO_SQL.keys())}
 
     period = args.get("period")
     filters = dict(args.get("filters") or {})
@@ -335,30 +344,34 @@ def handle_spend_by_dimension(args: dict, caller_context: CallerContext = None) 
     if filter_err:
         return filter_err
 
-    docs = _load_spend_docs(start_month, end_month)
-    docs = _filter_allowed_spend_docs(docs, caller_context)
+    where_sql, params = _build_where(filters, start_month, end_month, caller_context=caller_context)
+    pool = get_pool()
 
-    if filters:
-        docs = [d for d in docs if _apply_filters(d, filters)]
+    with pool.connection() as conn:
+        rows = conn.execute(
+            f"SELECT COALESCE({dim_col}::text, 'Unknown') AS grp,"
+            f" SUM(s.total_amount) AS total, SUM(s.bill_count) AS bills,"
+            f" COUNT(DISTINCT s.vendor_id) AS vendors"
+            f" {_SPEND_BASE_JOIN} {where_sql}"
+            f" GROUP BY grp ORDER BY total DESC",
+            params,
+        ).fetchall()
 
-    groups: dict[str, dict] = {}
-    for d in docs:
-        raw = d.get(dimension)
-        key = "Unknown" if raw is None else str(raw)
-        if key not in groups:
-            groups[key] = {"totalAmount": 0.0, "billCount": 0, "vendorCount": 0}
-        groups[key]["totalAmount"] = round(groups[key]["totalAmount"] + d.get("totalAmount", 0), 2)
-        groups[key]["billCount"] += d.get("billCount", 0)
-        groups[key]["vendorCount"] += 1
-
+    groups = {
+        r["grp"]: {
+            "totalAmount": round(float(r["total"]), 2),
+            "billCount": int(r["bills"]),
+            "vendorCount": int(r["vendors"]),
+        }
+        for r in rows
+    }
     grand_total = round(sum(g["totalAmount"] for g in groups.values()), 2)
-    sorted_groups = dict(sorted(groups.items(), key=lambda kv: kv[1]["totalAmount"], reverse=True))
 
     return {
         "status": "ok",
         "data": {
             "dimension": dimension,
-            "groups": sorted_groups,
+            "groups": groups,
             "grandTotal": grand_total,
             "period": {"start": start_month, "end": end_month},
         },
@@ -380,21 +393,23 @@ def handle_top_vendors(args: dict, caller_context: CallerContext = None) -> dict
     if filter_err:
         return filter_err
 
-    docs = _load_spend_docs(start_month, end_month)
-    docs = _filter_allowed_spend_docs(docs, caller_context)
+    where_sql, params = _build_where(filters, start_month, end_month, caller_context=caller_context)
+    pool = get_pool()
 
-    if filters:
-        docs = [d for d in docs if _apply_filters(d, filters)]
+    with pool.connection() as conn:
+        rows = conn.execute(
+            f"SELECT v.id::text AS vendor_id, v.name AS vendor_name,"
+            f" SUM(s.total_amount) AS total, SUM(s.bill_count) AS bills"
+            f" {_SPEND_BASE_JOIN} {where_sql}"
+            f" GROUP BY v.id, v.name ORDER BY total DESC LIMIT %s",
+            params + [n],
+        ).fetchall()
 
-    by_vendor: dict[str, dict] = {}
-    for d in docs:
-        vid = d.get("vendorId", "")
-        if vid not in by_vendor:
-            by_vendor[vid] = {"vendor_id": vid, "vendor_name": d.get("vendorName", vid), "totalAmount": 0.0, "billCount": 0}
-        by_vendor[vid]["totalAmount"] = round(by_vendor[vid]["totalAmount"] + d.get("totalAmount", 0), 2)
-        by_vendor[vid]["billCount"] += d.get("billCount", 0)
-
-    ranked = sorted(by_vendor.values(), key=lambda v: v["totalAmount"], reverse=True)[:n]
+    ranked = [
+        {"vendor_id": r["vendor_id"], "vendor_name": r["vendor_name"],
+         "totalAmount": round(float(r["total"]), 2), "billCount": int(r["bills"])}
+        for r in rows
+    ]
     grand_total = round(sum(v["totalAmount"] for v in ranked), 2)
 
     return {
@@ -406,13 +421,6 @@ def handle_top_vendors(args: dict, caller_context: CallerContext = None) -> dict
             "period": {"start": start_month, "end": end_month},
         },
     }
-
-
-def _groupable_fields() -> list[str]:
-    return [
-        "paymentMethod", "accountType", "track1099", "billingFrequency",
-        "toolCall", "department", "owner", "vendorName",
-    ]
 
 
 # ── Handler registry ─────────────────────────────────────────────────────

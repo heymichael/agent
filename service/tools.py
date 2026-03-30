@@ -4,13 +4,13 @@ Analytics tools (vendor_lookup, vendor_count, spend_total, spend_by_vendor,
 spend_by_dimension, top_vendors) delegate to the MCP server module which
 owns the resolution pipeline, period parsing, and response contract.
 
-Write tools (add_vendor, delete_vendor, modify_vendor, hide_vendor) and
-execute_python remain here unchanged.
+Write tools (add_vendor, delete_vendor, modify_vendor) and
+execute_python remain here.
 """
 
 import json
 
-from . import firestore_client
+from . import pg_client
 from .sandbox import execute_python
 from mcp_server.tools import (
     handle_vendor_lookup,
@@ -41,7 +41,7 @@ _FILTERS_PARAM = {
         "Supported fields: paymentMethod (Check, ACH, CreditCard, Wire, PayPal), "
         "accountType (Business, Individual), track1099 (true/false), "
         "billingFrequency (monthly, annual, usage-based), "
-        "toolCall (billcom, aws-ce, manual), department, owner."
+        "sourceSystem (billcom, aws-ce, manual), department, owner."
     ),
 }
 
@@ -88,7 +88,7 @@ TOOL_DEFINITIONS = [
                         "type": "string",
                         "description": (
                             "Field to group counts by: paymentMethod, accountType, "
-                            "track1099, billingFrequency, toolCall, department, owner."
+                            "track1099, billingFrequency, sourceSystem, department, owner."
                         ),
                     },
                     "filters": _FILTERS_PARAM,
@@ -148,7 +148,7 @@ TOOL_DEFINITIONS = [
                         "type": "string",
                         "description": (
                             "Field to group by: paymentMethod, accountType, "
-                            "track1099, billingFrequency, toolCall, department, "
+                            "track1099, billingFrequency, sourceSystem, department, "
                             "owner, vendorName."
                         ),
                     },
@@ -177,12 +177,12 @@ TOOL_DEFINITIONS = [
             },
         },
     },
-    # -- Write tools (unchanged) --
+    # -- Write tools --
     {
         "type": "function",
         "function": {
             "name": "add_vendor",
-            "description": "Add a new vendor to the app's local Firestore registry. This does NOT create a vendor in Bill.com.",
+            "description": "Add a new vendor to the database. This does NOT create a vendor in Bill.com.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -224,7 +224,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "delete_vendor",
-            "description": "Request deletion of a vendor from the app's local Firestore registry (not Bill.com). Returns a confirmation prompt that the user must approve in the UI.",
+            "description": "Request deletion of a vendor (not Bill.com). Returns a confirmation prompt that the user must approve in the UI.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -241,7 +241,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "modify_vendor",
-            "description": "Open the vendor edit modal in the UI for a vendor in the app's local Firestore registry. Does not update fields directly — opens the edit form.",
+            "description": "Open the vendor edit modal in the UI. Does not update fields directly — opens the edit form.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -257,36 +257,11 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "hide_vendor",
-            "description": (
-                "Hide or unhide a vendor from spend analysis. Hidden vendors are excluded "
-                "from analytics tool results by default. "
-                "Use this instead of deleting Bill.com-synced vendors."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "identifier": {
-                        "type": "string",
-                        "description": "Vendor name or ID to hide/unhide",
-                    },
-                    "hide": {
-                        "type": "boolean",
-                        "description": "True to hide, false to unhide. Defaults to true.",
-                    },
-                },
-                "required": ["identifier"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "execute_python",
             "description": (
                 "Execute Python code to query external vendor APIs for TRANSACTIONAL data: "
                 "Bill.com bills/spend/PII or AWS Cost Explorer cloud costs. "
-                "Use vendor_lookup first to get the billcomId and toolCall, then use it here. "
+                "Use vendor_lookup first to get the sourceSystemId and sourceSystem, then use it here. "
                 "Pre-installed libraries: boto3, requests, json, os, datetime, math, re, collections, decimal. "
                 "Vendor credentials are available as environment variables (never print them). "
                 "Print the result as JSON to stdout."
@@ -320,14 +295,14 @@ def _build_caller_context(caller_email: str) -> dict | None:
     if not caller_email:
         return {"allowed_vendor_ids": [], "is_finance_admin": False}
 
-    user = firestore_client.get_user_access_context(caller_email)
+    user = pg_client.get_user_access_context(caller_email)
     if not user:
         return {"allowed_vendor_ids": [], "is_finance_admin": False}
 
     if "finance_admin" in user.get("roles", []):
         return {"is_finance_admin": True}
 
-    effective_ids = firestore_client.resolve_effective_vendor_ids(
+    effective_ids = pg_client.resolve_effective_vendor_ids(
         user.get("allowed_departments", []),
         user.get("allowed_vendor_ids", []),
         user.get("denied_vendor_ids", []),
@@ -366,23 +341,22 @@ def execute_top_vendors(args: dict, caller_email: str = "") -> str:
 def execute_add_vendor(args: dict, caller_email: str = "") -> str:
     args.setdefault("status", "active")
     try:
-        result = firestore_client.add_vendor(args)
+        result = pg_client.add_vendor(args)
         return json.dumps({"ok": True, "vendor": result})
     except ValueError as exc:
         return json.dumps({"ok": False, "error": str(exc)})
 
 
 def execute_delete_vendor(args: dict, caller_email: str = "") -> str:
-    vendor = firestore_client.resolve_vendor(args["identifier"])
+    vendor = pg_client.resolve_vendor_by_identifier(args["identifier"])
     if not vendor:
         return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
-    if vendor.get("billcomId"):
+    if vendor.get("sourceSystem") != "manual":
         return json.dumps({
             "ok": False,
             "error": (
-                f"'{vendor.get('name')}' is synced from Bill.com and can't be deleted — "
-                "it would be re-created on the next nightly sync. "
-                "You can hide it from spend analysis instead using hide_vendor."
+                f"'{vendor.get('name')}' is synced from {vendor.get('sourceSystem')} and can't be deleted — "
+                "it would be re-created on the next nightly sync."
             ),
         })
     return json.dumps({
@@ -393,7 +367,7 @@ def execute_delete_vendor(args: dict, caller_email: str = "") -> str:
 
 
 def execute_modify_vendor(args: dict, caller_email: str = "") -> str:
-    vendor = firestore_client.resolve_vendor(args["identifier"])
+    vendor = pg_client.resolve_vendor_by_identifier(args["identifier"])
     if not vendor:
         return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
     return json.dumps({
@@ -401,24 +375,6 @@ def execute_modify_vendor(args: dict, caller_email: str = "") -> str:
         "action": "open_edit",
         "vendor": {"id": vendor["id"], "name": vendor.get("name", vendor["id"])},
     })
-
-
-def execute_hide_vendor(args: dict, caller_email: str = "") -> str:
-    vendor = firestore_client.resolve_vendor(args["identifier"])
-    if not vendor:
-        return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
-    hide = args.get("hide", True)
-    vendor_id = vendor.get("billcomId") or vendor.get("id", "")
-    try:
-        updated = firestore_client.set_vendor_hidden(vendor_id, hide)
-        action = "hidden" if hide else "unhidden"
-        return json.dumps({
-            "ok": True,
-            "action": action,
-            "vendor": {"id": vendor_id, "name": updated.get("name", vendor_id)},
-        })
-    except ValueError as exc:
-        return json.dumps({"ok": False, "error": str(exc)})
 
 
 def execute_execute_python(args: dict, caller_email: str = "") -> str:
@@ -436,6 +392,5 @@ TOOL_HANDLERS = {
     "add_vendor": execute_add_vendor,
     "delete_vendor": execute_delete_vendor,
     "modify_vendor": execute_modify_vendor,
-    "hide_vendor": execute_hide_vendor,
     "execute_python": execute_execute_python,
 }
