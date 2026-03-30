@@ -348,9 +348,10 @@ def execute_add_vendor(args: dict, caller_email: str = "") -> str:
 
 
 def execute_delete_vendor(args: dict, caller_email: str = "") -> str:
-    vendor = pg_client.resolve_vendor_by_identifier(args["identifier"])
-    if not vendor:
+    result = pg_client.resolve_vendor_by_identifier(args["identifier"])
+    if not result:
         return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
+    vendor, match = result
     if vendor.get("sourceSystem") != "manual":
         return json.dumps({
             "ok": False,
@@ -361,17 +362,20 @@ def execute_delete_vendor(args: dict, caller_email: str = "") -> str:
         })
     return json.dumps({
         "ok": True,
+        "match": match,
         "action": "confirm_delete",
         "vendor": {"id": vendor["id"], "name": vendor.get("name", vendor["id"])},
     })
 
 
 def execute_modify_vendor(args: dict, caller_email: str = "") -> str:
-    vendor = pg_client.resolve_vendor_by_identifier(args["identifier"])
-    if not vendor:
+    result = pg_client.resolve_vendor_by_identifier(args["identifier"])
+    if not result:
         return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
+    vendor, match = result
     return json.dumps({
         "ok": True,
+        "match": match,
         "action": "open_edit",
         "vendor": {"id": vendor["id"], "name": vendor.get("name", vendor["id"])},
     })

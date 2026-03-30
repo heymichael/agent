@@ -145,6 +145,32 @@ def find_vendor_by_name(name: str) -> dict | None:
     return _vendor_row_to_dict(row) if row else None
 
 
+FUZZY_AUTO_ACCEPT = 0.6
+FUZZY_SUGGEST = 0.25
+
+
+def find_vendor_fuzzy(name: str) -> tuple[dict, float] | None:
+    """Find the closest vendor by trigram similarity (requires pg_trgm).
+
+    Returns (vendor_dict, similarity_score) or None if nothing scores
+    above FUZZY_SUGGEST.
+    """
+    pool = get_pool()
+    with pool.connection() as conn:
+        row = conn.execute(
+            f"""SELECT sub.*, similarity(LOWER(sub.name), LOWER(%s)) AS sim_score
+                FROM ({_VENDOR_LIST_SQL}) sub
+                WHERE similarity(LOWER(sub.name), LOWER(%s)) > %s
+                ORDER BY sim_score DESC
+                LIMIT 1""",
+            (name, name, FUZZY_SUGGEST),
+        ).fetchone()
+    if not row:
+        return None
+    score = float(row.pop("sim_score"))
+    return _vendor_row_to_dict(row), score
+
+
 def add_vendor(data: dict) -> dict:
     """Create a new vendor. Returns the created record."""
     pool = get_pool()
@@ -207,18 +233,31 @@ def _is_uuid(value: str) -> bool:
         return False
 
 
-def resolve_vendor_by_identifier(identifier: str) -> dict | None:
-    """Resolve a vendor by UUID, name, or slug. Returns the full API-shaped dict or None."""
+def resolve_vendor_by_identifier(identifier: str) -> tuple[dict, str] | None:
+    """Resolve a vendor by UUID, name, slug, or fuzzy match.
+
+    Returns (vendor_dict, match_type) where match_type is:
+      "exact"  — UUID or exact name hit
+      "close"  — fuzzy score >= FUZZY_AUTO_ACCEPT (safe to proceed)
+      "fuzzy"  — fuzzy score >= FUZZY_SUGGEST (ask user to confirm)
+    Returns None if nothing matches.
+    """
     if _is_uuid(identifier):
         result = get_vendor(identifier)
         if result:
-            return result
+            return result, "exact"
     result = find_vendor_by_name(identifier)
     if result:
-        return result
+        return result, "exact"
     slug = _slugify(identifier)
     if slug != identifier:
-        return find_vendor_by_name(slug)
+        result = find_vendor_by_name(slug)
+        if result:
+            return result, "exact"
+    fuzzy = find_vendor_fuzzy(identifier)
+    if fuzzy:
+        vendor, score = fuzzy
+        return vendor, "close" if score >= FUZZY_AUTO_ACCEPT else "fuzzy"
     return None
 
 
