@@ -431,6 +431,7 @@ def _user_summary(row: dict, roles: list[str] | None = None,
                   denied_vendor_ids: list[str] | None = None) -> dict:
     """Build a user summary dict matching the existing API response shape."""
     return {
+        "id": str(row["id"]),
         "email": row["email"],
         "firstName": row.get("first_name", ""),
         "lastName": row.get("last_name", ""),

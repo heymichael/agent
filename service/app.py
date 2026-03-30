@@ -253,6 +253,11 @@ def update_app(app_id: str, req: UpdateAppRequest, caller: dict = Depends(get_ve
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.get("/departments")
+def list_departments(caller: dict = Depends(get_verified_user)):
+    return pg_client.list_departments()
+
+
 @app.get("/vendors")
 def list_vendors(caller: dict = Depends(get_verified_user)):
     vendors = pg_client.list_vendors()
@@ -262,12 +267,40 @@ def list_vendors(caller: dict = Depends(get_verified_user)):
     return [v for v in vendors if v.get("id") in allowed]
 
 
+_VENDOR_FIELD_MAP: dict[str, str] = {
+    "departmentId": "department_id",
+    "ownerId": "owner_id",
+    "secondaryOwnerId": "secondary_owner_id",
+    "paymentMethod": "payment_method",
+    "billingFrequency": "billing_frequency",
+    "accountType": "account_type",
+    "track1099": "track_1099",
+    "spendType": "spend_type",
+    "contractStartDate": "contract_start",
+    "contractEndDate": "contract_end",
+    "contractLengthMonths": "contract_months",
+    "autoRenew": "auto_renew",
+    "renewalRate": "renewal_rate",
+    "renewalNoticeDays": "renewal_notice",
+    "terminationTerms": "termination_terms",
+}
+
+
+def _map_vendor_fields(updates: dict) -> dict:
+    """Translate camelCase frontend keys to snake_case DB column names."""
+    mapped: dict = {}
+    for key, value in updates.items():
+        db_key = _VENDOR_FIELD_MAP.get(key, key)
+        mapped[db_key] = value
+    return mapped
+
+
 @app.patch("/vendors/{vendor_id}")
 def update_vendor(vendor_id: str, updates: dict, caller: dict = Depends(get_verified_user)):
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
     try:
-        result = pg_client.update_vendor(vendor_id, updates)
+        result = pg_client.update_vendor(vendor_id, _map_vendor_fields(updates))
         return {"ok": True, "vendor": result}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
