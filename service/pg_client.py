@@ -250,22 +250,21 @@ class VendorMatch:
 def resolve_vendor_by_identifier(identifier: str) -> VendorMatch | None:
     """Resolve a vendor by UUID, name, slug, or fuzzy match.
 
+    Two passes:
+      1. Find the best match (exact name, slug, or highest fuzzy score).
+      2. Check for similar alternatives that could cause ambiguity.
+
     Returns a VendorMatch with:
       vendor       — best-matching vendor dict
-      match        — "exact", "close", or "fuzzy"
+      match        — "exact", "close", "fuzzy", or "disambiguate"
       alternatives — other similar vendors the user might have meant
-
-    When alternatives are present, the caller should confirm even on
-    exact matches (e.g., "Interexy" vs "Interexy LLC").
     """
-    vendor = None
-    match_type = None
-
     if _is_uuid(identifier):
         vendor = get_vendor(identifier)
         if vendor:
             return VendorMatch(vendor, "exact")
 
+    # --- Pass 1: find best match ---
     vendor = find_vendor_by_name(identifier)
     if vendor:
         match_type = "exact"
@@ -273,24 +272,21 @@ def resolve_vendor_by_identifier(identifier: str) -> VendorMatch | None:
         slug = _slugify(identifier)
         if slug != identifier:
             vendor = find_vendor_by_name(slug)
-            if vendor:
-                match_type = "exact"
+        if vendor:
+            match_type = "exact"
+        else:
+            similar = find_vendors_similar(identifier)
+            if not similar:
+                return None
+            vendor, score = similar[0]
+            match_type = "close" if score >= FUZZY_AUTO_ACCEPT else "fuzzy"
 
-    if not vendor:
-        similar = find_vendors_similar(identifier)
-        if not similar:
-            return None
-        best, score = similar[0]
-        match_type = "close" if score >= FUZZY_AUTO_ACCEPT else "fuzzy"
-        alternatives = [v for v, _ in similar[1:]]
-        return VendorMatch(best, match_type, alternatives)
-
+    # --- Pass 2: check for ambiguity ---
     similar = find_vendors_similar(identifier, threshold=SIMILAR_THRESHOLD)
-    alternatives = [
-        v for v, _ in similar if v["id"] != vendor["id"]
-    ]
+    alternatives = [v for v, _ in similar if v["id"] != vendor["id"]]
     if alternatives:
         match_type = "disambiguate"
+
     return VendorMatch(vendor, match_type, alternatives)
 
 
