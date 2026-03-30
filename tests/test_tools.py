@@ -93,15 +93,33 @@ def _build_mock_pool(query_results=None):
     return MockPool(query_results or {})
 
 
+_FULL_VENDOR_ACME = {
+    "id": "v_acme", "name": "Acme Corp", "aliases": ["Acme"],
+    "source_system": "billcom", "source_system_id": "bc_acme",
+    "department_id": None, "department_name": None,
+    "owner_id": None, "owner_email": None,
+    "secondary_owner_id": None, "secondary_owner_email": None,
+    "payment_method": "ACH", "account_type": "Business",
+    "billing_frequency": None, "track_1099": True,
+    "purpose": None, "spend_type": None,
+    "contract_start": None, "contract_end": None, "contract_months": None,
+    "auto_renew": None, "renewal_rate": None, "renewal_notice": None,
+    "termination_terms": None, "synced_at": None,
+}
+
+
 def _default_pool():
     """Pool with standard vendor/spend data for most tests."""
     return _build_mock_pool({
         "WHERE id::text": {"id": "v_acme", "name": "Acme Corp"},
+        "LOWER(v.name) = LOWER": _FULL_VENDOR_ACME,
+        "WHERE v.id": _FULL_VENDOR_ACME,
         "FROM vendors ORDER BY": [
             {"id": "v_acme", "name": "Acme Corp", "aliases": ["Acme"]},
             {"id": "v_beta", "name": "Beta Inc", "aliases": None},
             {"id": "v_gamma", "name": "Gamma LLC", "aliases": None},
         ],
+        "similarity": [],
         "COUNT(*)": {"cnt": 3},
         "v.id::text AS vendor_id, v.name AS vendor_name": [
             {"vendor_id": "v_acme", "vendor_name": "Acme Corp", "total": Decimal("25000.00"), "bills": 8},
@@ -125,13 +143,13 @@ def _default_pool():
 
 
 def _patch_all(pool=None):
-    """Patch get_pool across tools and resolver modules."""
+    """Patch get_pool across tools, resolver, and pg_client modules."""
     if pool is None:
         pool = _default_pool()
     return (
         patch("mcp_server.tools.get_pool", return_value=pool),
         patch("mcp_server.tools.get_vendor", return_value=SAMPLE_VENDOR_API),
-        patch("mcp_server.resolver.get_pool", return_value=pool),
+        patch("service.pg_client.get_pool", return_value=pool),
     )
 
 

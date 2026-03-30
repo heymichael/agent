@@ -1,9 +1,7 @@
-"""Vendor resolution pipeline and filter validation.
+"""Filter validation for MCP tool handlers.
 
-resolve_vendor() is the SINGLE entry point for mapping a user-supplied
-identifier (name, ID, alias, partial match) to a canonical vendor_id.
-Every MCP tool that accepts a ``vendor`` parameter calls this function —
-no tool implements its own matching logic.
+Vendor resolution has been consolidated into
+``service.pg_client.resolve_vendor_by_identifier``.
 
 resolve_filter() validates dynamic filter fields (department, owner) against
 distinct values currently in Postgres.
@@ -11,127 +9,9 @@ distinct values currently in Postgres.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from service.pg_client import get_pool
-
-
-# ── Vendor resolution ────────────────────────────────────────────────────
-
-def _normalise(text: str) -> str:
-    """Lower-case, strip punctuation, collapse whitespace."""
-    s = text.strip().lower()
-    s = re.sub(r"[^a-z0-9\s]", "", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def _token_match(query_tokens: list[str], name_lower: str) -> bool:
-    """Return True if every query token appears in *name_lower*."""
-    return all(t in name_lower for t in query_tokens)
-
-
-def _load_all_vendors() -> list[dict]:
-    """Load all vendors from Postgres. Returns list of dicts with id, name, aliases."""
-    pool = get_pool()
-    with pool.connection() as conn:
-        rows = conn.execute(
-            "SELECT id::text, name, aliases FROM vendors ORDER BY name"
-        ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def resolve_vendor(identifier: str) -> dict:
-    """Resolve a user-supplied vendor identifier to a canonical vendor.
-
-    Resolution steps (in order):
-        1. Exact UUID or slug match
-        2. Exact name match (case-insensitive)
-        3. Alias match (``aliases`` array field on vendor rows)
-        4. Normalised match (strip punctuation/whitespace, compare)
-        5. Token / fuzzy match (all query tokens present in vendor name)
-
-    Returns one of::
-
-        {"status": "ok", "vendor_id": "...", "vendor_name": "..."}
-        {"status": "ambiguous", "candidates": [{"vendor_id": "...", "vendor_name": "..."}, ...]}
-        {"status": "not_found", "message": "..."}
-    """
-    identifier = identifier.strip()
-    if not identifier:
-        return {"status": "not_found", "message": "Empty vendor identifier."}
-
-    pool = get_pool()
-
-    # Step 1: exact UUID or source_system_id match
-    with pool.connection() as conn:
-        row = conn.execute(
-            "SELECT id::text, name FROM vendors WHERE id::text = %s OR source_system_id = %s LIMIT 1",
-            (identifier, identifier),
-        ).fetchone()
-    if row:
-        return _ok(row["id"], row["name"])
-
-    all_vendors = _load_all_vendors()
-
-    # Step 2: exact name match (case-insensitive)
-    id_lower = identifier.lower()
-    exact = [v for v in all_vendors if (v.get("name") or "").lower() == id_lower]
-    if len(exact) == 1:
-        return _ok(exact[0]["id"], exact[0]["name"])
-    if len(exact) > 1:
-        return _ambiguous(exact)
-
-    # Step 3: alias match
-    alias_matches = []
-    for v in all_vendors:
-        aliases = v.get("aliases") or []
-        if any(a.lower() == id_lower for a in aliases):
-            alias_matches.append(v)
-    if len(alias_matches) == 1:
-        return _ok(alias_matches[0]["id"], alias_matches[0]["name"])
-    if len(alias_matches) > 1:
-        return _ambiguous(alias_matches)
-
-    # Step 4: normalised match
-    norm_query = _normalise(identifier)
-    if norm_query:
-        norm_matches = [v for v in all_vendors if _normalise(v.get("name", "")) == norm_query]
-        if len(norm_matches) == 1:
-            return _ok(norm_matches[0]["id"], norm_matches[0]["name"])
-        if len(norm_matches) > 1:
-            return _ambiguous(norm_matches)
-
-    # Step 5: token / fuzzy match
-    query_tokens = norm_query.split() if norm_query else []
-    if query_tokens:
-        token_matches = [
-            v for v in all_vendors
-            if _token_match(query_tokens, (v.get("name") or "").lower())
-        ]
-        if len(token_matches) == 1:
-            return _ok(token_matches[0]["id"], token_matches[0]["name"])
-        if len(token_matches) > 1:
-            return _ambiguous(token_matches[:10])
-
-    return {
-        "status": "not_found",
-        "message": f"No vendor matched '{identifier}'.",
-    }
-
-
-def _ok(vendor_id: str, vendor_name: str) -> dict:
-    return {"status": "ok", "vendor_id": vendor_id, "vendor_name": vendor_name}
-
-
-def _ambiguous(vendors: list[dict]) -> dict:
-    return {
-        "status": "ambiguous",
-        "candidates": [
-            {"vendor_id": v["id"], "vendor_name": v.get("name", v["id"])}
-            for v in vendors
-        ],
-    }
 
 
 # ── Filter validation ────────────────────────────────────────────────────

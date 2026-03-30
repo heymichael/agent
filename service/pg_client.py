@@ -236,6 +236,23 @@ def _is_uuid(value: str) -> bool:
         return False
 
 
+def _normalise(text: str) -> str:
+    """Lower-case, strip punctuation, collapse whitespace."""
+    s = text.strip().lower()
+    s = re.sub(r"[^a-z0-9\s]", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _load_all_vendors_light() -> list[dict]:
+    """Load id, name, aliases for all vendors (used by alias/normalized matching)."""
+    pool = get_pool()
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT id::text, name, aliases FROM vendors ORDER BY name"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 class VendorMatch:
     """Result of resolve_vendor_by_identifier."""
     __slots__ = ("vendor", "match", "alternatives")
@@ -248,33 +265,76 @@ class VendorMatch:
 
 
 def resolve_vendor_by_identifier(identifier: str) -> VendorMatch | None:
-    """Resolve a vendor by UUID, name, slug, or fuzzy match.
+    """Resolve a vendor by UUID, name, alias, normalized name, or fuzzy match.
 
     Two passes:
-      1. Find the best match (exact name, slug, or highest fuzzy score).
+      1. Find the best match through a cascade of strategies.
       2. Check for similar alternatives that could cause ambiguity.
+
+    Resolution cascade:
+      1. Exact UUID
+      2. Exact name (case-insensitive)
+      3. Alias match (aliases array on vendor rows)
+      4. Normalized match (strip punctuation/whitespace, compare)
+      5. pg_trgm fuzzy (two-tier: close >= 0.6, fuzzy >= 0.25)
 
     Returns a VendorMatch with:
       vendor       — best-matching vendor dict
       match        — "exact", "close", "fuzzy", or "disambiguate"
       alternatives — other similar vendors the user might have meant
     """
+    identifier = identifier.strip()
+    if not identifier:
+        return None
+
+    # --- Pass 1: find best match ---
+
+    # Step 1: UUID
     if _is_uuid(identifier):
         vendor = get_vendor(identifier)
         if vendor:
             return VendorMatch(vendor, "exact")
 
-    # --- Pass 1: find best match ---
+    # Step 2: exact name
     vendor = find_vendor_by_name(identifier)
     if vendor:
         match_type = "exact"
     else:
-        slug = _slugify(identifier)
-        if slug != identifier:
-            vendor = find_vendor_by_name(slug)
-        if vendor:
+        id_lower = identifier.lower()
+        norm_query = _normalise(identifier)
+        all_vendors = _load_all_vendors_light()
+
+        # Step 3: alias match
+        alias_matches = [
+            v for v in all_vendors
+            if any(a.lower() == id_lower for a in (v.get("aliases") or []))
+        ]
+        if len(alias_matches) == 1:
+            vendor = get_vendor(alias_matches[0]["id"])
             match_type = "exact"
-        else:
+        elif len(alias_matches) > 1:
+            vendor = get_vendor(alias_matches[0]["id"])
+            match_type = "disambiguate"
+            alternatives = [get_vendor(v["id"]) for v in alias_matches[1:]]
+            return VendorMatch(vendor, match_type, [a for a in alternatives if a])
+
+        # Step 4: normalized match
+        if not vendor and norm_query:
+            norm_matches = [
+                v for v in all_vendors
+                if _normalise(v.get("name", "")) == norm_query
+            ]
+            if len(norm_matches) == 1:
+                vendor = get_vendor(norm_matches[0]["id"])
+                match_type = "exact"
+            elif len(norm_matches) > 1:
+                vendor = get_vendor(norm_matches[0]["id"])
+                match_type = "disambiguate"
+                alternatives = [get_vendor(v["id"]) for v in norm_matches[1:]]
+                return VendorMatch(vendor, match_type, [a for a in alternatives if a])
+
+        # Step 5: pg_trgm fuzzy
+        if not vendor:
             similar = find_vendors_similar(identifier)
             if not similar:
                 return None
