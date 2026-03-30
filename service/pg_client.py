@@ -22,7 +22,15 @@ def get_pool() -> ConnectionPool:
     global _pool
     if _pool is None:
         conninfo = os.environ["DATABASE_URL"]
-        _pool = ConnectionPool(conninfo, min_size=1, max_size=10, kwargs={"row_factory": dict_row})
+        _pool = ConnectionPool(
+            conninfo,
+            min_size=1,
+            max_size=10,
+            max_idle=300,
+            reconnect_timeout=60,
+            check=ConnectionPool.check_connection,
+            kwargs={"row_factory": dict_row},
+        )
     return _pool
 
 
