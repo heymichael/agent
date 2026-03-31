@@ -62,7 +62,8 @@ full connection string.
 ### Schema
 
 Tables: `departments`, `roles`, `vendors`, `vendor_monthly_spend`,
-`vendor_spend_detail`, `sync_job_log`, `sync_job_step`, `users`, `apps`
+`vendor_spend_detail`, `sync_job_log`, `sync_job_step`, `users`, `apps`,
+`branding`
 
 Join tables: `user_roles`, `user_allowed_departments`, `user_allowed_vendors`,
 `user_denied_vendors`, `app_granting_roles`
@@ -98,6 +99,11 @@ Schema: `migrations/002_vendor_spend_detail.sql`.
 `vendor_sync`, `detail_upsert`, `summary_upsert`, `reconcile`. Tracks
 `row_count`, `duration_ms`, `error`, and step-level `metadata`.
 Schema: `migrations/003_sync_job_log.sql`.
+
+**branding** — singleton table (`CHECK (id = 1)`) storing the org logo SVG
+and lockup toggle. `logo_svg TEXT` holds raw SVG markup; `show_lockup BOOLEAN`
+controls whether the "Haderach" wordmark is displayed next to the logo.
+Schema: `migrations/005_branding.sql`.
 
 **users** — email-keyed user accounts. Roles via `user_roles` join table.
 Access controls via `user_allowed_departments`, `user_allowed_vendors`,
@@ -153,6 +159,7 @@ protocol overhead). It can also be run as a standalone MCP server via
 | `migrations/002_vendor_spend_detail.sql` | Granular spend detail table with canonical columns + JSONB metadata |
 | `migrations/003_sync_job_log.sql` | Sync job run + step tracking tables |
 | `migrations/004_hidden_from_agent.sql` | Add `hidden_from_agent` boolean to vendors |
+| `migrations/005_branding.sql` | Singleton branding table (logo SVG + lockup toggle) |
 
 ## Supported tools
 
@@ -275,6 +282,7 @@ The `/health` endpoint is unauthenticated.
 |---|---|---|---|
 | `POST` | `/chat` | Required | Chat with the agent (tool-calling loop) |
 | `GET` | `/health` | None | Health check |
+| `GET` | `/branding` | None | Logo SVG and lockup flag for the app chrome |
 | `GET` | `/spend` | Required | Monthly spend by vendor. `vendor_ids` optional — omit to return all accessible vendors |
 | `GET` | `/vendors` | Required | List all vendors with full field set |
 | `DELETE` | `/vendors/{vendor_id}` | Required | Delete a vendor (blocked for synced vendors) |
