@@ -3,13 +3,13 @@
 Paginates the Bill.com v3 /vendors endpoint and upserts each vendor
 into Postgres. Only synced fields are touched — app-managed and contract
 fields are preserved via ON CONFLICT ... DO UPDATE on synced columns only.
+Each step is tracked in sync_job_log / sync_job_step.
 
 Usage:
     python -m service.sync_billcom
 """
 
 import logging
-import time
 from datetime import datetime, timezone
 
 import requests
@@ -19,9 +19,12 @@ load_dotenv(interpolate=False)
 
 from .billcom_auth import billcom_login
 from .pg_client import get_pool
+from .sync_tracker import SyncTracker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+JOB_NAME = "billcom-vendor-sync"
 
 
 def _now() -> datetime:
@@ -71,41 +74,43 @@ _UPSERT_SQL = """
 
 def sync():
     """Run the full Bill.com → Postgres vendor sync."""
-    start = time.time()
-    logger.info("Starting Bill.com vendor sync")
-
-    base, _, headers = billcom_login()
-    logger.info("Logged into Bill.com")
-
-    vendors = _paginate_vendors(base, headers)
-    logger.info("Fetched %d vendors from Bill.com in %.1fs", len(vendors), time.time() - start)
-
     pool = get_pool()
-    now = _now()
-    written = 0
+    tracker = SyncTracker(JOB_NAME, pool)
+    tracker.start()
 
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            for vendor in vendors:
-                payment_info = vendor.get("paymentInformation") or {}
-                cur.execute(_UPSERT_SQL, (
-                    "billcom",
-                    vendor["id"],
-                    vendor.get("name", ""),
-                    payment_info.get("payByType"),
-                    vendor.get("accountType"),
-                    vendor.get("additionalInfo", {}).get("track1099", False),
-                    now,
-                    now,
-                    now,
-                ))
-                written += 1
+    try:
+        with tracker.step("api_fetch") as s:
+            base, _, headers = billcom_login()
+            vendors = _paginate_vendors(base, headers)
+            s.row_count = len(vendors)
 
-                if written % 100 == 0:
-                    logger.info("  upserted %d/%d vendors", written, len(vendors))
+        now = _now()
 
-    elapsed = time.time() - start
-    logger.info("Sync complete: %d vendors upserted in %.1fs", written, elapsed)
+        with tracker.step("vendor_sync") as s:
+            written = 0
+            with pool.connection() as conn:
+                with conn.cursor() as cur:
+                    for vendor in vendors:
+                        payment_info = vendor.get("paymentInformation") or {}
+                        cur.execute(_UPSERT_SQL, (
+                            "billcom",
+                            vendor["id"],
+                            vendor.get("name", ""),
+                            payment_info.get("payByType"),
+                            vendor.get("accountType"),
+                            vendor.get("additionalInfo", {}).get("track1099", False),
+                            now,
+                            now,
+                            now,
+                        ))
+                        written += 1
+            s.row_count = written
+
+        tracker.finish()
+
+    except Exception as exc:
+        tracker.fail(str(exc))
+        raise
 
 
 if __name__ == "__main__":

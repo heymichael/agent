@@ -117,11 +117,18 @@ class Disambiguation(BaseModel):
     original_args: dict | None = None
 
 
+class Download(BaseModel):
+    filename: str
+    content: str
+    mime: str = "text/csv"
+
+
 class ChatResponse(BaseModel):
     reply: str
     tool_calls_executed: list[str]
     pending_actions: list[PendingAction] = []
     disambiguation: Disambiguation | None = None
+    downloads: list[Download] = []
 
 
 @app.get("/health")
@@ -348,6 +355,7 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
     tool_calls_executed: list[str] = []
     pending_actions: list[PendingAction] = []
     disambiguation: Disambiguation | None = None
+    downloads: list[Download] = []
     max_rounds = 10
 
     for _ in range(max_rounds):
@@ -379,13 +387,19 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
                     result = handler(fn_args, caller_email=caller_email)
 
                 tool_calls_executed.append(fn_name)
+
+                parsed = json.loads(result)
+                csv_content = parsed.pop("csv", None)
+                csv_filename = parsed.pop("csv_filename", None)
+                if csv_content and csv_filename:
+                    downloads.append(Download(filename=csv_filename, content=csv_content))
+
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": _truncate_tool_result(result),
+                    "content": _truncate_tool_result(json.dumps(parsed)),
                 })
 
-                parsed = json.loads(result)
                 if parsed.get("action") in ("confirm_delete", "open_edit", "confirm_edit"):
                     vendor = parsed["vendor"]
                     pending_actions.append(PendingAction(
@@ -405,11 +419,12 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
             continue
 
         reply = choice.message.content or ""
-        return ChatResponse(reply=reply, tool_calls_executed=tool_calls_executed, pending_actions=pending_actions, disambiguation=disambiguation)
+        return ChatResponse(reply=reply, tool_calls_executed=tool_calls_executed, pending_actions=pending_actions, disambiguation=disambiguation, downloads=downloads)
 
     return ChatResponse(
         reply="I hit the maximum number of tool-call rounds. Please try again.",
         tool_calls_executed=tool_calls_executed,
         pending_actions=pending_actions,
         disambiguation=disambiguation,
+        downloads=downloads,
     )

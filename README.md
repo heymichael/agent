@@ -86,22 +86,50 @@ overwritten). Takes ~110s.
 
 ## Spend sync
 
-Monthly spend summaries from external APIs are aggregated into the
-`vendor_monthly_spend` table. Run manually:
+Spend data from external APIs is synced into Postgres. Granular line items
+go into `vendor_spend_detail`, then roll up to `vendor_monthly_spend`
+(summary). Run manually:
 
 ```bash
 source .venv/bin/activate
 
-# Bill.com bills (~200–270s, ~1,244 rows)
+# Bill.com bills (~200–270s, ~1,244 rows) — writes to summary only
 python -m service.sync_billcom_spend
 
-# AWS Cost Explorer (~10s, ~12 rows)
+# AWS Cost Explorer (~10s) — detail rows (by Service + UsageType) + summary rollup
 python -m service.sync_aws_spend
 ```
 
-Both scripts are idempotent — each run upserts all spend rows for their
-source. Bill.com sync paginates all bills and aggregates by vendor + month.
-AWS sync fetches 12 months of monthly unblended costs from Cost Explorer.
+All scripts are idempotent — each run upserts rows via `ON CONFLICT DO UPDATE`.
+
+### Sync job tracking
+
+Every sync run is logged to `sync_job_log` (one row per run) and
+`sync_job_step` (one row per step). Steps use standardized names across all
+jobs:
+
+| Step | Used by | Meaning |
+|------|---------|---------|
+| `api_fetch` | All | Got data from the source API |
+| `vendor_sync` | Bill.com | Vendor master records refreshed |
+| `detail_upsert` | AWS, GCP | Granular rows landed in `vendor_spend_detail` |
+| `summary_upsert` | All | Monthly summary rows landed in `vendor_monthly_spend` |
+| `reconcile` | AWS, GCP | Verified `SUM(detail)` matches summary per month |
+
+Each step records `status`, `duration_ms`, `row_count`, and `error` (on
+failure). The reconcile step logs mismatches into `metadata` for debugging.
+Implemented via `service/sync_tracker.py` (`SyncTracker` class).
+
+### Detail table field mapping
+
+Each sync job maps vendor-native fields to canonical columns on
+`vendor_spend_detail`. Column names are standardized; values are
+vendor-native (no semantic normalization).
+
+| Vendor | `category` | `subcategory` | `project` | `metadata` |
+|--------|-----------|--------------|----------|-----------|
+| AWS | Service | UsageType | — | — |
+| GCP (planned) | service.description | sku.description | project.id | `{"sku_id": ..., "region": ...}` |
 
 ## Authentication
 

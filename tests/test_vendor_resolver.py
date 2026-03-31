@@ -173,7 +173,7 @@ def _make_pool(*, name_match=None, uuid_match=None, similar_results=None, all_ve
             if full:
                 return _MockCursor(row=dict(full))
             return _MockCursor(row=None)
-        if "FROM vendors ORDER BY" in sql:
+        if "id::text, name, aliases" in sql:
             return _MockCursor(rows=[dict(v) for v in all_v])
         return _MockCursor()
 
@@ -258,7 +258,8 @@ class TestResolveVendorByIdentifier:
         assert result is None
 
     @patch("service.pg_client.get_pool")
-    def test_disambiguation_with_similar_names(self, mock_pool):
+    def test_exact_name_skips_disambiguation(self, mock_pool):
+        """Exact name match should return 'exact' even when similar vendors exist."""
         mock_pool.return_value = _make_pool(
             name_match=_VENDOR_INTEREXY,
             similar_results=[
@@ -268,6 +269,22 @@ class TestResolveVendorByIdentifier:
             all_vendors=_ALL_VENDORS_LIGHT,
         )
         result = resolve_vendor_by_identifier("Interexy")
+        assert result is not None
+        assert result.vendor["id"] == _VENDOR_INTEREXY["id"]
+        assert result.match == "exact"
+        assert not result.alternatives
+
+    @patch("service.pg_client.get_pool")
+    def test_fuzzy_disambiguation_with_similar_names(self, mock_pool):
+        """Non-exact match should still trigger disambiguation when similar vendors exist."""
+        mock_pool.return_value = _make_pool(
+            similar_results=[
+                (_VENDOR_INTEREXY, 0.65),
+                (_VENDOR_INTEREXY_LLC, 0.55),
+            ],
+            all_vendors=_ALL_VENDORS_LIGHT,
+        )
+        result = resolve_vendor_by_identifier("Interexi")
         assert result is not None
         assert result.vendor["id"] == _VENDOR_INTEREXY["id"]
         assert result.match == "disambiguate"
