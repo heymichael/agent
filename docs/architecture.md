@@ -91,9 +91,9 @@ Analytics tools are backed by the `mcp_server/` module, which provides:
 
 - **Intent-aligned tool handlers** — six tools with clear, specific purposes
   instead of general-purpose query builders. All aggregation pushed to SQL.
-- **Vendor resolution pipeline** — single `resolve_vendor()` function that
-  handles exact ID, exact name, alias, normalised, and token/fuzzy matching.
-  Returns ok/ambiguous/not_found.
+- **Vendor resolution pipeline** — `resolve_vendor_by_identifier()` in
+  `pg_client.py` handles exact UUID, exact name, alias, normalised, and
+  pg_trgm fuzzy matching. Returns ok/ambiguous/not_found.
 - **Period parser** — deterministic conversion of period strings (YYYY-MM,
   YYYY-QN, YTD, last-N-months) to month ranges
 - **Filter validation** — enum fields validated at schema level, dynamic
@@ -120,7 +120,7 @@ protocol overhead). It can also be run as a standalone MCP server via
 | `service/sync_billcom_spend.py` | Nightly Bill.com bills → Postgres spend aggregation sync |
 | `service/sync_aws_spend.py` | Nightly AWS Cost Explorer → Postgres spend sync |
 | `mcp_server/tools.py` | Intent-aligned analytics tool handlers — SQL queries for all aggregation |
-| `mcp_server/resolver.py` | Vendor resolution pipeline, filter validation, field-to-SQL mapping |
+| `mcp_server/resolver.py` | Filter validation (`resolve_filter`, `validate_filters`), field-to-SQL column mapping |
 | `mcp_server/period_parser.py` | Deterministic period string parser |
 | `mcp_server/server.py` | MCP protocol entry point (stdio transport) |
 | `scripts/smoke-test.sh` | Post-deploy auth smoke tests |
@@ -158,8 +158,8 @@ protocol overhead). It can also be run as a standalone MCP server via
 
 ## Vendor resolution pipeline
 
-All tools that accept a `vendor` parameter use a single shared
-`resolve_vendor()` function in `mcp_server/resolver.py`:
+All tools that accept a `vendor` parameter use
+`resolve_vendor_by_identifier()` in `service/pg_client.py`:
 
 1. Exact UUID or source_system_id match
 2. Exact name match (case-insensitive)
