@@ -430,11 +430,13 @@ def _user_summary(row: dict, roles: list[str] | None = None,
                   allowed_vendor_ids: list[str] | None = None,
                   denied_vendor_ids: list[str] | None = None) -> dict:
     """Build a user summary dict matching the existing API response shape."""
+    full = " ".join(filter(None, [row.get("first_name", ""), row.get("last_name", "")])).strip()
     return {
         "id": str(row["id"]),
         "email": row["email"],
         "firstName": row.get("first_name", ""),
         "lastName": row.get("last_name", ""),
+        "fullName": full or row["email"],
         "roles": roles if roles is not None else [],
         "allowedDepartments": allowed_departments if allowed_departments is not None else [],
         "allowedVendorIds": allowed_vendor_ids if allowed_vendor_ids is not None else [],

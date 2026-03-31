@@ -431,10 +431,22 @@ def _resolve_field_value(field_name: str, value: str, candidates: list[str]) -> 
     }
 
 
+def _user_candidates() -> list[tuple[str, str]]:
+    """Build (candidate, user_id) pairs for both name and email."""
+    pairs: list[tuple[str, str]] = []
+    for u in pg_client.list_users():
+        uid = u["id"]
+        pairs.append((u["email"], uid))
+        full = u.get("fullName", "")
+        if full and full != u["email"]:
+            pairs.append((full, uid))
+    return pairs
+
+
 _FK_FIELD_RESOLVERS = {
     "department": lambda: [(d["name"], d["id"]) for d in pg_client.list_departments()],
-    "owner": lambda: [(u["email"], u["id"]) for u in pg_client.list_users()],
-    "secondary_owner": lambda: [(u["email"], u["id"]) for u in pg_client.list_users()],
+    "owner": _user_candidates,
+    "secondary_owner": _user_candidates,
 }
 
 _ENUM_FIELD_VALUES = {
@@ -445,11 +457,60 @@ _ENUM_FIELD_VALUES = {
 
 _DIRECT_FIELDS = {"purpose"}
 
+_CONFIRM_FIELD_META = {
+    "department": {
+        "key": "departmentId", "label": "Department",
+        "inputType": "select", "source": "departments",
+        "currentDisplayKey": "department", "currentValueKey": "departmentId",
+    },
+    "owner": {
+        "key": "ownerId", "label": "Owner",
+        "inputType": "select", "source": "users",
+        "currentDisplayKey": "owner", "currentValueKey": "ownerId",
+    },
+    "secondary_owner": {
+        "key": "secondaryOwnerId", "label": "Secondary owner",
+        "inputType": "select", "source": "users",
+        "currentDisplayKey": "secondaryOwner", "currentValueKey": "secondaryOwnerId",
+    },
+    "payment_method": {
+        "key": "paymentMethod", "label": "Payment method",
+        "inputType": "select", "source": "enum",
+        "currentDisplayKey": "paymentMethod",
+    },
+    "billing_frequency": {
+        "key": "billingFrequency", "label": "Billing frequency",
+        "inputType": "select", "source": "enum",
+        "currentDisplayKey": "billingFrequency",
+    },
+    "account_type": {
+        "key": "accountType", "label": "Account type",
+        "inputType": "select", "source": "enum",
+        "currentDisplayKey": "accountType",
+    },
+    "purpose": {
+        "key": "purpose", "label": "Purpose",
+        "inputType": "text",
+        "currentDisplayKey": "purpose",
+    },
+}
+
 
 def execute_modify_vendor(args: dict, caller_email: str = "") -> str:
     result = pg_client.resolve_vendor_by_identifier(args["identifier"])
     if not result:
         return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
+
+    if result.match == "disambiguate":
+        candidates = [{"id": result.vendor["id"], "name": result.vendor.get("name", result.vendor["id"])}]
+        candidates += [{"id": v["id"], "name": v["name"]} for v in result.alternatives]
+        return json.dumps({
+            "ok": False, "status": "ambiguous",
+            "match": "disambiguate",
+            "candidates": candidates,
+            "message": f"Multiple vendors match '{args['identifier']}'. Ask the user to clarify.",
+        })
+
     vendor = result.vendor
 
     field_args = {k: v for k, v in args.items() if k != "identifier" and v is not None}
@@ -462,57 +523,81 @@ def execute_modify_vendor(args: dict, caller_email: str = "") -> str:
         })
 
     from service.resolve import resolve_canonical_value
-    updates = {}
+    proposed_updates: dict = {}
+    display_fields: list[dict] = []
 
     for field, value in field_args.items():
+        meta = _CONFIRM_FIELD_META.get(field)
+        if not meta:
+            continue
+
         if field in _FK_FIELD_RESOLVERS:
             pairs = _FK_FIELD_RESOLVERS[field]()
             candidates = [name for name, _ in pairs]
             match = resolve_canonical_value(value, candidates)
-            if not match:
-                return json.dumps({
-                    "ok": False, "error": f"Unknown {field}: '{value}'",
-                    "valid_values": sorted(candidates),
+            if match:
+                id_map = {name: uid for name, uid in pairs}
+                new_id = id_map[match.value]
+                proposed_updates[meta["key"]] = new_id
+                display_fields.append({
+                    "key": meta["key"], "label": meta["label"],
+                    "currentValue": vendor.get(meta["currentValueKey"]),
+                    "currentDisplay": vendor.get(meta["currentDisplayKey"]) or "\u2014",
+                    "newValue": new_id, "newDisplay": match.value,
+                    "inputType": meta["inputType"], "source": meta["source"],
                 })
-            if match.match not in ("exact", "close"):
-                return json.dumps({
-                    "ok": False, "did_you_mean": match.value,
-                    "field": field, "provided": value,
-                    "alternatives": match.alternatives,
+            else:
+                display_fields.append({
+                    "key": meta["key"], "label": meta["label"],
+                    "currentValue": vendor.get(meta["currentValueKey"]),
+                    "currentDisplay": vendor.get(meta["currentDisplayKey"]) or "\u2014",
+                    "newValue": "", "newDisplay": "",
+                    "inputType": meta["inputType"], "source": meta["source"],
+                    "unresolved": True,
                 })
-            id_map = {name: uid for name, uid in pairs}
-            updates[f"{field}_id"] = id_map[match.value]
 
         elif field in _ENUM_FIELD_VALUES:
             candidates = _ENUM_FIELD_VALUES[field]
             match = resolve_canonical_value(value, candidates)
-            if not match:
-                return json.dumps({
-                    "ok": False, "error": f"Unknown {field}: '{value}'",
-                    "valid_values": sorted(candidates),
+            if match:
+                proposed_updates[meta["key"]] = match.value
+                display_fields.append({
+                    "key": meta["key"], "label": meta["label"],
+                    "currentValue": vendor.get(meta["currentDisplayKey"]),
+                    "currentDisplay": vendor.get(meta["currentDisplayKey"]) or "\u2014",
+                    "newValue": match.value, "newDisplay": match.value,
+                    "inputType": meta["inputType"], "source": meta["source"],
+                    "options": candidates,
                 })
-            if match.match not in ("exact", "close"):
-                return json.dumps({
-                    "ok": False, "did_you_mean": match.value,
-                    "field": field, "provided": value,
-                    "alternatives": match.alternatives,
+            else:
+                display_fields.append({
+                    "key": meta["key"], "label": meta["label"],
+                    "currentValue": vendor.get(meta["currentDisplayKey"]),
+                    "currentDisplay": vendor.get(meta["currentDisplayKey"]) or "\u2014",
+                    "newValue": "", "newDisplay": "",
+                    "inputType": meta["inputType"], "source": meta["source"],
+                    "options": candidates,
+                    "unresolved": True,
                 })
-            updates[field] = match.value
 
         elif field in _DIRECT_FIELDS:
-            updates[field] = value
+            proposed_updates[meta["key"]] = value
+            display_fields.append({
+                "key": meta["key"], "label": meta["label"],
+                "currentValue": vendor.get(meta["currentDisplayKey"]),
+                "currentDisplay": vendor.get(meta["currentDisplayKey"]) or "\u2014",
+                "newValue": value, "newDisplay": value,
+                "inputType": meta["inputType"],
+            })
 
-    try:
-        updated = pg_client.update_vendor(vendor["id"], updates)
-        return json.dumps({
-            "ok": True,
-            **_match_response(result),
-            "action": "updated",
-            "vendor": {"id": updated["id"], "name": updated.get("name", updated["id"])},
-            "fields_updated": list(field_args.keys()),
-        })
-    except ValueError as exc:
-        return json.dumps({"ok": False, "error": str(exc)})
+    return json.dumps({
+        "ok": True,
+        **_match_response(result),
+        "action": "confirm_edit",
+        "vendor": {"id": vendor["id"], "name": vendor.get("name", vendor["id"])},
+        "proposed_updates": proposed_updates,
+        "display_fields": display_fields,
+    })
 
 
 def execute_execute_python(args: dict, caller_email: str = "") -> str:
