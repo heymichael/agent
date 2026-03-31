@@ -135,12 +135,13 @@ def get_vendor_by_source(source_system: str, source_system_id: str) -> dict | No
     return _vendor_row_to_dict(row) if row else None
 
 
-def find_vendor_by_name(name: str) -> dict | None:
+def find_vendor_by_name(name: str, include_hidden: bool = False) -> dict | None:
     """Find a vendor by exact name (case-insensitive)."""
+    hidden_clause = "" if include_hidden else " AND v.hidden_from_agent = false"
     pool = get_pool()
     with pool.connection() as conn:
         row = conn.execute(
-            f"{_VENDOR_LIST_SQL} WHERE LOWER(v.name) = LOWER(%s) LIMIT 1", (name,)
+            f"{_VENDOR_LIST_SQL} WHERE LOWER(v.name) = LOWER(%s){hidden_clause} LIMIT 1", (name,)
         ).fetchone()
     return _vendor_row_to_dict(row) if row else None
 
@@ -151,18 +152,20 @@ SIMILAR_THRESHOLD = 0.4
 
 
 def find_vendors_similar(name: str, threshold: float = FUZZY_SUGGEST,
-                         limit: int = 5) -> list[tuple[dict, float]]:
+                         limit: int = 5,
+                         include_hidden: bool = False) -> list[tuple[dict, float]]:
     """Find vendors by trigram similarity (requires pg_trgm).
 
     Returns a list of (vendor_dict, similarity_score) tuples sorted by
     descending score, filtered to scores above *threshold*.
     """
+    hidden_clause = "" if include_hidden else " AND sub.hidden_from_agent = false"
     pool = get_pool()
     with pool.connection() as conn:
         rows = conn.execute(
             f"""SELECT sub.*, similarity(LOWER(sub.name), LOWER(%s)) AS sim_score
                 FROM ({_VENDOR_LIST_SQL}) sub
-                WHERE similarity(LOWER(sub.name), LOWER(%s)) > %s
+                WHERE similarity(LOWER(sub.name), LOWER(%s)) > %s{hidden_clause}
                 ORDER BY sim_score DESC
                 LIMIT %s""",
             (name, name, threshold, limit),
@@ -243,12 +246,13 @@ def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _load_all_vendors_light() -> list[dict]:
+def _load_all_vendors_light(include_hidden: bool = False) -> list[dict]:
     """Load id, name, aliases for all vendors (used by alias/normalized matching)."""
+    hidden_clause = "" if include_hidden else " WHERE hidden_from_agent = false"
     pool = get_pool()
     with pool.connection() as conn:
         rows = conn.execute(
-            "SELECT id::text, name, aliases FROM vendors ORDER BY name"
+            f"SELECT id::text, name, aliases FROM vendors{hidden_clause} ORDER BY name"
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -341,7 +345,10 @@ def resolve_vendor_by_identifier(identifier: str) -> VendorMatch | None:
             vendor, score = similar[0]
             match_type = "close" if score >= FUZZY_AUTO_ACCEPT else "fuzzy"
 
-    # --- Pass 2: check for ambiguity ---
+    # --- Pass 2: check for ambiguity (skip for exact name matches) ---
+    if match_type == "exact":
+        return VendorMatch(vendor, match_type)
+
     similar = find_vendors_similar(identifier, threshold=SIMILAR_THRESHOLD)
     alternatives = [v for v, _ in similar if v["id"] != vendor["id"]]
     if alternatives:

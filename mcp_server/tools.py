@@ -114,7 +114,7 @@ def _build_where(
 
     Returns (where_sql, params) — the SQL starts with ' WHERE 1=1'.
     """
-    clauses = ["1=1"]
+    clauses = ["1=1", "v.hidden_from_agent = false"]
     params: list = []
 
     if start_month:
@@ -150,7 +150,7 @@ def _build_vendor_where(
     caller_context: CallerContext = None,
 ) -> tuple[str, list]:
     """Build a WHERE clause for vendor-only queries (no spend table)."""
-    clauses = ["1=1"]
+    clauses = ["1=1", "v.hidden_from_agent = false"]
     params: list = []
 
     for field, value in filters.items():
