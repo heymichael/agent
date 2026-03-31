@@ -73,7 +73,10 @@ Full schema: `migrations/001_init.sql`.
 ### Key tables
 
 **vendors** — all vendors regardless of source. Identified by `(source_system,
-source_system_id)` unique natural key with UUID `id` as surrogate PK.
+source_system_id)` unique natural key with UUID `id` as surrogate PK. The
+`hidden_from_agent` boolean (default `false`) excludes duplicate vendors from
+agent interactions while preserving their data. Schema:
+`migrations/004_hidden_from_agent.sql`.
 
 **vendor_monthly_spend** — monthly spend summaries per vendor. `date` column
 stores the first of each month. Unique on `(vendor_id, date)`. Derived from
@@ -149,6 +152,7 @@ protocol overhead). It can also be run as a standalone MCP server via
 | `migrations/001_init.sql` | Full schema: all tables, indexes, constraints, seed roles |
 | `migrations/002_vendor_spend_detail.sql` | Granular spend detail table with canonical columns + JSONB metadata |
 | `migrations/003_sync_job_log.sql` | Sync job run + step tracking tables |
+| `migrations/004_hidden_from_agent.sql` | Add `hidden_from_agent` boolean to vendors |
 
 ## Supported tools
 
@@ -194,7 +198,21 @@ All tools that accept a `vendor` parameter use a single shared
 7. Multiple matches → `ambiguous` with candidates
 8. No match → `not_found`
 
+All resolution steps exclude vendors where `hidden_from_agent = true`.
+Exact name matches skip the Pass 2 ambiguity check — once a vendor matches
+by name, it is authoritative.
+
 After resolution, all downstream logic uses `vendor_id`, never the raw input.
+
+## CSV downloads
+
+When `vendor_list` returns 10+ results, the tool response includes a `csv`
+field with the full result set formatted as CSV. In `app.py`, the CSV is
+stripped from the tool result before sending to OpenAI (saving tokens) and
+surfaced via a `downloads` list on `ChatResponse`. Each download has
+`filename`, `content`, and `mime` fields. The frontend renders a download
+button that triggers a client-side blob download — no server-side file
+storage required.
 
 ## Parameter classification
 

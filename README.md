@@ -131,6 +131,15 @@ vendor-native (no semantic normalization).
 | AWS | Service | UsageType | — | — |
 | GCP (planned) | service.description | sku.description | project.id | `{"sku_id": ..., "region": ...}` |
 
+## Hidden vendors
+
+Vendors with `hidden_from_agent = true` are excluded from all agent tool
+queries (resolver, vendor_list, vendor_count, spend queries) but remain in
+Postgres with their data intact. The REST API (`/vendors`, `/spend`)
+continues to return all vendors regardless of this flag. Use this to hide
+duplicate entries when a more authoritative source exists (e.g., hide the
+Bill.com "Amazon Web Services" in favor of the Cost Explorer "AWS" vendor).
+
 ## Authentication
 
 All endpoints except `/health` require a Firebase ID token in the
@@ -162,9 +171,15 @@ Response:
 ```json
 {
   "reply": "You have 150 1099 vendors.",
-  "tool_calls_executed": ["vendor_count"]
+  "tool_calls_executed": ["vendor_count"],
+  "downloads": []
 }
 ```
+
+When tools generate downloadable content (e.g., `vendor_list` with 10+
+results), the `downloads` array contains objects with `filename`, `content`
+(CSV string), and `mime` fields. The CSV is stripped from the OpenAI tool
+context to save tokens.
 
 ### `GET /health`
 
