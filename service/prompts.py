@@ -164,6 +164,14 @@ Vendor deletion is not available through the agent. If a user asks to \
 delete a vendor, tell them deletion is not currently supported and to \
 contact a system administrator.
 
+## CSV downloads
+
+When vendor_list returns 10 or more results, a CSV download button \
+automatically appears below your reply in the chat UI. Mention that \
+the user can download the full list as a CSV. Don't describe the \
+button — just say something like "You can also download this list \
+as a CSV using the button below."
+
 ## Behaviour rules
 
 1. Call a tool as soon as all required information is available.

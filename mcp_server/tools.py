@@ -11,6 +11,8 @@ streaming or in-memory aggregation.
 
 from __future__ import annotations
 
+import csv
+import io
 from typing import Any
 
 from service.pg_client import (
@@ -282,7 +284,32 @@ def handle_vendor_list(args: dict, caller_context: CallerContext = None) -> dict
         result["data"]["showing"] = limit
         result["data"]["truncated"] = True
 
+    _CSV_THRESHOLD = 10
+    if len(vendors) >= _CSV_THRESHOLD:
+        result["csv"] = _vendors_to_csv(vendors)
+        result["csv_filename"] = _vendor_csv_filename(filters)
+
     return result
+
+
+_CSV_HEADERS = ["name", "accountType", "track1099", "paymentMethod",
+                "billingFrequency", "sourceSystem", "department", "owner"]
+
+
+def _vendors_to_csv(vendors: list[dict]) -> str:
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=_CSV_HEADERS, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(vendors)
+    return buf.getvalue()
+
+
+def _vendor_csv_filename(filters: dict) -> str:
+    parts = ["vendors"]
+    for key in sorted(filters):
+        val = str(filters[key]).lower().replace(" ", "-")
+        parts.append(f"{key}-{val}")
+    return "-".join(parts) + ".csv"
 
 
 def handle_spend_total(args: dict, caller_context: CallerContext = None) -> dict:
