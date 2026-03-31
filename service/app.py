@@ -120,7 +120,7 @@ class Disambiguation(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     tool_calls_executed: list[str]
-    pending_action: PendingAction | None = None
+    pending_actions: list[PendingAction] = []
     disambiguation: Disambiguation | None = None
 
 
@@ -346,7 +346,7 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
         messages.append({"role": m.role, "content": m.content})
 
     tool_calls_executed: list[str] = []
-    pending_action: PendingAction | None = None
+    pending_actions: list[PendingAction] = []
     disambiguation: Disambiguation | None = None
     max_rounds = 10
 
@@ -388,13 +388,13 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
                 parsed = json.loads(result)
                 if parsed.get("action") in ("confirm_delete", "open_edit", "confirm_edit"):
                     vendor = parsed["vendor"]
-                    pending_action = PendingAction(
+                    pending_actions.append(PendingAction(
                         type=parsed["action"],
                         vendor_id=vendor["id"],
                         vendor_name=vendor["name"],
                         proposed_updates=parsed.get("proposed_updates"),
                         display_fields=parsed.get("display_fields"),
-                    )
+                    ))
                 elif parsed.get("status") == "ambiguous":
                     field_args = {k: v for k, v in fn_args.items() if k != "identifier" and v is not None}
                     disambiguation = Disambiguation(
@@ -405,11 +405,11 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
             continue
 
         reply = choice.message.content or ""
-        return ChatResponse(reply=reply, tool_calls_executed=tool_calls_executed, pending_action=pending_action, disambiguation=disambiguation)
+        return ChatResponse(reply=reply, tool_calls_executed=tool_calls_executed, pending_actions=pending_actions, disambiguation=disambiguation)
 
     return ChatResponse(
         reply="I hit the maximum number of tool-call rounds. Please try again.",
         tool_calls_executed=tool_calls_executed,
-        pending_action=pending_action,
+        pending_actions=pending_actions,
         disambiguation=disambiguation,
     )

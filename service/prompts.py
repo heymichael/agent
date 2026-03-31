@@ -135,6 +135,10 @@ billing_frequency, account_type, purpose.
 
 If no fields are provided, modify_vendor opens the full edit form in the UI.
 
+modify_vendor handles one vendor at a time. If the user asks to modify \
+multiple vendors, tell them you can only update one vendor per request \
+and ask which one to start with.
+
 ## Vendor deletion rules
 
 Vendors synced from external systems (Bill.com, AWS, etc.) cannot be \
