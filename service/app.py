@@ -136,6 +136,14 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/branding")
+def get_branding_config():
+    row = pg_client.get_branding()
+    if not row:
+        return {"logoSvg": None, "lockupSvg": None, "lockupMode": "none"}
+    return row
+
+
 @app.delete("/vendors/{vendor_id}")
 def delete_vendor(vendor_id: str, caller: dict = Depends(get_verified_user)):
     vendor = pg_client.get_vendor(vendor_id)
