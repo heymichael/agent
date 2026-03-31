@@ -108,12 +108,20 @@ class PendingAction(BaseModel):
     type: str
     vendor_id: str
     vendor_name: str
+    proposed_updates: dict | None = None
+    display_fields: list[dict] | None = None
+
+
+class Disambiguation(BaseModel):
+    candidates: list[dict]
+    original_args: dict | None = None
 
 
 class ChatResponse(BaseModel):
     reply: str
     tool_calls_executed: list[str]
-    pending_action: PendingAction | None = None
+    pending_actions: list[PendingAction] = []
+    disambiguation: Disambiguation | None = None
 
 
 @app.get("/health")
@@ -253,6 +261,11 @@ def update_app(app_id: str, req: UpdateAppRequest, caller: dict = Depends(get_ve
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.get("/departments")
+def list_departments(caller: dict = Depends(get_verified_user)):
+    return pg_client.list_departments()
+
+
 @app.get("/vendors")
 def list_vendors(caller: dict = Depends(get_verified_user)):
     vendors = pg_client.list_vendors()
@@ -262,12 +275,40 @@ def list_vendors(caller: dict = Depends(get_verified_user)):
     return [v for v in vendors if v.get("id") in allowed]
 
 
+_VENDOR_FIELD_MAP: dict[str, str] = {
+    "departmentId": "department_id",
+    "ownerId": "owner_id",
+    "secondaryOwnerId": "secondary_owner_id",
+    "paymentMethod": "payment_method",
+    "billingFrequency": "billing_frequency",
+    "accountType": "account_type",
+    "track1099": "track_1099",
+    "spendType": "spend_type",
+    "contractStartDate": "contract_start",
+    "contractEndDate": "contract_end",
+    "contractLengthMonths": "contract_months",
+    "autoRenew": "auto_renew",
+    "renewalRate": "renewal_rate",
+    "renewalNoticeDays": "renewal_notice",
+    "terminationTerms": "termination_terms",
+}
+
+
+def _map_vendor_fields(updates: dict) -> dict:
+    """Translate camelCase frontend keys to snake_case DB column names."""
+    mapped: dict = {}
+    for key, value in updates.items():
+        db_key = _VENDOR_FIELD_MAP.get(key, key)
+        mapped[db_key] = value
+    return mapped
+
+
 @app.patch("/vendors/{vendor_id}")
 def update_vendor(vendor_id: str, updates: dict, caller: dict = Depends(get_verified_user)):
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
     try:
-        result = pg_client.update_vendor(vendor_id, updates)
+        result = pg_client.update_vendor(vendor_id, _map_vendor_fields(updates))
         return {"ok": True, "vendor": result}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -305,7 +346,8 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
         messages.append({"role": m.role, "content": m.content})
 
     tool_calls_executed: list[str] = []
-    pending_action: PendingAction | None = None
+    pending_actions: list[PendingAction] = []
+    disambiguation: Disambiguation | None = None
     max_rounds = 10
 
     for _ in range(max_rounds):
@@ -344,21 +386,30 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
                 })
 
                 parsed = json.loads(result)
-                if parsed.get("action") in ("confirm_delete", "open_edit"):
+                if parsed.get("action") in ("confirm_delete", "open_edit", "confirm_edit"):
                     vendor = parsed["vendor"]
-                    pending_action = PendingAction(
+                    pending_actions.append(PendingAction(
                         type=parsed["action"],
                         vendor_id=vendor["id"],
                         vendor_name=vendor["name"],
+                        proposed_updates=parsed.get("proposed_updates"),
+                        display_fields=parsed.get("display_fields"),
+                    ))
+                elif parsed.get("status") == "ambiguous":
+                    field_args = {k: v for k, v in fn_args.items() if k != "identifier" and v is not None}
+                    disambiguation = Disambiguation(
+                        candidates=parsed.get("candidates", []),
+                        original_args=field_args if field_args else None,
                     )
 
             continue
 
         reply = choice.message.content or ""
-        return ChatResponse(reply=reply, tool_calls_executed=tool_calls_executed, pending_action=pending_action)
+        return ChatResponse(reply=reply, tool_calls_executed=tool_calls_executed, pending_actions=pending_actions, disambiguation=disambiguation)
 
     return ChatResponse(
         reply="I hit the maximum number of tool-call rounds. Please try again.",
         tool_calls_executed=tool_calls_executed,
-        pending_action=pending_action,
+        pending_actions=pending_actions,
+        disambiguation=disambiguation,
     )

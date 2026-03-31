@@ -4,8 +4,8 @@ Analytics tools (vendor_lookup, vendor_count, spend_total, spend_by_vendor,
 spend_by_dimension, top_vendors) delegate to the MCP server module which
 owns the resolution pipeline, period parsing, and response contract.
 
-Write tools (add_vendor, delete_vendor, modify_vendor) and
-execute_python remain here.
+Write tools (add_vendor, modify_vendor) and execute_python remain here.
+delete_vendor is disabled — deletion must go through a system admin.
 """
 
 import json
@@ -223,31 +223,46 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "delete_vendor",
-            "description": "Request deletion of a vendor (not Bill.com). Returns a confirmation prompt that the user must approve in the UI.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "identifier": {
-                        "type": "string",
-                        "description": "Vendor name or ID to delete",
-                    },
-                },
-                "required": ["identifier"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "modify_vendor",
-            "description": "Open the vendor edit modal in the UI. Does not update fields directly — opens the edit form.",
+            "description": (
+                "Update vendor fields directly, or open the edit form if no "
+                "fields are provided. When fields are provided, the update is "
+                "applied immediately without opening the form."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "identifier": {
                         "type": "string",
                         "description": "Vendor name or ID to edit",
+                    },
+                    "department": {
+                        "type": "string",
+                        "description": "Department name (fuzzy-matched against canonical values)",
+                    },
+                    "owner": {
+                        "type": "string",
+                        "description": "Owner email (fuzzy-matched against canonical values)",
+                    },
+                    "secondary_owner": {
+                        "type": "string",
+                        "description": "Secondary owner email (fuzzy-matched against canonical values)",
+                    },
+                    "payment_method": {
+                        "type": "string",
+                        "description": "Payment method: Check, ACH, CreditCard, Wire, PayPal",
+                    },
+                    "billing_frequency": {
+                        "type": "string",
+                        "description": "Billing frequency: monthly, annual, usage-based",
+                    },
+                    "account_type": {
+                        "type": "string",
+                        "description": "Account type: Business, Individual",
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "description": "Vendor purpose/description",
                     },
                 },
                 "required": ["identifier"],
@@ -378,16 +393,193 @@ def execute_delete_vendor(args: dict, caller_email: str = "") -> str:
     })
 
 
+def _resolve_field_value(field_name: str, value: str, candidates: list[str]) -> dict | None:
+    """Resolve a field value against canonical candidates.
+
+    Returns None on success (value is resolved in-place via the returned
+    canonical string), or an error dict to return to the caller.
+    """
+    from service.resolve import resolve_canonical_value
+    match = resolve_canonical_value(value, candidates)
+    if not match:
+        return {"ok": False, "error": f"Unknown {field_name}: '{value}'", "valid_values": sorted(candidates)}
+    if match.match in ("exact", "close"):
+        return None  # caller reads match.value
+    return {
+        "ok": False,
+        "did_you_mean": match.value,
+        "field": field_name,
+        "provided": value,
+        "alternatives": match.alternatives,
+    }
+
+
+def _user_candidates() -> list[tuple[str, str]]:
+    """Build (candidate, user_id) pairs for both name and email."""
+    pairs: list[tuple[str, str]] = []
+    for u in pg_client.list_users():
+        uid = u["id"]
+        pairs.append((u["email"], uid))
+        full = u.get("fullName", "")
+        if full and full != u["email"]:
+            pairs.append((full, uid))
+    return pairs
+
+
+_FK_FIELD_RESOLVERS = {
+    "department": lambda: [(d["name"], d["id"]) for d in pg_client.list_departments()],
+    "owner": _user_candidates,
+    "secondary_owner": _user_candidates,
+}
+
+_ENUM_FIELD_VALUES = {
+    "payment_method": ["Check", "ACH", "CreditCard", "Wire", "PayPal"],
+    "billing_frequency": ["monthly", "annual", "usage-based"],
+    "account_type": ["Business", "Individual"],
+}
+
+_DIRECT_FIELDS = {"purpose"}
+
+_CONFIRM_FIELD_META = {
+    "department": {
+        "key": "departmentId", "label": "Department",
+        "inputType": "select", "source": "departments",
+        "currentDisplayKey": "department", "currentValueKey": "departmentId",
+    },
+    "owner": {
+        "key": "ownerId", "label": "Owner",
+        "inputType": "select", "source": "users",
+        "currentDisplayKey": "owner", "currentValueKey": "ownerId",
+    },
+    "secondary_owner": {
+        "key": "secondaryOwnerId", "label": "Secondary owner",
+        "inputType": "select", "source": "users",
+        "currentDisplayKey": "secondaryOwner", "currentValueKey": "secondaryOwnerId",
+    },
+    "payment_method": {
+        "key": "paymentMethod", "label": "Payment method",
+        "inputType": "select", "source": "enum",
+        "currentDisplayKey": "paymentMethod",
+    },
+    "billing_frequency": {
+        "key": "billingFrequency", "label": "Billing frequency",
+        "inputType": "select", "source": "enum",
+        "currentDisplayKey": "billingFrequency",
+    },
+    "account_type": {
+        "key": "accountType", "label": "Account type",
+        "inputType": "select", "source": "enum",
+        "currentDisplayKey": "accountType",
+    },
+    "purpose": {
+        "key": "purpose", "label": "Purpose",
+        "inputType": "text",
+        "currentDisplayKey": "purpose",
+    },
+}
+
+
 def execute_modify_vendor(args: dict, caller_email: str = "") -> str:
     result = pg_client.resolve_vendor_by_identifier(args["identifier"])
     if not result:
         return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
+
+    if result.match == "disambiguate":
+        candidates = [{"id": result.vendor["id"], "name": result.vendor.get("name", result.vendor["id"])}]
+        candidates += [{"id": v["id"], "name": v["name"]} for v in result.alternatives]
+        return json.dumps({
+            "ok": False, "status": "ambiguous",
+            "match": "disambiguate",
+            "candidates": candidates,
+            "message": f"Multiple vendors match '{args['identifier']}'. Ask the user to clarify.",
+        })
+
     vendor = result.vendor
+
+    field_args = {k: v for k, v in args.items() if k != "identifier" and v is not None}
+    if not field_args:
+        return json.dumps({
+            "ok": True,
+            **_match_response(result),
+            "action": "open_edit",
+            "vendor": {"id": vendor["id"], "name": vendor.get("name", vendor["id"])},
+        })
+
+    from service.resolve import resolve_canonical_value
+    proposed_updates: dict = {}
+    display_fields: list[dict] = []
+
+    for field, value in field_args.items():
+        meta = _CONFIRM_FIELD_META.get(field)
+        if not meta:
+            continue
+
+        if field in _FK_FIELD_RESOLVERS:
+            pairs = _FK_FIELD_RESOLVERS[field]()
+            candidates = [name for name, _ in pairs]
+            match = resolve_canonical_value(value, candidates)
+            if match:
+                id_map = {name: uid for name, uid in pairs}
+                new_id = id_map[match.value]
+                proposed_updates[meta["key"]] = new_id
+                display_fields.append({
+                    "key": meta["key"], "label": meta["label"],
+                    "currentValue": vendor.get(meta["currentValueKey"]),
+                    "currentDisplay": vendor.get(meta["currentDisplayKey"]) or "\u2014",
+                    "newValue": new_id, "newDisplay": match.value,
+                    "inputType": meta["inputType"], "source": meta["source"],
+                })
+            else:
+                display_fields.append({
+                    "key": meta["key"], "label": meta["label"],
+                    "currentValue": vendor.get(meta["currentValueKey"]),
+                    "currentDisplay": vendor.get(meta["currentDisplayKey"]) or "\u2014",
+                    "newValue": "", "newDisplay": "",
+                    "inputType": meta["inputType"], "source": meta["source"],
+                    "unresolved": True,
+                })
+
+        elif field in _ENUM_FIELD_VALUES:
+            candidates = _ENUM_FIELD_VALUES[field]
+            match = resolve_canonical_value(value, candidates)
+            if match:
+                proposed_updates[meta["key"]] = match.value
+                display_fields.append({
+                    "key": meta["key"], "label": meta["label"],
+                    "currentValue": vendor.get(meta["currentDisplayKey"]),
+                    "currentDisplay": vendor.get(meta["currentDisplayKey"]) or "\u2014",
+                    "newValue": match.value, "newDisplay": match.value,
+                    "inputType": meta["inputType"], "source": meta["source"],
+                    "options": candidates,
+                })
+            else:
+                display_fields.append({
+                    "key": meta["key"], "label": meta["label"],
+                    "currentValue": vendor.get(meta["currentDisplayKey"]),
+                    "currentDisplay": vendor.get(meta["currentDisplayKey"]) or "\u2014",
+                    "newValue": "", "newDisplay": "",
+                    "inputType": meta["inputType"], "source": meta["source"],
+                    "options": candidates,
+                    "unresolved": True,
+                })
+
+        elif field in _DIRECT_FIELDS:
+            proposed_updates[meta["key"]] = value
+            display_fields.append({
+                "key": meta["key"], "label": meta["label"],
+                "currentValue": vendor.get(meta["currentDisplayKey"]),
+                "currentDisplay": vendor.get(meta["currentDisplayKey"]) or "\u2014",
+                "newValue": value, "newDisplay": value,
+                "inputType": meta["inputType"],
+            })
+
     return json.dumps({
         "ok": True,
         **_match_response(result),
-        "action": "open_edit",
+        "action": "confirm_edit",
         "vendor": {"id": vendor["id"], "name": vendor.get("name", vendor["id"])},
+        "proposed_updates": proposed_updates,
+        "display_fields": display_fields,
     })
 
 
@@ -404,7 +596,6 @@ TOOL_HANDLERS = {
     "spend_by_dimension": execute_spend_by_dimension,
     "top_vendors": execute_top_vendors,
     "add_vendor": execute_add_vendor,
-    "delete_vendor": execute_delete_vendor,
     "modify_vendor": execute_modify_vendor,
     "execute_python": execute_execute_python,
 }
