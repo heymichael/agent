@@ -4,8 +4,8 @@ Analytics tools (vendor_lookup, vendor_count, spend_total, spend_by_vendor,
 spend_by_dimension, top_vendors) delegate to the MCP server module which
 owns the resolution pipeline, period parsing, and response contract.
 
-Write tools (add_vendor, delete_vendor, modify_vendor) and
-execute_python remain here.
+Write tools (add_vendor, modify_vendor) and execute_python remain here.
+delete_vendor is disabled — deletion must go through a system admin.
 """
 
 import json
@@ -217,23 +217,6 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "delete_vendor",
-            "description": "Request deletion of a vendor (not Bill.com). Returns a confirmation prompt that the user must approve in the UI.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "identifier": {
-                        "type": "string",
-                        "description": "Vendor name or ID to delete",
-                    },
-                },
-                "required": ["identifier"],
             },
         },
     },
@@ -613,7 +596,6 @@ TOOL_HANDLERS = {
     "spend_by_dimension": execute_spend_by_dimension,
     "top_vendors": execute_top_vendors,
     "add_vendor": execute_add_vendor,
-    "delete_vendor": execute_delete_vendor,
     "modify_vendor": execute_modify_vendor,
     "execute_python": execute_execute_python,
 }

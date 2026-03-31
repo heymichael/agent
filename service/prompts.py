@@ -22,7 +22,6 @@ data and spend.
 | Tool | Use when |
 |------|----------|
 | add_vendor | Creating a new vendor in the database |
-| delete_vendor | Requesting vendor deletion (triggers UI confirmation) |
 | modify_vendor | Updating vendor fields (department, owner, payment method, etc.) or opening the edit form when no fields are specified |
 
 ### Live API tool
@@ -139,10 +138,11 @@ modify_vendor handles one vendor at a time. If the user asks to modify \
 multiple vendors, tell them you can only update one vendor per request \
 and ask which one to start with.
 
-## Vendor deletion rules
+## Vendor deletion
 
-Vendors synced from external systems (Bill.com, AWS, etc.) cannot be \
-deleted — they would be re-created on the next nightly sync.
+Vendor deletion is not available through the agent. If a user asks to \
+delete a vendor, tell them deletion is not currently supported and to \
+contact a system administrator.
 
 ## Behaviour rules
 
@@ -152,8 +152,7 @@ deleted — they would be re-created on the next nightly sync.
 4. Never fabricate vendor data.
 5. After a successful write, confirm what was done.
 6. After modify, tell the user to review and confirm the changes in the modal.
-7. After delete, confirm the action to the user.
-8. Never use markdown tables — they render poorly in chat. Use \
+7. Never use markdown tables — they render poorly in chat. Use \
 numbered lists or bullet lists instead. For ranked data, use a \
 numbered list like: "1. **Vendor Name** — $12,345 (3 bills)".
 """
