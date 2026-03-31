@@ -2,7 +2,8 @@
 
 Paginates the Bill.com v3 /bills endpoint, aggregates by vendor + month,
 resolves Bill.com vendor IDs to internal UUIDs via the vendors table, and
-upserts monthly spend summaries.
+upserts monthly spend summaries.  Each step is tracked in sync_job_log /
+sync_job_step.
 
 No denormalization — vendor metadata lives only on the vendors table and
 is JOINed at query time.
@@ -15,7 +16,6 @@ Usage:
 """
 
 import logging
-import time
 from collections import defaultdict
 from datetime import date, datetime, timezone
 
@@ -26,9 +26,12 @@ load_dotenv(interpolate=False)
 
 from .billcom_auth import billcom_login
 from .pg_client import get_pool
+from .sync_tracker import SyncTracker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+JOB_NAME = "billcom-spend-sync"
 
 
 def _now() -> datetime:
@@ -133,60 +136,59 @@ def _month_to_date(month_str: str) -> date:
 
 def sync():
     """Run the full Bill.com bills → Postgres vendor_monthly_spend sync."""
-    start = time.time()
-    logger.info("Starting Bill.com spend sync")
-
-    base, _, headers = billcom_login()
-    logger.info("Logged into Bill.com")
-
-    bills = _paginate_bills(base, headers)
-    fetch_elapsed = time.time() - start
-    logger.info("Fetched %d bills from Bill.com in %.1fs", len(bills), fetch_elapsed)
-
-    aggregated = _aggregate_bills(bills)
-    logger.info("Aggregated into %d vendor-month buckets", len(aggregated))
-
-    billcom_ids = {vid for vid, _ in aggregated.keys()}
-
     pool = get_pool()
-    now = _now()
-    written = 0
-    skipped_unmapped = 0
+    tracker = SyncTracker(JOB_NAME, pool)
+    tracker.start()
 
-    with pool.connection() as conn:
-        uuid_map = _resolve_vendor_uuids(conn, billcom_ids)
-        unmapped = billcom_ids - set(uuid_map.keys())
-        if unmapped:
-            logger.warning(
-                "%d Bill.com vendor IDs have no match in vendors table (run sync_billcom first): %s",
-                len(unmapped),
-                list(unmapped)[:10],
-            )
+    try:
+        with tracker.step("api_fetch") as s:
+            base, _, headers = billcom_login()
+            bills = _paginate_bills(base, headers)
+            s.row_count = len(bills)
 
-        with conn.cursor() as cur:
-            for (billcom_id, month_str), totals in aggregated.items():
-                internal_id = uuid_map.get(billcom_id)
-                if not internal_id:
-                    skipped_unmapped += 1
-                    continue
+        aggregated = _aggregate_bills(bills)
+        billcom_ids = {vid for vid, _ in aggregated.keys()}
+        now = _now()
 
-                cur.execute(_UPSERT_SPEND_SQL, (
-                    internal_id,
-                    _month_to_date(month_str),
-                    totals["totalAmount"],
-                    totals["billCount"],
-                    now,
-                ))
-                written += 1
+        with tracker.step("summary_upsert") as s:
+            written = 0
+            skipped_unmapped = 0
 
-                if written % 200 == 0:
-                    logger.info("  upserted %d spend rows", written)
+            with pool.connection() as conn:
+                uuid_map = _resolve_vendor_uuids(conn, billcom_ids)
+                unmapped = billcom_ids - set(uuid_map.keys())
+                if unmapped:
+                    logger.warning(
+                        "%d Bill.com vendor IDs have no match in vendors table (run sync_billcom first): %s",
+                        len(unmapped),
+                        list(unmapped)[:10],
+                    )
 
-    elapsed = time.time() - start
-    logger.info(
-        "Spend sync complete: %d rows upserted, %d skipped (unmapped vendors) in %.1fs",
-        written, skipped_unmapped, elapsed,
-    )
+                with conn.cursor() as cur:
+                    for (billcom_id, month_str), totals in aggregated.items():
+                        internal_id = uuid_map.get(billcom_id)
+                        if not internal_id:
+                            skipped_unmapped += 1
+                            continue
+
+                        cur.execute(_UPSERT_SPEND_SQL, (
+                            internal_id,
+                            _month_to_date(month_str),
+                            totals["totalAmount"],
+                            totals["billCount"],
+                            now,
+                        ))
+                        written += 1
+
+            s.row_count = written
+            if skipped_unmapped:
+                s.metadata["skipped_unmapped"] = skipped_unmapped
+
+        tracker.finish()
+
+    except Exception as exc:
+        tracker.fail(str(exc))
+        raise
 
 
 if __name__ == "__main__":

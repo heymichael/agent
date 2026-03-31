@@ -61,8 +61,8 @@ full connection string.
 
 ### Schema
 
-Tables: `departments`, `roles`, `vendors`, `vendor_monthly_spend`, `users`,
-`apps`
+Tables: `departments`, `roles`, `vendors`, `vendor_monthly_spend`,
+`vendor_spend_detail`, `sync_job_log`, `sync_job_step`, `users`, `apps`
 
 Join tables: `user_roles`, `user_allowed_departments`, `user_allowed_vendors`,
 `user_denied_vendors`, `app_granting_roles`
@@ -76,7 +76,25 @@ Full schema: `migrations/001_init.sql`.
 source_system_id)` unique natural key with UUID `id` as surrogate PK.
 
 **vendor_monthly_spend** — monthly spend summaries per vendor. `date` column
-stores the first of each month. Unique on `(vendor_id, date)`.
+stores the first of each month. Unique on `(vendor_id, date)`. Derived from
+`vendor_spend_detail` via rollup for vendors with detail data.
+
+**vendor_spend_detail** — granular spend line items per vendor. Canonical
+columns (`category`, `subcategory`, `project`, `user_email`) are mapped from
+vendor-native fields by each sync job. A `metadata` JSONB column holds
+vendor-specific extras. Unique on `(vendor_id, date, COALESCE(category, ''),
+COALESCE(subcategory, ''), COALESCE(project, ''), COALESCE(user_email, ''))`.
+Schema: `migrations/002_vendor_spend_detail.sql`.
+
+**sync_job_log** — one row per sync job execution. Tracks `job_name`,
+`status` (running/completed/failed), `started_at`, `finished_at`,
+`duration_ms`, `error`, and `metadata` (JSONB).
+
+**sync_job_step** — one row per step within a sync run, FK to
+`sync_job_log`. Standardized step names across all jobs: `api_fetch`,
+`vendor_sync`, `detail_upsert`, `summary_upsert`, `reconcile`. Tracks
+`row_count`, `duration_ms`, `error`, and step-level `metadata`.
+Schema: `migrations/003_sync_job_log.sql`.
 
 **users** — email-keyed user accounts. Roles via `user_roles` join table.
 Access controls via `user_allowed_departments`, `user_allowed_vendors`,
@@ -89,7 +107,7 @@ Access controls via `user_allowed_departments`, `user_allowed_vendors`,
 
 Analytics tools are backed by the `mcp_server/` module, which provides:
 
-- **Intent-aligned tool handlers** — six tools with clear, specific purposes
+- **Intent-aligned tool handlers** — eight tools with clear, specific purposes
   instead of general-purpose query builders. All aggregation pushed to SQL.
 - **Vendor resolution pipeline** — single `resolve_vendor()` function that
   handles exact ID, exact name, alias, normalised, and token/fuzzy matching.
@@ -118,7 +136,8 @@ protocol overhead). It can also be run as a standalone MCP server via
 | `service/billcom_auth.py` | Shared Bill.com v3 login helper |
 | `service/sync_billcom.py` | Nightly Bill.com → Postgres vendor sync |
 | `service/sync_billcom_spend.py` | Nightly Bill.com bills → Postgres spend aggregation sync |
-| `service/sync_aws_spend.py` | Nightly AWS Cost Explorer → Postgres spend sync |
+| `service/sync_tracker.py` | Step-level execution tracking for sync jobs (writes to `sync_job_log` / `sync_job_step`) |
+| `service/sync_aws_spend.py` | Nightly AWS Cost Explorer → detail rows + summary rollup (with step logging) |
 | `mcp_server/tools.py` | Intent-aligned analytics tool handlers — SQL queries for all aggregation |
 | `mcp_server/resolver.py` | Vendor resolution pipeline, filter validation, field-to-SQL mapping |
 | `mcp_server/period_parser.py` | Deterministic period string parser |
@@ -128,6 +147,8 @@ protocol overhead). It can also be run as a standalone MCP server via
 | `scripts/seed_users.py` | Seed `users` table with role assignments |
 | `scripts/seed_departments.py` | Bulk-update vendor departments from CSV |
 | `migrations/001_init.sql` | Full schema: all tables, indexes, constraints, seed roles |
+| `migrations/002_vendor_spend_detail.sql` | Granular spend detail table with canonical columns + JSONB metadata |
+| `migrations/003_sync_job_log.sql` | Sync job run + step tracking tables |
 
 ## Supported tools
 
@@ -137,10 +158,13 @@ protocol overhead). It can also be run as a standalone MCP server via
 |---|---|---|
 | `vendor_lookup` | vendor | Resolve vendor by name/ID/alias, return full profile |
 | `vendor_count` | filters?, group_by? | Count vendors, optionally grouped by a dimension |
+| `vendor_list` | filters?, limit? | List vendors matching filter criteria with key fields |
 | `spend_total` | period?, filters? | Grand total spend for a period |
 | `spend_by_vendor` | vendor?, period?, filters? | Spend for one vendor (monthly) or all (ranked) |
 | `spend_by_dimension` | dimension, period?, filters? | Spend grouped by a dimension |
 | `top_vendors` | n, period?, filters? | Top N vendors by spend |
+| `spend_detail` | vendor, period, group_by?, category?, project? | Granular spend breakdown by service/SKU/project |
+| `spend_detail_dimensions` | vendor, dimension? | Discover available categories/subcategories/projects for a vendor |
 
 ### Write tools
 
@@ -179,7 +203,7 @@ After resolution, all downstream logic uses `vendor_id`, never the raw input.
 - `accountType`: Business, Individual
 - `track1099`: true, false
 - `billingFrequency`: monthly, annual, usage-based
-- `sourceSystem`: billcom, aws-ce, manual
+- `sourceSystem`: billcom, aws-ce, gcp, manual
 
 **Resolve (validated against Postgres data at query time):**
 - `vendor` — full resolution pipeline
@@ -255,5 +279,5 @@ source .venv/bin/activate
 DATABASE_URL="postgresql://..." python -m mcp_server
 ```
 
-This starts a stdio-transport MCP server exposing the six analytics tools.
+This starts a stdio-transport MCP server exposing the analytics tools.
 Requires `DATABASE_URL` env var pointing to the Postgres instance.

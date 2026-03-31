@@ -12,10 +12,13 @@ data and spend.
 |------|----------|
 | vendor_lookup | Looking up a specific vendor's profile or metadata |
 | vendor_count | Counting vendors, optionally grouped by a dimension |
+| vendor_list | Listing vendors that match filter criteria (e.g. "list the 1099 vendors") |
 | spend_total | Getting grand total spend for a period |
 | spend_by_vendor | Getting spend for one vendor or ranking all vendors |
 | spend_by_dimension | Grouping spend by a dimension (payment type, department, etc.) |
 | top_vendors | Finding the top N vendors by spend |
+| spend_detail | Drilling into a vendor's spend by service, SKU, or project |
+| spend_detail_dimensions | Discovering what breakdowns are available for a vendor |
 
 ### Write tools
 
@@ -28,7 +31,7 @@ data and spend.
 
 | Tool | Use when |
 |------|----------|
-| execute_python | Querying Bill.com or AWS APIs for transactional data not in the database: individual bills, invoice numbers, payment statuses, PII (address, email, tax ID), per-service AWS breakdowns, or real-time data |
+| execute_python | Querying Bill.com or AWS APIs for transactional data not in the database: individual bills, invoice numbers, payment statuses, PII (address, email, tax ID), or real-time data. Note: per-service AWS breakdowns are now available via spend_detail — prefer that over execute_python |
 
 ## Analytics tool response contract
 
@@ -67,7 +70,7 @@ marketing". Supported fields and values:
 - accountType: Business, Individual
 - track1099: true, false
 - billingFrequency: monthly, annual, usage-based
-- sourceSystem: billcom, aws-ce, manual
+- sourceSystem: billcom, aws-ce, gcp, manual
 - department: (validated against actual data)
 - owner: (validated against actual data)
 
@@ -82,6 +85,23 @@ spend_total(period="2025-Q4", filters={"department": "Marketing"})
 
 **dimension** (spend_by_dimension): paymentMethod, accountType, track1099, \
 billingFrequency, sourceSystem, department, owner, vendorName.
+
+## Spend detail (per-service / per-SKU breakdowns)
+
+For vendors with granular spend data (currently AWS, soon GCP), use \
+spend_detail_dimensions first to discover what services, SKUs, or \
+projects a vendor has, then spend_detail to drill in.
+
+Examples:
+- "Break down AWS spend by service" → \
+spend_detail(vendor="AWS", period="YTD", group_by="category")
+- "What AWS services do we use?" → \
+spend_detail_dimensions(vendor="AWS", dimension="category")
+- "Show me EC2 costs this quarter" → \
+spend_detail(vendor="AWS", period="2026-Q1", category="Amazon Elastic Compute Cloud")
+
+spend_detail and spend_detail_dimensions follow the same response \
+contract as other analytics tools (ok, ambiguous, not_found, etc.).
 
 ## Using execute_python for live API data
 

@@ -13,7 +13,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from service.pg_client import get_pool, get_vendor, resolve_vendor_by_identifier
+from service.pg_client import (
+    get_pool,
+    get_vendor,
+    resolve_vendor_by_identifier,
+    query_spend_detail as pg_query_spend_detail,
+    get_spend_detail_dimensions as pg_get_spend_detail_dimensions,
+)
 from .resolver import validate_filters, FIELD_TO_SQL
 from .period_parser import parse_period, PeriodParseError
 
@@ -217,6 +223,66 @@ def handle_vendor_count(args: dict, caller_context: CallerContext = None) -> dic
         ).fetchone()
 
     return {"status": "ok", "data": {"count": row["cnt"]}}
+
+
+_VENDOR_LIST_SELECT = """
+    SELECT v.id, v.name, v.account_type, v.track_1099,
+           v.payment_method, v.billing_frequency, v.source_system,
+           d.name AS department, uo.email AS owner
+"""
+
+_VENDOR_LIST_DEFAULT_LIMIT = 50
+
+
+def handle_vendor_list(args: dict, caller_context: CallerContext = None) -> dict:
+    """List vendors matching filter criteria with key fields."""
+    filters = dict(args.get("filters") or {})
+    limit = args.get("limit", _VENDOR_LIST_DEFAULT_LIMIT)
+    if not isinstance(limit, int) or limit < 1:
+        limit = _VENDOR_LIST_DEFAULT_LIMIT
+    limit = min(limit, 200)
+
+    filter_err = validate_filters(filters)
+    if filter_err:
+        return filter_err
+
+    where_sql, params = _build_vendor_where(filters, caller_context)
+    pool = get_pool()
+
+    with pool.connection() as conn:
+        count_row = conn.execute(
+            f"SELECT COUNT(*) AS cnt {_VENDOR_BASE_JOIN} {where_sql}",
+            params,
+        ).fetchone()
+        total = count_row["cnt"]
+
+        rows = conn.execute(
+            f"{_VENDOR_LIST_SELECT} {_VENDOR_BASE_JOIN} {where_sql}"
+            f" ORDER BY v.name LIMIT %s",
+            params + [limit],
+        ).fetchall()
+
+    vendors = [
+        {
+            "id": str(r["id"]),
+            "name": r["name"],
+            "accountType": r["account_type"],
+            "track1099": r["track_1099"],
+            "paymentMethod": r["payment_method"],
+            "billingFrequency": r["billing_frequency"],
+            "sourceSystem": r["source_system"],
+            "department": r["department"],
+            "owner": r["owner"],
+        }
+        for r in rows
+    ]
+
+    result: dict = {"status": "ok", "data": {"vendors": vendors, "total": total}}
+    if total > limit:
+        result["data"]["showing"] = limit
+        result["data"]["truncated"] = True
+
+    return result
 
 
 def handle_spend_total(args: dict, caller_context: CallerContext = None) -> dict:
@@ -444,13 +510,98 @@ def handle_top_vendors(args: dict, caller_context: CallerContext = None) -> dict
     }
 
 
+# ── Spend detail handlers ────────────────────────────────────────────────
+
+def handle_spend_detail(args: dict, caller_context: CallerContext = None) -> dict:
+    """Granular spend detail for a single vendor, with optional filters and grouping."""
+    vendor_input = args.get("vendor")
+    period = args.get("period")
+    group_by = args.get("group_by")
+    category = args.get("category")
+    project = args.get("project")
+
+    if not vendor_input:
+        return {"status": "invalid_filter", "field": "vendor", "provided": None, "valid_values": []}
+
+    err, match = _resolve_or_ambiguous(vendor_input)
+    if err:
+        return err
+
+    vendor = match.vendor
+    vendor_id = vendor["id"]
+
+    auth_err = _check_spend_auth(caller_context, vendor_id=vendor_id, vendor_name=vendor.get("name"))
+    if auth_err:
+        return auth_err
+
+    parsed = _period_or_error(period)
+    if isinstance(parsed, dict):
+        return parsed
+    start_month, end_month = parsed
+
+    rows = pg_query_spend_detail(
+        vendor_id=vendor_id,
+        start_month=start_month,
+        end_month=end_month,
+        category=category,
+        project=project,
+        group_by=group_by,
+    )
+
+    return {
+        "status": "ok",
+        "data": {
+            "vendor": vendor.get("name", vendor_id),
+            "vendor_id": vendor_id,
+            "period": {"start": start_month, "end": end_month},
+            "group_by": group_by,
+            "rows": rows,
+            "row_count": len(rows),
+        },
+    }
+
+
+def handle_spend_detail_dimensions(args: dict, caller_context: CallerContext = None) -> dict:
+    """Discover available dimension values for a vendor's spend detail."""
+    vendor_input = args.get("vendor")
+    dimension = args.get("dimension")
+
+    if not vendor_input:
+        return {"status": "invalid_filter", "field": "vendor", "provided": None, "valid_values": []}
+
+    err, match = _resolve_or_ambiguous(vendor_input)
+    if err:
+        return err
+
+    vendor = match.vendor
+    vendor_id = vendor["id"]
+
+    auth_err = _check_spend_auth(caller_context, vendor_id=vendor_id, vendor_name=vendor.get("name"))
+    if auth_err:
+        return auth_err
+
+    dimensions = pg_get_spend_detail_dimensions(vendor_id=vendor_id, dimension=dimension)
+
+    return {
+        "status": "ok",
+        "data": {
+            "vendor": vendor.get("name", vendor_id),
+            "vendor_id": vendor_id,
+            "dimensions": dimensions,
+        },
+    }
+
+
 # ── Handler registry ─────────────────────────────────────────────────────
 
 TOOL_HANDLERS = {
     "vendor_lookup": handle_vendor_lookup,
     "vendor_count": handle_vendor_count,
+    "vendor_list": handle_vendor_list,
     "spend_total": handle_spend_total,
     "spend_by_vendor": handle_spend_by_vendor,
     "spend_by_dimension": handle_spend_by_dimension,
     "top_vendors": handle_top_vendors,
+    "spend_detail": handle_spend_detail,
+    "spend_detail_dimensions": handle_spend_detail_dimensions,
 }

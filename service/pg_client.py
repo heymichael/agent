@@ -422,6 +422,110 @@ def _month_to_date(month_str: str) -> date:
 
 
 # ---------------------------------------------------------------------------
+# Spend detail
+# ---------------------------------------------------------------------------
+
+def query_spend_detail(
+    vendor_id: str,
+    start_month: str,
+    end_month: str,
+    category: str | None = None,
+    subcategory: str | None = None,
+    project: str | None = None,
+    group_by: str | None = None,
+) -> list[dict]:
+    """Query vendor_spend_detail with optional filters and grouping.
+
+    When group_by is set (one of 'category', 'subcategory', 'project'),
+    returns rows grouped and summed by that dimension.  Otherwise returns
+    individual detail rows.
+    """
+    pool = get_pool()
+    start_date = _month_to_date(start_month)
+    end_date = _month_to_date(end_month)
+
+    params: list[Any] = [vendor_id, start_date, end_date]
+    filters = ""
+
+    if category:
+        filters += " AND d.category = %s"
+        params.append(category)
+    if subcategory:
+        filters += " AND d.subcategory = %s"
+        params.append(subcategory)
+    if project:
+        filters += " AND d.project = %s"
+        params.append(project)
+
+    valid_group_by = {"category", "subcategory", "project"}
+
+    if group_by and group_by in valid_group_by:
+        sql = f"""
+            SELECT d.{group_by} AS dimension_value,
+                   TO_CHAR(d.date, 'YYYY-MM') AS month,
+                   SUM(d.amount) AS amount
+            FROM vendor_spend_detail d
+            WHERE d.vendor_id = %s AND d.date >= %s AND d.date <= %s
+            {filters}
+            GROUP BY d.{group_by}, d.date
+            ORDER BY d.date, amount DESC
+        """
+    else:
+        sql = f"""
+            SELECT d.category, d.subcategory, d.project, d.user_email,
+                   TO_CHAR(d.date, 'YYYY-MM') AS month,
+                   d.amount, d.metadata
+            FROM vendor_spend_detail d
+            WHERE d.vendor_id = %s AND d.date >= %s AND d.date <= %s
+            {filters}
+            ORDER BY d.date, d.amount DESC
+        """
+
+    with pool.connection() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    result = []
+    for r in rows:
+        row = dict(r)
+        if "amount" in row:
+            row["amount"] = float(row["amount"])
+        if "metadata" in row and row["metadata"] is not None:
+            pass  # already a dict from psycopg jsonb handling
+        result.append(row)
+    return result
+
+
+def get_spend_detail_dimensions(
+    vendor_id: str,
+    dimension: str | None = None,
+) -> dict:
+    """Return distinct dimension values for a vendor's detail rows.
+
+    If dimension is specified ('category', 'subcategory', or 'project'),
+    returns only that dimension's values. Otherwise returns all three.
+    """
+    pool = get_pool()
+    valid = {"category", "subcategory", "project"}
+    dims_to_query = [dimension] if dimension and dimension in valid else sorted(valid)
+
+    result: dict[str, list[str]] = {}
+
+    with pool.connection() as conn:
+        for dim in dims_to_query:
+            rows = conn.execute(
+                f"""SELECT DISTINCT {dim} AS val
+                    FROM vendor_spend_detail
+                    WHERE vendor_id = %s AND {dim} IS NOT NULL
+                    ORDER BY val""",
+                (vendor_id,),
+            ).fetchall()
+            key = f"{dim}s" if not dim.endswith("y") else f"{dim[:-1]}ies"
+            result[key] = [r["val"] for r in rows]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Users
 # ---------------------------------------------------------------------------
 

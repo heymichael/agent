@@ -15,10 +15,13 @@ from .sandbox import execute_python
 from mcp_server.tools import (
     handle_vendor_lookup,
     handle_vendor_count,
+    handle_vendor_list,
     handle_spend_total,
     handle_spend_by_vendor,
     handle_spend_by_dimension,
     handle_top_vendors,
+    handle_spend_detail,
+    handle_spend_detail_dimensions,
 )
 
 # ---------------------------------------------------------------------------
@@ -92,6 +95,32 @@ TOOL_DEFINITIONS = [
                         ),
                     },
                     "filters": _FILTERS_PARAM,
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "vendor_list",
+            "description": (
+                "List vendors matching filter criteria. Returns vendor names "
+                "and key fields (department, accountType, paymentMethod, etc.). "
+                "Use when the user asks to see, list, or enumerate vendors "
+                "matching conditions — e.g. 'list the 1099 vendors', "
+                "'show me ACH vendors in marketing'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filters": _FILTERS_PARAM,
+                    "limit": {
+                        "type": "integer",
+                        "description": (
+                            "Max vendors to return. Defaults to 50. "
+                            "Use a smaller number when the user asks for a sample."
+                        ),
+                    },
                 },
             },
         },
@@ -174,6 +203,68 @@ TOOL_DEFINITIONS = [
                     "period": _PERIOD_PARAM,
                     "filters": _FILTERS_PARAM,
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "spend_detail",
+            "description": (
+                "Query granular spend detail for a vendor, broken down by "
+                "service/category, SKU/subcategory, and project. Use for drill-down "
+                "questions like 'break down AWS spend by service' or 'what is our "
+                "Cloud Run spend?'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vendor": {
+                        "type": "string",
+                        "description": "Vendor name, ID, or alias.",
+                    },
+                    "period": _PERIOD_PARAM,
+                    "group_by": {
+                        "type": "string",
+                        "enum": ["category", "subcategory", "project"],
+                        "description": "Group and sum results by this dimension.",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Filter to a specific category (e.g. 'Amazon Elastic Compute Cloud').",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Filter to a specific project or linked account.",
+                    },
+                },
+                "required": ["vendor", "period"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "spend_detail_dimensions",
+            "description": (
+                "Discover what categories, subcategories, and projects are available "
+                "for a vendor's spend detail. Use before spend_detail to learn what "
+                "breakdowns exist."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vendor": {
+                        "type": "string",
+                        "description": "Vendor name, ID, or alias.",
+                    },
+                    "dimension": {
+                        "type": "string",
+                        "enum": ["category", "subcategory", "project"],
+                        "description": "Return values for just this dimension. Omit for all.",
+                    },
+                },
+                "required": ["vendor"],
             },
         },
     },
@@ -333,6 +424,10 @@ def execute_vendor_count(args: dict, caller_email: str = "") -> str:
     return json.dumps(handle_vendor_count(args))
 
 
+def execute_vendor_list(args: dict, caller_email: str = "") -> str:
+    return json.dumps(handle_vendor_list(args))
+
+
 def execute_spend_total(args: dict, caller_email: str = "") -> str:
     ctx = _build_caller_context(caller_email)
     return json.dumps(handle_spend_total(args, caller_context=ctx))
@@ -351,6 +446,16 @@ def execute_spend_by_dimension(args: dict, caller_email: str = "") -> str:
 def execute_top_vendors(args: dict, caller_email: str = "") -> str:
     ctx = _build_caller_context(caller_email)
     return json.dumps(handle_top_vendors(args, caller_context=ctx))
+
+
+def execute_spend_detail(args: dict, caller_email: str = "") -> str:
+    ctx = _build_caller_context(caller_email)
+    return json.dumps(handle_spend_detail(args, caller_context=ctx))
+
+
+def execute_spend_detail_dimensions(args: dict, caller_email: str = "") -> str:
+    ctx = _build_caller_context(caller_email)
+    return json.dumps(handle_spend_detail_dimensions(args, caller_context=ctx))
 
 
 def execute_add_vendor(args: dict, caller_email: str = "") -> str:
@@ -591,10 +696,13 @@ def execute_execute_python(args: dict, caller_email: str = "") -> str:
 TOOL_HANDLERS = {
     "vendor_lookup": execute_vendor_lookup,
     "vendor_count": execute_vendor_count,
+    "vendor_list": execute_vendor_list,
     "spend_total": execute_spend_total,
     "spend_by_vendor": execute_spend_by_vendor,
     "spend_by_dimension": execute_spend_by_dimension,
     "top_vendors": execute_top_vendors,
+    "spend_detail": execute_spend_detail,
+    "spend_detail_dimensions": execute_spend_detail_dimensions,
     "add_vendor": execute_add_vendor,
     "modify_vendor": execute_modify_vendor,
     "execute_python": execute_execute_python,
