@@ -151,6 +151,7 @@ def _patch_all(pool=None):
         patch("mcp_server.tools.get_pool", return_value=pool),
         patch("mcp_server.tools.get_vendor", return_value=SAMPLE_VENDOR_API),
         patch("service.pg_client.get_pool", return_value=pool),
+        patch("mcp_server.resolver.get_pool", return_value=pool),
     )
 
 
@@ -158,15 +159,15 @@ def _patch_all(pool=None):
 
 class TestVendorLookup:
     def test_by_name(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_vendor_lookup({"vendor": "Acme Corp"})
             assert result["status"] == "ok"
             assert result["vendor_id"] == "v_acme"
 
     def test_by_alias(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_vendor_lookup({"vendor": "Acme"})
             assert result["status"] == "ok"
             assert result["vendor_id"] == "v_acme"
@@ -176,20 +177,20 @@ class TestVendorLookup:
             "WHERE id::text": None,
             "FROM vendors ORDER BY": [],
         })
-        p1, p2, p3 = _patch_all(pool)
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
             result = handle_vendor_lookup({"vendor": "Nonexistent"})
             assert result["status"] == "not_found"
 
     def test_empty_vendor(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_vendor_lookup({"vendor": ""})
             assert result["status"] == "not_found"
 
     def test_missing_vendor_param(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_vendor_lookup({})
             assert result["status"] == "not_found"
 
@@ -198,15 +199,15 @@ class TestVendorLookup:
 
 class TestVendorCount:
     def test_total_count(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_vendor_count({})
             assert result["status"] == "ok"
             assert result["data"]["count"] == 3
 
     def test_invalid_filter(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_vendor_count({"filters": {"paymentMethod": "Bitcoin"}})
             assert result["status"] == "invalid_filter"
 
@@ -217,8 +218,8 @@ class TestVendorCount:
                 {"grp": "Marketing", "cnt": 1},
             ],
         })
-        p1, p2, p3 = _patch_all(pool)
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
             result = handle_vendor_count({"group_by": "department"})
             assert result["status"] == "ok"
             counts = result["data"]["counts"]
@@ -230,23 +231,23 @@ class TestVendorCount:
 
 class TestSpendTotal:
     def test_all_time(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_spend_total({})
             assert result["status"] == "ok"
             assert result["data"]["totalAmount"] == 58000.00
             assert result["data"]["vendorCount"] == 3
 
     def test_invalid_period(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_spend_total({"period": "garbage"})
             assert result["status"] == "invalid_filter"
             assert result["field"] == "period"
 
     def test_with_caller_context_finance_admin(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_spend_total({}, caller_context={"is_finance_admin": True})
             assert result["status"] == "ok"
             assert result["data"]["totalAmount"] == 58000.00
@@ -256,8 +257,8 @@ class TestSpendTotal:
 
 class TestSpendByVendor:
     def test_single_vendor(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_spend_by_vendor({"vendor": "Acme Corp"})
             assert result["status"] == "ok"
             assert result["vendor_id"] == "v_acme"
@@ -269,14 +270,14 @@ class TestSpendByVendor:
             "WHERE id::text": None,
             "FROM vendors ORDER BY": [],
         })
-        p1, p2, p3 = _patch_all(pool)
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
             result = handle_spend_by_vendor({"vendor": "Nonexistent"})
             assert result["status"] == "not_found"
 
     def test_all_vendors(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_spend_by_vendor({})
             assert result["status"] == "ok"
             assert result["data"]["totalVendors"] == 3
@@ -286,8 +287,8 @@ class TestSpendByVendor:
 
 class TestSpendByDimension:
     def test_by_payment_method(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_spend_by_dimension({"dimension": "paymentMethod"})
             assert result["status"] == "ok"
             groups = result["data"]["groups"]
@@ -297,8 +298,8 @@ class TestSpendByDimension:
             assert groups["Check"]["totalAmount"] == 13000.00
 
     def test_missing_dimension(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_spend_by_dimension({})
             assert result["status"] == "invalid_filter"
 
@@ -307,8 +308,8 @@ class TestSpendByDimension:
 
 class TestTopVendors:
     def test_default_top_10(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_top_vendors({})
             assert result["status"] == "ok"
             vendors = result["data"]["vendors"]
@@ -316,16 +317,16 @@ class TestTopVendors:
             assert vendors[0]["vendor_name"] == "Acme Corp"
 
     def test_ranked_by_amount_descending(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_top_vendors({})
             vendors = result["data"]["vendors"]
             amounts = [v["totalAmount"] for v in vendors]
             assert amounts == sorted(amounts, reverse=True)
 
     def test_invalid_period(self):
-        p1, p2, p3 = _patch_all()
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
             result = handle_top_vendors({"period": "not-a-period"})
             assert result["status"] == "invalid_filter"
 
@@ -342,7 +343,17 @@ def _make_vendor_row(i: int) -> dict:
         "billing_frequency": None,
         "source_system": "billcom",
         "department": "Engineering",
-        "owner": None,
+        "owner": " ",
+        "secondary_owner": " ",
+        "purpose": None,
+        "spend_type": None,
+        "auto_renew": None,
+        "contract_start": None,
+        "contract_end": None,
+        "contract_months": None,
+        "renewal_rate": None,
+        "renewal_notice": None,
+        "termination_terms": None,
     }
 
 
@@ -358,8 +369,8 @@ class TestVendorList:
             "LIMIT": limited_rows,
             "ORDER BY v.name": all_rows,
         })
-        p1, p2, p3 = _patch_all(pool)
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
             result = handle_vendor_list({"filters": {"track1099": True}})
 
         assert result["status"] == "ok"
@@ -378,8 +389,8 @@ class TestVendorList:
             "COUNT(*)": {"cnt": 15},
             "LIMIT": rows,
         })
-        p1, p2, p3 = _patch_all(pool)
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
             result = handle_vendor_list({})
 
         assert result["status"] == "ok"
@@ -398,10 +409,147 @@ class TestVendorList:
             "COUNT(*)": {"cnt": 5},
             "LIMIT": rows,
         })
-        p1, p2, p3 = _patch_all(pool)
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
             result = handle_vendor_list({})
 
         assert result["status"] == "ok"
         assert "csv" not in result
         assert len(result["data"]["vendors"]) == 5
+
+
+# ── Owner filter resolution ────────────────────────────────────────────
+
+from mcp_server.resolver import validate_filters, resolve_filter
+
+
+class TestOwnerFilter:
+    def test_owner_resolves_by_name(self):
+        """Owner filter should resolve a person's name to user IDs."""
+        user_names = [{"val": "Michael Mader"}, {"val": "Suman C"}]
+        user_ids = [{"id": "uid-1"}, {"id": "uid-2"}, {"id": "uid-3"}]
+
+        pool = _build_mock_pool({
+            "DISTINCT CONCAT": user_names,
+            "SELECT id FROM users": user_ids,
+        })
+        with patch("mcp_server.resolver.get_pool", return_value=pool):
+            result = resolve_filter("owner", "Michael Mader")
+
+        assert result["status"] == "ok"
+        assert result["value"] == "Michael Mader"
+        assert result["user_ids"] == ["uid-1", "uid-2", "uid-3"]
+
+    def test_owner_fuzzy_match(self):
+        """Misspelled owner name should still resolve via fuzzy matching."""
+        user_names = [{"val": "Michael Mader"}, {"val": "Suman C"}]
+        user_ids = [{"id": "uid-1"}]
+
+        pool = _build_mock_pool({
+            "DISTINCT CONCAT": user_names,
+            "SELECT id FROM users": user_ids,
+        })
+        with patch("mcp_server.resolver.get_pool", return_value=pool):
+            result = resolve_filter("owner", "Micheal Mader")
+
+        assert result["status"] == "ok"
+        assert result["value"] == "Michael Mader"
+
+    def test_validate_filters_stashes_owner_ids(self):
+        """validate_filters should stash _owner_ids in the filters dict."""
+        user_names = [{"val": "Michael Mader"}]
+        user_ids = [{"id": "uid-1"}, {"id": "uid-2"}]
+
+        pool = _build_mock_pool({
+            "DISTINCT CONCAT": user_names,
+            "SELECT id FROM users": user_ids,
+        })
+        with patch("mcp_server.resolver.get_pool", return_value=pool):
+            filters = {"owner": "Michael Mader"}
+            err = validate_filters(filters)
+
+        assert err is None
+        assert filters["owner"] == "Michael Mader"
+        assert filters["_owner_ids"] == ["uid-1", "uid-2"]
+
+    def test_secondary_owner_resolves(self):
+        """secondaryOwner filter should resolve the same way as owner."""
+        user_names = [{"val": "Suman C"}]
+        user_ids = [{"id": "uid-5"}]
+
+        pool = _build_mock_pool({
+            "DISTINCT CONCAT": user_names,
+            "SELECT id FROM users": user_ids,
+        })
+        with patch("mcp_server.resolver.get_pool", return_value=pool):
+            result = resolve_filter("secondaryOwner", "Suman C")
+
+        assert result["status"] == "ok"
+        assert result["value"] == "Suman C"
+        assert result["user_ids"] == ["uid-5"]
+
+    def test_owner_filter_produces_in_clause(self):
+        """Owner filter should produce ANY() clause, not exact match."""
+        rows = [_make_vendor_row(i) for i in range(3)]
+        user_names = [{"val": "Michael Mader"}]
+        user_ids = [{"id": "uid-1"}, {"id": "uid-2"}]
+
+        pool = _build_mock_pool({
+            "COUNT(*)": {"cnt": 3},
+            "LIMIT": rows,
+            "DISTINCT CONCAT": user_names,
+            "SELECT id FROM users": user_ids,
+        })
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_vendor_list({"filters": {"owner": "Michael Mader"}})
+
+        assert result["status"] == "ok"
+        assert len(result["data"]["vendors"]) == 3
+
+
+# ── New filter fields ──────────────────────────────────────────────────
+
+class TestNewFilters:
+    def test_auto_renew_boolean_filter(self):
+        """autoRenew filter should accept boolean values."""
+        with patch("mcp_server.resolver.get_pool"):
+            result = resolve_filter("autoRenew", True)
+        assert result["status"] == "ok"
+        assert result["value"] is True
+
+    def test_purpose_resolve_filter(self):
+        """purpose should resolve against distinct values in DB."""
+        pool = _build_mock_pool({
+            "v.purpose": [{"val": "Consulting"}, {"val": "SaaS"}],
+        })
+        with patch("mcp_server.resolver.get_pool", return_value=pool):
+            result = resolve_filter("purpose", "Consulting")
+        assert result["status"] == "ok"
+        assert result["value"] == "Consulting"
+
+    def test_range_filter_contract_months(self):
+        """Range filter should accept min/max dict."""
+        with patch("mcp_server.resolver.get_pool"):
+            result = resolve_filter("contractMonths", {"min": 6, "max": 24})
+        assert result["status"] == "ok"
+        assert result["value"] == {"min": 6, "max": 24}
+
+    def test_range_filter_contract_start_date(self):
+        """Date range filter should accept from/to dict."""
+        with patch("mcp_server.resolver.get_pool"):
+            result = resolve_filter("contractStart", {"from": "2025-01-01", "to": "2025-12-31"})
+        assert result["status"] == "ok"
+
+    def test_range_filter_single_value(self):
+        """Range fields should also accept a single exact value."""
+        with patch("mcp_server.resolver.get_pool"):
+            result = resolve_filter("contractMonths", 12)
+        assert result["status"] == "ok"
+        assert result["value"] == 12
+
+    def test_unknown_filter_field_rejected(self):
+        """Unknown filter fields should return invalid_filter."""
+        with patch("mcp_server.resolver.get_pool"):
+            result = resolve_filter("nonexistentField", "value")
+        assert result["status"] == "invalid_filter"
