@@ -42,19 +42,95 @@ _PERIOD_PARAM = {
 
 _FILTERS_PARAM = {
     "type": "object",
-    "description": (
-        "Filters to narrow results. Multiple filters are AND-combined. "
-        "Supported fields: paymentMethod (Check, ACH, CreditCard, Wire, PayPal), "
-        "accountType (Business, Individual), track1099 (true/false), "
-        "billingFrequency (monthly, annual, usage-based), "
-        "sourceSystem (billcom, aws-ce, manual), department (name), "
-        "owner (person's name, e.g. 'Michael Mader'), "
-        "secondaryOwner (person's name), purpose, spendType, "
-        "autoRenew (true/false), "
-        "contractStart, contractEnd (date or {from, to} range), "
-        "contractMonths, renewalNotice (number or {min, max} range), "
-        "renewalRate, terminationTerms."
-    ),
+    "description": "Filters to narrow results. Multiple filters are AND-combined.",
+    "properties": {
+        "paymentMethod": {
+            "type": "string",
+            "enum": ["Check", "ACH", "CreditCard", "Wire", "PayPal"],
+        },
+        "accountType": {
+            "type": "string",
+            "enum": ["Business", "Individual"],
+        },
+        "track1099": {"type": "boolean"},
+        "billingFrequency": {
+            "type": "string",
+            "enum": ["monthly", "annual", "usage-based"],
+        },
+        "sourceSystem": {
+            "type": "string",
+            "enum": ["billcom", "aws-ce", "manual"],
+        },
+        "department": {
+            "type": "string",
+            "description": "Department name (fuzzy matched).",
+        },
+        "owner": {
+            "type": "string",
+            "description": "Person's name (fuzzy matched, e.g. 'Michael Mader').",
+        },
+        "secondaryOwner": {
+            "type": "string",
+            "description": "Person's name (fuzzy matched).",
+        },
+        "purpose": {"type": "string"},
+        "spendType": {"type": "string"},
+        "autoRenew": {"type": "boolean"},
+        "contractStart": {
+            "description": "Date string or {from, to} range for contract start.",
+            "oneOf": [
+                {"type": "string"},
+                {
+                    "type": "object",
+                    "properties": {
+                        "from": {"type": "string"},
+                        "to": {"type": "string"},
+                    },
+                },
+            ],
+        },
+        "contractEnd": {
+            "description": "Date string or {from, to} range for contract end.",
+            "oneOf": [
+                {"type": "string"},
+                {
+                    "type": "object",
+                    "properties": {
+                        "from": {"type": "string"},
+                        "to": {"type": "string"},
+                    },
+                },
+            ],
+        },
+        "contractMonths": {
+            "description": "Integer or {min, max} range.",
+            "oneOf": [
+                {"type": "integer"},
+                {
+                    "type": "object",
+                    "properties": {
+                        "min": {"type": "integer"},
+                        "max": {"type": "integer"},
+                    },
+                },
+            ],
+        },
+        "renewalNotice": {
+            "description": "Integer or {min, max} range for renewal notice days.",
+            "oneOf": [
+                {"type": "integer"},
+                {
+                    "type": "object",
+                    "properties": {
+                        "min": {"type": "integer"},
+                        "max": {"type": "integer"},
+                    },
+                },
+            ],
+        },
+        "renewalRate": {"type": "string"},
+        "terminationTerms": {"type": "string"},
+    },
 }
 
 # ---------------------------------------------------------------------------
