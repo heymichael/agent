@@ -420,12 +420,20 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
     downloads: list[Download] = []
     max_rounds = 10
 
+    has_csv_attachment = any(
+        a.get("filename", "").lower().endswith(".csv") for a in att_dicts
+    )
+    active_tools = TOOL_DEFINITIONS if has_csv_attachment else [
+        t for t in TOOL_DEFINITIONS
+        if t["function"]["name"] != "process_vendor_csv"
+    ]
+
     for _ in range(max_rounds):
         try:
             response = openai_client.chat.completions.create(
                 model=MODEL,
                 messages=messages,
-                tools=TOOL_DEFINITIONS,
+                tools=active_tools,
                 tool_choice="auto",
             )
         except Exception as exc:

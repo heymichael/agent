@@ -15,6 +15,7 @@ import pytest
 from mcp_server.tools import (
     handle_vendor_lookup,
     handle_vendor_count,
+    handle_vendor_list,
     handle_spend_total,
     handle_spend_by_vendor,
     handle_spend_by_dimension,
@@ -327,3 +328,80 @@ class TestTopVendors:
         with p1, p2, p3:
             result = handle_top_vendors({"period": "not-a-period"})
             assert result["status"] == "invalid_filter"
+
+
+# ── vendor_list ─────────────────────────────────────────────────────────
+
+def _make_vendor_row(i: int) -> dict:
+    return {
+        "id": f"v_{i:03d}",
+        "name": f"Vendor {i:03d}",
+        "account_type": "Business",
+        "track_1099": True,
+        "payment_method": "ACH",
+        "billing_frequency": None,
+        "source_system": "billcom",
+        "department": "Engineering",
+        "owner": None,
+    }
+
+
+class TestVendorList:
+    def test_csv_contains_all_vendors_when_truncated(self):
+        """CSV must include every matching vendor, not just the limited page."""
+        total = 60
+        limited_rows = [_make_vendor_row(i) for i in range(50)]
+        all_rows = [_make_vendor_row(i) for i in range(total)]
+
+        pool = _build_mock_pool({
+            "COUNT(*)": {"cnt": total},
+            "LIMIT": limited_rows,
+            "ORDER BY v.name": all_rows,
+        })
+        p1, p2, p3 = _patch_all(pool)
+        with p1, p2, p3:
+            result = handle_vendor_list({"filters": {"track1099": True}})
+
+        assert result["status"] == "ok"
+        assert result["data"]["total"] == total
+        assert result["data"]["csv_attached"] is True
+        assert "vendors" not in result["data"]
+
+        csv_lines = result["csv"].strip().splitlines()
+        assert len(csv_lines) == total + 1  # header + all 60 data rows
+
+    def test_csv_matches_vendors_when_not_truncated(self):
+        """When all vendors fit within the limit, CSV uses the same set."""
+        rows = [_make_vendor_row(i) for i in range(15)]
+
+        pool = _build_mock_pool({
+            "COUNT(*)": {"cnt": 15},
+            "LIMIT": rows,
+        })
+        p1, p2, p3 = _patch_all(pool)
+        with p1, p2, p3:
+            result = handle_vendor_list({})
+
+        assert result["status"] == "ok"
+        assert result["data"]["total"] == 15
+        assert result["data"]["csv_attached"] is True
+        assert "vendors" not in result["data"]
+
+        csv_lines = result["csv"].strip().splitlines()
+        assert len(csv_lines) == 16  # header + 15 data rows
+
+    def test_no_csv_for_small_results(self):
+        """Fewer than 10 results should not generate a CSV."""
+        rows = [_make_vendor_row(i) for i in range(5)]
+
+        pool = _build_mock_pool({
+            "COUNT(*)": {"cnt": 5},
+            "LIMIT": rows,
+        })
+        p1, p2, p3 = _patch_all(pool)
+        with p1, p2, p3:
+            result = handle_vendor_list({})
+
+        assert result["status"] == "ok"
+        assert "csv" not in result
+        assert len(result["data"]["vendors"]) == 5
