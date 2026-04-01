@@ -8,7 +8,10 @@ Write tools (add_vendor, modify_vendor) and execute_python remain here.
 delete_vendor is disabled — deletion must go through a system admin.
 """
 
+import csv
+import io
 import json
+from datetime import date as date_type
 
 from . import pg_client
 from .sandbox import execute_python
@@ -384,6 +387,53 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    # -- CSV bulk edit tools --
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_vendor_edit_csv",
+            "description": (
+                "Generate a downloadable CSV of vendors pre-filled with their "
+                "current attributes, ready for the user to edit and upload back. "
+                "Use when the user wants to make bulk changes. Offer to filter "
+                "by owner, department, or provide all vendors."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "departments": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter to vendors in these departments.",
+                    },
+                    "owner": {
+                        "type": "string",
+                        "description": "Filter to vendors owned by this person (name or email).",
+                    },
+                    "vendor_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Specific vendor names to include.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "process_vendor_csv",
+            "description": (
+                "Validate and process a CSV file that the user uploaded for "
+                "bulk vendor updates. Reads the attached CSV automatically. "
+                "Do not call this unless the user has attached a CSV file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -693,6 +743,413 @@ def execute_execute_python(args: dict, caller_email: str = "") -> str:
     return json.dumps(result)
 
 
+# ---------------------------------------------------------------------------
+# Generic CSV bulk edit infrastructure
+# ---------------------------------------------------------------------------
+
+
+class CsvColumnSpec:
+    """Describes one column in a CSV profile."""
+    __slots__ = ("csv_name", "db_name", "col_type", "resolver", "valid_values", "readonly")
+
+    def __init__(
+        self,
+        csv_name: str,
+        db_name: str,
+        col_type: str,
+        resolver=None,
+        valid_values: list[str] | None = None,
+        readonly: bool = False,
+    ):
+        self.csv_name = csv_name
+        self.db_name = db_name
+        self.col_type = col_type
+        self.resolver = resolver
+        self.valid_values = valid_values
+        self.readonly = readonly
+
+
+class TableCsvProfile:
+    """Table-level config that drives CSV generation, validation, and resolution."""
+    __slots__ = ("table", "pk_csv", "pk_key", "columns", "id_check_fn", "_by_name")
+
+    def __init__(self, table: str, columns: list[CsvColumnSpec],
+                 id_check_fn, pk_csv: str = "id", pk_key: str = "vendor_id"):
+        self.table = table
+        self.pk_csv = pk_csv
+        self.pk_key = pk_key
+        self.columns = columns
+        self.id_check_fn = id_check_fn
+        self._by_name = {c.csv_name: c for c in columns}
+
+    @property
+    def csv_headers(self) -> list[str]:
+        return [self.pk_csv] + [c.csv_name for c in self.columns]
+
+    def get_spec(self, csv_name: str) -> CsvColumnSpec | None:
+        return self._by_name.get(csv_name)
+
+
+VENDOR_CSV_PROFILE = TableCsvProfile(
+    table="vendors",
+    columns=[
+        CsvColumnSpec("name", "name", "text", readonly=True),
+        CsvColumnSpec("department", "department_id", "fk",
+                      resolver=lambda: [(d["name"], d["id"]) for d in pg_client.list_departments()]),
+        CsvColumnSpec("owner", "owner_id", "fk", resolver=_user_candidates),
+        CsvColumnSpec("secondaryOwner", "secondary_owner_id", "fk", resolver=_user_candidates),
+        CsvColumnSpec("billingFrequency", "billing_frequency", "enum",
+                      valid_values=["monthly", "annual", "usage-based"]),
+        CsvColumnSpec("purpose", "purpose", "text"),
+        CsvColumnSpec("spendType", "spend_type", "text"),
+        CsvColumnSpec("contractStartDate", "contract_start", "date"),
+        CsvColumnSpec("contractEndDate", "contract_end", "date"),
+        CsvColumnSpec("autoRenew", "auto_renew", "bool"),
+    ],
+    id_check_fn=pg_client.vendor_ids_exist,
+)
+
+
+def generate_edit_csv(profile: TableCsvProfile, records: list[dict]) -> str:
+    """Generate a CSV string from records using the profile's column headers."""
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=profile.csv_headers, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(records)
+    return buf.getvalue()
+
+
+def parse_csv(content: str) -> tuple[list[str], list[dict]]:
+    """Parse CSV content. Returns (headers, rows)."""
+    content = content.lstrip("\ufeff")
+    reader = csv.DictReader(io.StringIO(content))
+    headers = reader.fieldnames or []
+    return list(headers), list(reader)
+
+
+def validate_csv_columns(profile: TableCsvProfile, headers: list[str]) -> list[dict]:
+    """Check that all CSV columns are recognised and the PK is present."""
+    valid = set(profile.csv_headers)
+    errors = [{"column": c, "message": f"Unknown column '{c}'"} for c in headers if c not in valid]
+    if profile.pk_csv not in headers:
+        errors.append({"column": profile.pk_csv,
+                       "message": f"Primary key column '{profile.pk_csv}' is required"})
+    return errors
+
+
+def validate_csv_ids(profile: TableCsvProfile, rows: list[dict]) -> list[dict]:
+    """Check that all PK values in the CSV exist in the table."""
+    import re
+    uuid_re = re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I,
+    )
+    pk = profile.pk_csv
+    errors: list[dict] = []
+    valid_ids: list[str] = []
+    for i, r in enumerate(rows):
+        val = r.get(pk, "").strip()
+        if not val:
+            errors.append({"row": i + 2, "column": pk, "value": "",
+                           "message": "Missing ID"})
+        elif not uuid_re.match(val):
+            errors.append({"row": i + 2, "column": pk, "value": val,
+                           "message": f"'{val}' is not a valid UUID"})
+        else:
+            valid_ids.append(val)
+    if errors:
+        return errors
+    existence = profile.id_check_fn(valid_ids)
+    errors.extend(
+        {"row": i + 2, "column": pk, "value": r.get(pk, ""),
+         "message": f"ID '{r.get(pk, '')}' not found in {profile.table}"}
+        for i, r in enumerate(rows)
+        if not existence.get(r.get(pk, ""), False)
+    )
+    return errors
+
+
+def validate_csv_values(
+    profile: TableCsvProfile, rows: list[dict], headers: list[str],
+) -> list[dict]:
+    """Validate per-cell values against column types defined in the profile."""
+    from service.resolve import resolve_canonical_value
+
+    errors: list[dict] = []
+    editable = set(headers) - {profile.pk_csv}
+    editable = {c for c in editable if not (profile.get_spec(c) or CsvColumnSpec("", "", "text")).readonly}
+    resolver_cache: dict = {}
+
+    for i, row in enumerate(rows):
+        row_num = i + 2
+        for col in editable:
+            val = row.get(col, "").strip()
+            if not val:
+                continue
+            spec = profile.get_spec(col)
+            if not spec:
+                continue
+
+            if spec.col_type == "fk":
+                if spec.resolver not in resolver_cache:
+                    resolver_cache[spec.resolver] = spec.resolver()
+                pairs = resolver_cache[spec.resolver]
+                if not resolve_canonical_value(val, [n for n, _ in pairs]):
+                    errors.append({"row": row_num, "column": col, "value": val,
+                                   "message": f"Could not resolve '{val}' for {col}"})
+
+            elif spec.col_type == "enum":
+                if not resolve_canonical_value(val, spec.valid_values):
+                    errors.append({"row": row_num, "column": col, "value": val,
+                                   "message": f"Invalid {col}: '{val}'. Valid: {', '.join(spec.valid_values)}"})
+
+            elif spec.col_type == "bool":
+                if val.lower() not in ("true", "false", "yes", "no", "1", "0"):
+                    errors.append({"row": row_num, "column": col, "value": val,
+                                   "message": f"Expected true/false for {col}, got '{val}'"})
+
+            elif spec.col_type == "date":
+                try:
+                    date_type.fromisoformat(val)
+                except ValueError:
+                    errors.append({"row": row_num, "column": col, "value": val,
+                                   "message": f"Invalid date for {col}: '{val}'. Expected YYYY-MM-DD."})
+
+    return errors
+
+
+def resolve_csv_updates(
+    profile: TableCsvProfile, rows: list[dict], headers: list[str],
+) -> list[dict]:
+    """Build update dicts with resolved FK IDs and snake_case keys."""
+    from service.resolve import resolve_canonical_value
+
+    editable = set(headers) - {profile.pk_csv}
+    editable = {c for c in editable if not (profile.get_spec(c) or CsvColumnSpec("", "", "text")).readonly}
+    resolver_cache: dict = {}
+    updates: list[dict] = []
+
+    for row in rows:
+        changes: dict = {}
+        new_display: dict = {}
+        for col in editable:
+            val = row.get(col, "").strip()
+            if not val:
+                continue
+            spec = profile.get_spec(col)
+            if not spec:
+                continue
+
+            if spec.col_type == "fk":
+                if spec.resolver not in resolver_cache:
+                    resolver_cache[spec.resolver] = spec.resolver()
+                pairs = resolver_cache[spec.resolver]
+                match = resolve_canonical_value(val, [n for n, _ in pairs])
+                if match:
+                    id_map = {n: uid for n, uid in pairs}
+                    changes[spec.db_name] = id_map[match.value]
+                    new_display[spec.csv_name] = match.value
+
+            elif spec.col_type == "enum":
+                match = resolve_canonical_value(val, spec.valid_values)
+                if match:
+                    changes[spec.db_name] = match.value
+                    new_display[spec.csv_name] = match.value
+
+            elif spec.col_type == "bool":
+                resolved = val.lower() in ("true", "yes", "1")
+                changes[spec.db_name] = resolved
+                new_display[spec.csv_name] = "Yes" if resolved else "No"
+
+            elif spec.col_type in ("date", "text"):
+                changes[spec.db_name] = val
+                new_display[spec.csv_name] = val
+
+        if changes:
+            updates.append({
+                profile.pk_key: row[profile.pk_csv],
+                "changes": changes,
+                "new_display": new_display,
+            })
+
+    return updates
+
+
+def process_csv_upload(profile: TableCsvProfile, content: str) -> dict:
+    """Run the full validation pipeline on CSV content. Returns a result dict."""
+    headers, rows = parse_csv(content)
+
+    if not rows:
+        return {"ok": False, "error": "The CSV file is empty."}
+
+    col_errors = validate_csv_columns(profile, headers)
+    if col_errors:
+        return {"ok": False, "stage": "column_check", "errors": col_errors}
+
+    id_errors = validate_csv_ids(profile, rows)
+    if id_errors:
+        return {"ok": False, "stage": "id_check", "errors": id_errors}
+
+    value_errors = validate_csv_values(profile, rows, headers)
+    if value_errors:
+        return {"ok": False, "stage": "value_check", "errors": value_errors}
+
+    resolved = resolve_csv_updates(profile, rows, headers)
+    if not resolved:
+        return {"ok": True, "message": "No changes detected in the CSV."}
+
+    all_vendors = pg_client.list_vendors()
+    vendor_map = {v["id"]: v for v in all_vendors}
+
+    field_counts: dict[str, int] = {}
+    filtered: list[dict] = []
+    for u in resolved:
+        v = vendor_map.get(u[profile.pk_key])
+        u["vendor_name"] = v["name"] if v else "Unknown"
+
+        display_changes = []
+        new_disp = u.pop("new_display", {})
+        unchanged_keys = []
+        for db_col in list(u["changes"]):
+            spec = next((s for s in profile.columns if s.db_name == db_col), None)
+            if not spec:
+                continue
+            new_val = u["changes"][db_col]
+
+            if spec.col_type == "fk":
+                fk_key = spec.csv_name + "Id"
+                current_db = v.get(fk_key, "") if v else ""
+                if str(current_db) == str(new_val):
+                    unchanged_keys.append(db_col)
+                    continue
+            elif spec.col_type == "bool":
+                current_raw = v.get(spec.csv_name) if v else None
+                if current_raw == new_val:
+                    unchanged_keys.append(db_col)
+                    continue
+            else:
+                current_raw = v.get(spec.csv_name, "") if v else ""
+                current_cmp = str(current_raw) if current_raw else ""
+                if current_cmp == str(new_val):
+                    unchanged_keys.append(db_col)
+                    continue
+
+            if spec.col_type == "fk":
+                current_display = str(v.get(spec.csv_name, "")) if v else "—"
+                current_display = current_display or "—"
+            elif spec.col_type == "bool":
+                current_display = "Yes" if v.get(spec.csv_name) else "No"
+            else:
+                current_raw = v.get(spec.csv_name, "") if v else ""
+                current_display = str(current_raw) if current_raw else "—"
+            display_changes.append({
+                "label": spec.csv_name,
+                "from": current_display,
+                "to": new_disp.get(spec.csv_name, str(new_val)),
+            })
+
+        for k in unchanged_keys:
+            del u["changes"][k]
+
+        if not u["changes"]:
+            continue
+
+        u["display_changes"] = display_changes
+        filtered.append(u)
+
+        for field in u["changes"]:
+            field_counts[field] = field_counts.get(field, 0) + 1
+
+    resolved = filtered
+    if not resolved:
+        return {"ok": True, "message": "No changes detected in the CSV."}
+
+    return {
+        "ok": True,
+        "action": "confirm_csv_batch",
+        "updates": resolved,
+        "summary": {
+            "vendor_count": len(resolved),
+            "field_counts": field_counts,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Vendor CSV tool handlers (thin wrappers around generic infrastructure)
+# ---------------------------------------------------------------------------
+
+
+def execute_generate_vendor_edit_csv(args: dict, caller_email: str = "") -> str:
+    from service.resolve import resolve_canonical_value
+
+    vendors = pg_client.list_vendors()
+    profile = VENDOR_CSV_PROFILE
+
+    dept_filters = args.get("departments") or []
+    if isinstance(dept_filters, str):
+        dept_filters = [dept_filters]
+    if dept_filters:
+        dept_pairs = [(d["name"], d["id"]) for d in pg_client.list_departments()]
+        dept_names = [name for name, _ in dept_pairs]
+        matched_depts: set[str] = set()
+        for df in dept_filters:
+            match = resolve_canonical_value(df, dept_names)
+            if match:
+                matched_depts.add(match.value)
+            else:
+                return json.dumps({
+                    "ok": False,
+                    "error": f"Unknown department: '{df}'",
+                    "valid_values": sorted(dept_names),
+                })
+        vendors = [v for v in vendors if v.get("department") in matched_depts]
+
+    owner_filter = args.get("owner")
+    if owner_filter:
+        user_pairs = _user_candidates()
+        user_names = [name for name, _ in user_pairs]
+        match = resolve_canonical_value(owner_filter, user_names)
+        if match:
+            vendors = [v for v in vendors if v.get("owner") == match.value]
+        else:
+            return json.dumps({"ok": False, "error": f"Unknown owner: '{owner_filter}'"})
+
+    vendor_names = args.get("vendor_names")
+    if vendor_names:
+        name_set = {n.lower() for n in vendor_names}
+        vendors = [v for v in vendors if v.get("name", "").lower() in name_set]
+
+    if not vendors:
+        return json.dumps({"ok": False, "error": "No vendors match the given filters."})
+
+    csv_content = generate_edit_csv(profile, vendors)
+    parts = ["vendors-edit"]
+    for df in dept_filters:
+        parts.append(df.lower().replace(" ", "-"))
+    if owner_filter:
+        parts.append(owner_filter.lower().replace(" ", "-").split("@")[0])
+    filename = "-".join(parts) + ".csv"
+
+    return json.dumps({
+        "ok": True,
+        "csv": csv_content,
+        "csv_filename": filename,
+        "row_count": len(vendors),
+        "columns": profile.csv_headers,
+    })
+
+
+def execute_process_vendor_csv(args: dict, caller_email: str = "") -> str:
+    from service.app import get_request_attachments
+
+    attachments = get_request_attachments()
+    csv_attachments = [a for a in attachments if a.get("filename", "").endswith(".csv")]
+    if not csv_attachments:
+        return json.dumps({"ok": False, "error": "No CSV file attached. Please attach a CSV file and try again."})
+
+    return json.dumps(process_csv_upload(VENDOR_CSV_PROFILE, csv_attachments[0]["content"]))
+
+
 TOOL_HANDLERS = {
     "vendor_lookup": execute_vendor_lookup,
     "vendor_count": execute_vendor_count,
@@ -706,4 +1163,6 @@ TOOL_HANDLERS = {
     "add_vendor": execute_add_vendor,
     "modify_vendor": execute_modify_vendor,
     "execute_python": execute_execute_python,
+    "generate_vendor_edit_csv": execute_generate_vendor_edit_csv,
+    "process_vendor_csv": execute_process_vendor_csv,
 }

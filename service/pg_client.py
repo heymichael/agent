@@ -52,6 +52,14 @@ _VENDOR_COLUMNS = (
     "created_at", "modified_at", "synced_at",
 )
 
+VENDOR_EDITABLE_COLUMNS = frozenset({
+    "name", "department_id", "owner_id", "secondary_owner_id",
+    "payment_method", "billing_frequency", "account_type", "track_1099",
+    "purpose", "spend_type", "aliases", "contract_start", "contract_end",
+    "contract_months", "auto_renew", "renewal_rate", "renewal_notice",
+    "termination_terms",
+})
+
 
 def _vendor_row_to_dict(row: dict) -> dict:
     """Map a Postgres vendor row to the API response shape."""
@@ -194,14 +202,7 @@ def add_vendor(data: dict) -> dict:
 def update_vendor(vendor_id: str, updates: dict) -> dict:
     """Partial-update a vendor. Returns the full record after update."""
     pool = get_pool()
-    allowed = {
-        "name", "department_id", "owner_id", "secondary_owner_id",
-        "payment_method", "billing_frequency", "account_type", "track_1099",
-        "purpose", "spend_type", "aliases", "contract_start", "contract_end",
-        "contract_months", "auto_renew", "renewal_rate", "renewal_notice",
-        "termination_terms",
-    }
-    fields = {k: v for k, v in updates.items() if k in allowed}
+    fields = {k: v for k, v in updates.items() if k in VENDOR_EDITABLE_COLUMNS}
     if not fields:
         result = get_vendor(vendor_id)
         if not result:
@@ -925,6 +926,100 @@ def list_departments() -> list[dict]:
     with pool.connection() as conn:
         rows = conn.execute("SELECT * FROM departments ORDER BY name").fetchall()
     return [{"id": str(r["id"]), "name": r["name"]} for r in rows]
+
+
+def get_editable_schema(
+    table: str,
+    allowed_columns: frozenset[str],
+) -> list[dict]:
+    """Return column metadata for editable fields of any table.
+
+    Queries information_schema.columns and filters to *allowed_columns*.
+    Returns [{column, pg_type, nullable}] with snake_case column names.
+    """
+    pool = get_pool()
+    with pool.connection() as conn:
+        rows = conn.execute(
+            """SELECT column_name, data_type, is_nullable
+               FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = %s
+               ORDER BY ordinal_position""",
+            (table,),
+        ).fetchall()
+    return [
+        {
+            "column": r["column_name"],
+            "pg_type": r["data_type"],
+            "nullable": r["is_nullable"] == "YES",
+        }
+        for r in rows
+        if r["column_name"] in allowed_columns
+    ]
+
+
+def ids_exist(table: str, ids: list[str], pk: str = "id") -> dict[str, bool]:
+    """Check which primary-key values exist in *table*. Returns {id: bool}."""
+    if not ids:
+        return {}
+    pool = get_pool()
+    with pool.connection() as conn:
+        rows = conn.execute(
+            f"SELECT {pk}::text AS pk FROM {table} WHERE {pk} = ANY(%s::uuid[])",
+            (ids,),
+        ).fetchall()
+    found = {r["pk"] for r in rows}
+    return {v: v in found for v in ids}
+
+
+def batch_update(
+    table: str,
+    allowed_columns: frozenset[str],
+    updates: list[dict],
+    pk: str = "id",
+    pk_key: str = "vendor_id",
+    ts_column: str | None = "modified_at",
+) -> int:
+    """Apply multiple row updates in a single transaction.
+
+    Each item in *updates* must have *pk_key* (the row identifier) and
+    'changes' (snake_case field dict). Returns the count of rows updated.
+    Raises ValueError if any row is not found.
+    """
+    if not updates:
+        return 0
+    pool = get_pool()
+    now = _now()
+    count = 0
+    with pool.connection() as conn:
+        with conn.transaction():
+            for item in updates:
+                fields = {k: v for k, v in item["changes"].items() if k in allowed_columns}
+                if not fields:
+                    continue
+                if ts_column:
+                    fields[ts_column] = now
+                set_clause = ", ".join(f"{k} = %s" for k in fields)
+                values = list(fields.values()) + [item[pk_key]]
+                cur = conn.execute(
+                    f"UPDATE {table} SET {set_clause} WHERE {pk} = %s RETURNING {pk}",
+                    values,
+                )
+                if cur.fetchone() is None:
+                    raise ValueError(f"Row '{item[pk_key]}' not found in {table}")
+                count += 1
+    return count
+
+
+def get_vendor_editable_schema() -> list[dict]:
+    return get_editable_schema("vendors", VENDOR_EDITABLE_COLUMNS)
+
+
+def vendor_ids_exist(vendor_ids: list[str]) -> dict[str, bool]:
+    return ids_exist("vendors", vendor_ids)
+
+
+def batch_update_vendors(updates: list[dict]) -> int:
+    return batch_update("vendors", VENDOR_EDITABLE_COLUMNS, updates)
 
 
 def get_or_create_department(name: str) -> str:
