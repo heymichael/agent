@@ -1,8 +1,10 @@
 """FastAPI agent service — chat endpoint with OpenAI tool-calling."""
 
+import contextvars
 import json
 import logging
 import os
+import uuid
 from datetime import date
 
 from dotenv import load_dotenv
@@ -99,17 +101,37 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class Attachment(BaseModel):
+    filename: str
+    content: str
+    mime: str = "text/csv"
+
+
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     context: dict | None = None
+    attachments: list[Attachment] | None = None
+    session_id: str | None = None
+
+
+_request_attachments: contextvars.ContextVar[list[dict]] = contextvars.ContextVar(
+    "request_attachments", default=[],
+)
+
+
+def get_request_attachments() -> list[dict]:
+    """Read attachments stored for the current request (used by tool handlers)."""
+    return _request_attachments.get()
 
 
 class PendingAction(BaseModel):
     type: str
-    vendor_id: str
-    vendor_name: str
+    vendor_id: str | None = None
+    vendor_name: str | None = None
     proposed_updates: dict | None = None
     display_fields: list[dict] | None = None
+    updates: list[dict] | None = None
+    summary: dict | None = None
 
 
 class Disambiguation(BaseModel):
@@ -129,6 +151,7 @@ class ChatResponse(BaseModel):
     pending_actions: list[PendingAction] = []
     disambiguation: Disambiguation | None = None
     downloads: list[Download] = []
+    session_id: str | None = None
 
 
 @app.get("/health")
@@ -329,6 +352,21 @@ def update_vendor(vendor_id: str, updates: dict, caller: dict = Depends(get_veri
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+class BatchUpdateRequest(BaseModel):
+    updates: list[dict]
+
+
+@app.post("/vendors/batch-update")
+def batch_update_vendors(req: BatchUpdateRequest, caller: dict = Depends(get_verified_user)):
+    if not req.updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+    try:
+        count = pg_client.batch_update_vendors(req.updates)
+        return {"ok": True, "updated": count}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/spend")
 def get_spend(
     vendor_ids: list[str] | None = Query(default=None, alias="vendor_ids"),
@@ -352,13 +390,29 @@ def get_spend(
 def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
     openai_client = get_openai_client()
     caller_email = caller.get("email", "")
-    logger.info("Chat request from %s", caller_email)
+    caller_user_id = pg_client.get_user_id_by_email(caller_email)
+    session_id = req.session_id or str(uuid.uuid4())
+    app_context = (req.context or {}).get("app", "unknown")
+    logger.info("Chat request from %s (session %s)", caller_email, session_id)
+
+    att_dicts = [a.model_dump() for a in (req.attachments or [])]
+    _request_attachments.set(att_dicts)
 
     today = date.today().isoformat()
     system_prompt = f"Today's date is {today}.\n\n{VENDOR_AGENT_SYSTEM_PROMPT}"
     messages = [{"role": "system", "content": system_prompt}]
     for m in req.messages:
-        messages.append({"role": m.role, "content": m.content})
+        content = m.content
+        if m == req.messages[-1] and att_dicts:
+            summaries = []
+            for att in att_dicts:
+                lines = att["content"].splitlines()
+                cols = lines[0] if lines else ""
+                summaries.append(
+                    f"[Attached: {att['filename']} — {len(lines) - 1} data rows | columns: {cols}]"
+                )
+            content = content + "\n\n" + "\n".join(summaries)
+        messages.append({"role": m.role, "content": content})
 
     tool_calls_executed: list[str] = []
     pending_actions: list[PendingAction] = []
@@ -408,7 +462,13 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
                     "content": _truncate_tool_result(json.dumps(parsed)),
                 })
 
-                if parsed.get("action") in ("confirm_delete", "open_edit", "confirm_edit"):
+                if parsed.get("action") == "confirm_csv_batch":
+                    pending_actions.append(PendingAction(
+                        type="confirm_csv_batch",
+                        updates=parsed.get("updates"),
+                        summary=parsed.get("summary"),
+                    ))
+                elif parsed.get("action") in ("confirm_delete", "open_edit", "confirm_edit"):
                     vendor = parsed["vendor"]
                     pending_actions.append(PendingAction(
                         type=parsed["action"],
@@ -427,12 +487,60 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
             continue
 
         reply = choice.message.content or ""
-        return ChatResponse(reply=reply, tool_calls_executed=tool_calls_executed, pending_actions=pending_actions, disambiguation=disambiguation, downloads=downloads)
+        all_msgs = [{"role": m.role, "content": m.content} for m in req.messages]
+        all_msgs.append({"role": "assistant", "content": reply})
+        if caller_user_id:
+            try:
+                pg_client.upsert_chat_session(session_id, caller_user_id, app_context, all_msgs)
+            except Exception:
+                logger.exception("Failed to persist chat session %s", session_id)
+        return ChatResponse(reply=reply, tool_calls_executed=tool_calls_executed, pending_actions=pending_actions, disambiguation=disambiguation, downloads=downloads, session_id=session_id)
 
+    fallback_reply = "I hit the maximum number of tool-call rounds. Please try again."
+    all_msgs = [{"role": m.role, "content": m.content} for m in req.messages]
+    all_msgs.append({"role": "assistant", "content": fallback_reply})
+    if caller_user_id:
+        try:
+            pg_client.upsert_chat_session(session_id, caller_user_id, app_context, all_msgs)
+        except Exception:
+            logger.exception("Failed to persist chat session %s", session_id)
     return ChatResponse(
-        reply="I hit the maximum number of tool-call rounds. Please try again.",
+        reply=fallback_reply,
         tool_calls_executed=tool_calls_executed,
         pending_actions=pending_actions,
         disambiguation=disambiguation,
         downloads=downloads,
+        session_id=session_id,
     )
+
+
+class FeedbackRequest(BaseModel):
+    session_id: str
+    message_seq: int
+    signal: bool
+    comment: str | None = None
+
+
+@app.post("/feedback")
+def submit_feedback(req: FeedbackRequest, caller: dict = Depends(get_verified_user)):
+    caller_email = caller.get("email", "")
+    caller_user_id = pg_client.get_user_id_by_email(caller_email)
+    if not caller_user_id:
+        raise HTTPException(status_code=403, detail="User not found")
+    session = pg_client.get_chat_session(req.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    stored_messages = session.get("messages", [])
+    if req.message_seq < 0 or req.message_seq >= len(stored_messages):
+        raise HTTPException(
+            status_code=400,
+            detail=f"message_seq {req.message_seq} out of range (session has {len(stored_messages)} messages)",
+        )
+    pg_client.upsert_feedback(
+        chat_session_id=req.session_id,
+        message_seq=req.message_seq,
+        user_id=caller_user_id,
+        signal=req.signal,
+        comment=req.comment,
+    )
+    return {"ok": True}

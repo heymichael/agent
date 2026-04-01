@@ -17,13 +17,10 @@ python3 -m venv .venv && source .venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Set required env vars (or copy .env.example to .env)
-export OPENAI_API_KEY="sk-..."
-export DATABASE_URL="postgresql://haderach-app:<password>@localhost:5433/haderach"
-export VENDOR_BILL_CREDENTIALS='{"userName":"...","password":"...","orgId":"...","devKey":"..."}'
-export VENDOR_AWS_BILLING_CREDENTIALS='{"access_key_id":"...","secret_access_key":"...","region":"us-east-1"}'
+# Copy .env.example to .env and fill in the values
+cp .env.example .env
 
-# Run the service
+# Run the service (all config is loaded from .env via python-dotenv)
 uvicorn service.app:app --reload --port 8080
 ```
 
@@ -32,15 +29,15 @@ The API is available at `http://localhost:8080`. In production it's mounted at
 
 ### Cloud SQL connection (local)
 
-For local development, start the Cloud SQL Auth Proxy to tunnel to the
-production database:
+Start the Cloud SQL Auth Proxy using the service account key:
 
 ```bash
-cloud-sql-proxy haderach-ai:us-central1:haderach-main --port 5433
+cloud-sql-proxy haderach-ai:us-central1:haderach-main --port 5433 \
+  --credentials-file=agent-local-dev-sa-key.json
 ```
 
-Then set `DATABASE_URL` to point at `localhost:5433`. Credentials are stored in
-Secret Manager — retrieve them with:
+`DATABASE_URL` in `.env` points at `localhost:5433`. The password only changes
+if rotated in Secret Manager — retrieve it once with:
 
 ```bash
 gcloud secrets versions access latest --secret=DATABASE_URL --project=haderach-ai
@@ -48,27 +45,19 @@ gcloud secrets versions access latest --secret=DATABASE_URL --project=haderach-a
 
 ### GCP credentials
 
-The service needs GCP credentials for Firebase Auth token verification. Two
-options:
-
-**Option A — Service account key (recommended).** Place a key file in the repo
-root and point to it in `.env`. The key never expires, so you won't get
-interrupted by credential expiry during dev sessions.
+The service uses a dedicated service account key for local development. The key
+authenticates Firebase Auth verification, Cloud SQL Proxy, and any other GCP
+calls. It never expires, so you won't be interrupted by credential expiry.
 
 ```bash
-# One-time setup:
+# One-time setup (key already exists for most devs):
 gcloud iam service-accounts keys create agent-local-dev-sa-key.json \
   --iam-account=agent-local-dev@haderach-ai.iam.gserviceaccount.com
-
-# Add to .env
-echo 'GOOGLE_APPLICATION_CREDENTIALS=agent-local-dev-sa-key.json' >> .env
 ```
 
-The `*-sa-key.json` pattern is gitignored. Never commit key files.
-
-**Option B — Application Default Credentials.** Run
-`gcloud auth application-default login`. Credentials expire periodically and
-require re-authentication.
+The key is referenced in `.env` via `GOOGLE_APPLICATION_CREDENTIALS` and passed
+to the Cloud SQL Proxy via `--credentials-file`. The `*-sa-key.json` pattern is
+gitignored. Never commit key files.
 
 ## Vendor sync
 
