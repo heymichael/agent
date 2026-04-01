@@ -1042,3 +1042,72 @@ def list_roles() -> list[dict]:
     with pool.connection() as conn:
         rows = conn.execute("SELECT * FROM roles ORDER BY name").fetchall()
     return [{"id": str(r["id"]), "name": r["name"]} for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Chat sessions & feedback
+# ---------------------------------------------------------------------------
+
+def get_user_id_by_email(email: str) -> str | None:
+    """Resolve an email to a user UUID without loading relationships."""
+    pool = get_pool()
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM users WHERE email = %s", (email.strip().lower(),)
+        ).fetchone()
+    return str(row["id"]) if row else None
+
+
+def upsert_chat_session(
+    session_id: str,
+    user_id: str,
+    app_context: str,
+    messages_json: list[dict],
+) -> None:
+    """Create or update a chat session with the latest messages."""
+    import json as _json
+
+    pool = get_pool()
+    with pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO chat_sessions (id, user_id, app_context, messages)
+            VALUES (%s, %s, %s, %s::jsonb)
+            ON CONFLICT (id) DO UPDATE
+                SET messages    = EXCLUDED.messages,
+                    modified_at = now()
+            """,
+            (session_id, user_id, app_context, _json.dumps(messages_json)),
+        )
+
+
+def get_chat_session(session_id: str) -> dict | None:
+    pool = get_pool()
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM chat_sessions WHERE id = %s", (session_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_feedback(
+    chat_session_id: str,
+    message_seq: int,
+    user_id: str,
+    signal: bool,
+    comment: str | None = None,
+) -> None:
+    """Create or update feedback for a specific message in a session."""
+    pool = get_pool()
+    with pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO agent_feedback (chat_session_id, message_seq, user_id, signal, comment)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (chat_session_id, message_seq) DO UPDATE
+                SET signal      = EXCLUDED.signal,
+                    comment     = EXCLUDED.comment,
+                    modified_at = now()
+            """,
+            (chat_session_id, message_seq, user_id, signal, comment),
+        )

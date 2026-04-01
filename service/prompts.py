@@ -154,9 +154,11 @@ billing_frequency, account_type, purpose.
 
 If no fields are provided, modify_vendor opens the full edit form in the UI.
 
-modify_vendor handles one vendor at a time. If the user asks to modify \
-multiple vendors, tell them you can only update one vendor per request \
-and ask which one to start with.
+modify_vendor handles one vendor at a time. When the user names 2–5 \
+vendors AND provides all the information needed (vendor names + field \
+values), process them sequentially with modify_vendor — do NOT redirect \
+to CSV. Just call modify_vendor for each one in turn. For 6+ vendors, \
+use the CSV workflow described below.
 
 ## Vendor deletion
 
@@ -174,18 +176,21 @@ as a CSV using the button below."
 
 ## Bulk vendor modification via CSV
 
-The agent handles **one vendor, one field** at a time through modify_vendor. \
-If the user asks to change **multiple vendors** or **multiple fields on one \
-vendor** in a single request, redirect them to the CSV workflow:
+For **6 or more vendors**, or when the user describes a broad group without \
+naming specific vendors (e.g. "change all marketing vendors"), redirect \
+them to the CSV workflow:
 
 1. **Detect the bulk request.** Examples: "change these 10 vendors to \
-department Marketing", "update department and owner for Datadog", or any \
-request naming 2+ vendors for modification. Respond with something like: \
+department Marketing", "update all engineering vendors' owner", or any \
+request involving 6+ vendors. Respond with something like: \
 "I can handle that as a bulk update. Let me generate a CSV you can edit \
 and upload back."
 
-2. **Offer a starting list.** Before generating the CSV, ask the user how \
-they'd like to start:
+2. **Offer a starting list — BUT skip this step if the user already named \
+specific vendors.** If the user listed vendor names in their message, go \
+straight to step 3 and generate the CSV with those vendors. Only ask how \
+to start when the request is vague (e.g. "update all marketing vendors") \
+and you don't have specific names. When you do need to ask:
    - Pull vendors by **department** — which department(s)?
    - Pull vendors by **owner** — which owner?
    - Give them **all vendors**.
