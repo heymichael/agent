@@ -22,7 +22,7 @@ from service.pg_client import (
     query_spend_detail as pg_query_spend_detail,
     get_spend_detail_dimensions as pg_get_spend_detail_dimensions,
 )
-from .resolver import validate_filters, FIELD_TO_SQL
+from .resolver import validate_filters, FIELD_TO_SQL, OWNER_FIELDS, RANGE_FIELDS
 from .period_parser import parse_period, PeriodParseError
 
 
@@ -59,12 +59,14 @@ _SPEND_BASE_JOIN = """
     JOIN vendors v ON v.id = s.vendor_id
     LEFT JOIN departments d ON d.id = v.department_id
     LEFT JOIN users uo ON uo.id = v.owner_id
+    LEFT JOIN users uso ON uso.id = v.secondary_owner_id
 """
 
 _VENDOR_BASE_JOIN = """
     FROM vendors v
     LEFT JOIN departments d ON d.id = v.department_id
     LEFT JOIN users uo ON uo.id = v.owner_id
+    LEFT JOIN users uso ON uso.id = v.secondary_owner_id
 """
 
 
@@ -105,6 +107,39 @@ def _month_to_date(month_str: str) -> str:
     return f"{month_str}-01"
 
 
+def _append_filter_clauses(filters: dict, clauses: list, params: list) -> None:
+    """Append SQL clauses and params for each filter field."""
+    for field, value in filters.items():
+        if field.startswith("_"):
+            continue
+
+        if field == "owner" and "_owner_ids" in filters:
+            clauses.append("v.owner_id = ANY(%s::uuid[])")
+            params.append(filters["_owner_ids"])
+            continue
+        if field == "secondaryOwner" and "_secondary_owner_ids" in filters:
+            clauses.append("v.secondary_owner_id = ANY(%s::uuid[])")
+            params.append(filters["_secondary_owner_ids"])
+            continue
+
+        if field in RANGE_FIELDS and isinstance(value, dict):
+            sql_col = RANGE_FIELDS[field]
+            lo = value.get("from") or value.get("min")
+            hi = value.get("to") or value.get("max")
+            if lo is not None:
+                clauses.append(f"{sql_col} >= %s")
+                params.append(lo)
+            if hi is not None:
+                clauses.append(f"{sql_col} <= %s")
+                params.append(hi)
+            continue
+
+        sql_col = FIELD_TO_SQL.get(field)
+        if sql_col:
+            clauses.append(f"{sql_col} = %s")
+            params.append(value)
+
+
 def _build_where(
     filters: dict,
     start_month: str | None,
@@ -130,11 +165,7 @@ def _build_where(
         clauses.append("s.vendor_id = %s")
         params.append(vendor_id)
 
-    for field, value in filters.items():
-        sql_col = FIELD_TO_SQL.get(field)
-        if sql_col:
-            clauses.append(f"{sql_col} = %s")
-            params.append(value)
+    _append_filter_clauses(filters, clauses, params)
 
     if caller_context and not caller_context.get("is_finance_admin"):
         allowed = caller_context.get("allowed_vendor_ids") or []
@@ -155,11 +186,7 @@ def _build_vendor_where(
     clauses = ["1=1", "v.hidden_from_agent = false"]
     params: list = []
 
-    for field, value in filters.items():
-        sql_col = FIELD_TO_SQL.get(field)
-        if sql_col:
-            clauses.append(f"{sql_col} = %s")
-            params.append(value)
+    _append_filter_clauses(filters, clauses, params)
 
     return " WHERE " + " AND ".join(clauses), params
 
@@ -230,10 +257,41 @@ def handle_vendor_count(args: dict, caller_context: CallerContext = None) -> dic
 _VENDOR_LIST_SELECT = """
     SELECT v.id, v.name, v.account_type, v.track_1099,
            v.payment_method, v.billing_frequency, v.source_system,
-           d.name AS department, uo.email AS owner
+           d.name AS department,
+           CONCAT(uo.first_name, ' ', uo.last_name) AS owner,
+           CONCAT(uso.first_name, ' ', uso.last_name) AS secondary_owner,
+           v.purpose, v.spend_type, v.auto_renew,
+           v.contract_start, v.contract_end, v.contract_months,
+           v.renewal_rate, v.renewal_notice, v.termination_terms
 """
 
 _VENDOR_LIST_DEFAULT_LIMIT = 50
+
+
+def _vendor_row_to_dict(r) -> dict:
+    """Convert a vendor query row to the API dict format."""
+    d = {
+        "id": str(r["id"]),
+        "name": r["name"],
+        "accountType": r["account_type"],
+        "track1099": r["track_1099"],
+        "paymentMethod": r["payment_method"],
+        "billingFrequency": r["billing_frequency"],
+        "sourceSystem": r["source_system"],
+        "department": r["department"],
+        "owner": r["owner"] if r.get("owner", "").strip() else None,
+        "secondaryOwner": r["secondary_owner"] if r.get("secondary_owner", "").strip() else None,
+        "purpose": r.get("purpose"),
+        "spendType": r.get("spend_type"),
+        "autoRenew": r.get("auto_renew"),
+        "contractStart": str(r["contract_start"]) if r.get("contract_start") else None,
+        "contractEnd": str(r["contract_end"]) if r.get("contract_end") else None,
+        "contractMonths": r.get("contract_months"),
+        "renewalRate": r.get("renewal_rate"),
+        "renewalNotice": r.get("renewal_notice"),
+        "terminationTerms": r.get("termination_terms"),
+    }
+    return d
 
 
 def handle_vendor_list(args: dict, caller_context: CallerContext = None) -> dict:
@@ -264,20 +322,7 @@ def handle_vendor_list(args: dict, caller_context: CallerContext = None) -> dict
             params + [limit],
         ).fetchall()
 
-    vendors = [
-        {
-            "id": str(r["id"]),
-            "name": r["name"],
-            "accountType": r["account_type"],
-            "track1099": r["track_1099"],
-            "paymentMethod": r["payment_method"],
-            "billingFrequency": r["billing_frequency"],
-            "sourceSystem": r["source_system"],
-            "department": r["department"],
-            "owner": r["owner"],
-        }
-        for r in rows
-    ]
+    vendors = [_vendor_row_to_dict(r) for r in rows]
 
     _CSV_THRESHOLD = 10
     has_csv = total >= _CSV_THRESHOLD
@@ -290,20 +335,7 @@ def handle_vendor_list(args: dict, caller_context: CallerContext = None) -> dict
                     f" ORDER BY v.name",
                     params,
                 ).fetchall()
-            all_vendors = [
-                {
-                    "id": str(r["id"]),
-                    "name": r["name"],
-                    "accountType": r["account_type"],
-                    "track1099": r["track_1099"],
-                    "paymentMethod": r["payment_method"],
-                    "billingFrequency": r["billing_frequency"],
-                    "sourceSystem": r["source_system"],
-                    "department": r["department"],
-                    "owner": r["owner"],
-                }
-                for r in all_rows
-            ]
+            all_vendors = [_vendor_row_to_dict(r) for r in all_rows]
         else:
             all_vendors = vendors
 

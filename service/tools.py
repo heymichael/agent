@@ -43,11 +43,17 @@ _PERIOD_PARAM = {
 _FILTERS_PARAM = {
     "type": "object",
     "description": (
-        "Exact-match filters to narrow results. Multiple filters are AND-combined. "
+        "Filters to narrow results. Multiple filters are AND-combined. "
         "Supported fields: paymentMethod (Check, ACH, CreditCard, Wire, PayPal), "
         "accountType (Business, Individual), track1099 (true/false), "
         "billingFrequency (monthly, annual, usage-based), "
-        "sourceSystem (billcom, aws-ce, manual), department, owner."
+        "sourceSystem (billcom, aws-ce, manual), department (name), "
+        "owner (person's name, e.g. 'Michael Mader'), "
+        "secondaryOwner (person's name), purpose, spendType, "
+        "autoRenew (true/false), "
+        "contractStart, contractEnd (date or {from, to} range), "
+        "contractMonths, renewalNotice (number or {min, max} range), "
+        "renewalRate, terminationTerms."
     ),
 }
 
