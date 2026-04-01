@@ -486,6 +486,70 @@ class TestModeSwitch:
         print(f"  Step 2 PASS: single-vendor request used tools={tools_used}")
 
 
+import re
+
+# =========================================================================
+# VENDOR LIST — CSV DOWNLOAD BEHAVIOR
+# =========================================================================
+
+class TestVendorListCsv:
+
+    def _chat(self, prompt: str):
+        payload = {
+            "messages": [{"role": "user", "content": prompt}],
+            "context": {"app": "vendors"},
+        }
+        resp = requests.post(f"{BASE}/chat", json=payload, headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def test_no_inline_vendors_when_csv_present(self):
+        """When a CSV download is returned, the reply must not list vendors inline."""
+        result = self._chat("List all 1099 vendors")
+        downloads = result.get("downloads", [])
+        assert len(downloads) >= 1, (
+            f"Expected a CSV download, got none. Reply: {result['reply'][:300]}"
+        )
+
+        reply = result["reply"]
+        numbered = re.findall(r"^\d+\.\s", reply, re.MULTILINE)
+        bulleted = re.findall(r"^[-•]\s", reply, re.MULTILINE)
+        assert len(numbered) == 0, (
+            f"Reply should not contain a numbered list of vendors when CSV is present. "
+            f"Found {len(numbered)} numbered items. Reply: {reply[:500]}"
+        )
+        assert len(bulleted) == 0, (
+            f"Reply should not contain a bulleted list of vendors when CSV is present. "
+            f"Found {len(bulleted)} bullet items. Reply: {reply[:500]}"
+        )
+        print(f"  PASS: no inline vendor listing when CSV present")
+
+    def test_csv_contains_all_matching_vendors(self):
+        """The CSV must contain every matching vendor, not a truncated subset."""
+        result = self._chat("Show me all 1099 vendors")
+        downloads = result.get("downloads", [])
+        assert len(downloads) >= 1, (
+            f"Expected a CSV download. Reply: {result['reply'][:300]}"
+        )
+
+        csv_content = downloads[0]["content"]
+        csv_lines = [l for l in csv_content.strip().splitlines() if l.strip()]
+        csv_row_count = len(csv_lines) - 1
+
+        reply = result["reply"]
+        count_match = re.search(r"(\d+)\s*(?:1099\s+)?vendor", reply, re.IGNORECASE)
+        if count_match:
+            stated_count = int(count_match.group(1))
+            assert csv_row_count >= stated_count, (
+                f"CSV has {csv_row_count} rows but reply mentions {stated_count} vendors"
+            )
+
+        assert csv_row_count > 50, (
+            f"CSV should contain all 1099 vendors (>50), but only has {csv_row_count} rows"
+        )
+        print(f"  PASS: CSV contains {csv_row_count} vendors (complete set)")
+
+
 if __name__ == "__main__":
     import sys
     setup_module()
@@ -498,6 +562,7 @@ if __name__ == "__main__":
         TestValueErrors,
         TestEdgeCases,
         TestModeSwitch,
+        TestVendorListCsv,
     ]
 
     passed = 0

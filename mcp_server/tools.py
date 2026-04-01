@@ -279,15 +279,42 @@ def handle_vendor_list(args: dict, caller_context: CallerContext = None) -> dict
         for r in rows
     ]
 
-    result: dict = {"status": "ok", "data": {"vendors": vendors, "total": total}}
-    if total > limit:
-        result["data"]["showing"] = limit
-        result["data"]["truncated"] = True
-
     _CSV_THRESHOLD = 10
-    if len(vendors) >= _CSV_THRESHOLD:
-        result["csv"] = _vendors_to_csv(vendors)
+    has_csv = total >= _CSV_THRESHOLD
+
+    if has_csv:
+        if total > limit:
+            with pool.connection() as conn:
+                all_rows = conn.execute(
+                    f"{_VENDOR_LIST_SELECT} {_VENDOR_BASE_JOIN} {where_sql}"
+                    f" ORDER BY v.name",
+                    params,
+                ).fetchall()
+            all_vendors = [
+                {
+                    "id": str(r["id"]),
+                    "name": r["name"],
+                    "accountType": r["account_type"],
+                    "track1099": r["track_1099"],
+                    "paymentMethod": r["payment_method"],
+                    "billingFrequency": r["billing_frequency"],
+                    "sourceSystem": r["source_system"],
+                    "department": r["department"],
+                    "owner": r["owner"],
+                }
+                for r in all_rows
+            ]
+        else:
+            all_vendors = vendors
+
+    result: dict = {"status": "ok", "data": {"total": total}}
+
+    if has_csv:
+        result["data"]["csv_attached"] = True
+        result["csv"] = _vendors_to_csv(all_vendors)
         result["csv_filename"] = _vendor_csv_filename(filters)
+    else:
+        result["data"]["vendors"] = vendors
 
     return result
 
