@@ -42,7 +42,7 @@ _PERIOD_PARAM = {
 
 _FILTERS_PARAM = {
     "type": "object",
-    "description": "Filters to narrow results. Multiple filters are AND-combined.",
+    "description": "Filters to narrow results. Multiple filters are AND-combined. Use '*' for 'has a value' (IS NOT NULL) and 'none' for 'no value' (IS NULL) on any field.",
     "properties": {
         "paymentMethod": {
             "type": "string",
@@ -63,15 +63,15 @@ _FILTERS_PARAM = {
         },
         "department": {
             "type": "string",
-            "description": "Department name (fuzzy matched).",
+            "description": "Department name (fuzzy matched). Use '*' for any, 'none' for none.",
         },
         "owner": {
             "type": "string",
-            "description": "Person's name (fuzzy matched, e.g. 'Michael Mader').",
+            "description": "Person's name (fuzzy matched). Use '*' for any owner, 'none' for no owner.",
         },
         "secondaryOwner": {
             "type": "string",
-            "description": "Person's name (fuzzy matched).",
+            "description": "Person's name (fuzzy matched). Use '*' for any, 'none' for none.",
         },
         "purpose": {"type": "string"},
         "spendType": {"type": "string"},
@@ -1188,13 +1188,19 @@ def execute_generate_vendor_edit_csv(args: dict, caller_email: str = "") -> str:
 
     owner_filter = args.get("owner")
     if owner_filter:
-        user_pairs = _user_candidates()
-        user_names = [name for name, _ in user_pairs]
-        match = resolve_canonical_value(owner_filter, user_names)
-        if match:
-            vendors = [v for v in vendors if v.get("owner") == match.value]
+        if owner_filter == "*":
+            vendors = [v for v in vendors if v.get("ownerId")]
+        elif owner_filter == "none":
+            vendors = [v for v in vendors if not v.get("ownerId")]
         else:
-            return json.dumps({"ok": False, "error": f"Unknown owner: '{owner_filter}'"})
+            user_pairs = _user_candidates()
+            user_names = [name for name, _ in user_pairs]
+            match = resolve_canonical_value(owner_filter, user_names)
+            if match:
+                matched_uid = next(uid for name, uid in user_pairs if name == match.value)
+                vendors = [v for v in vendors if v.get("ownerId") == matched_uid]
+            else:
+                return json.dumps({"ok": False, "error": f"Unknown owner: '{owner_filter}'"})
 
     vendor_names = args.get("vendor_names")
     if vendor_names:

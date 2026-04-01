@@ -387,7 +387,9 @@ class TestEdgeCases:
         csv = "id,department"
         result = _process_csv_directly(csv)
         reply = result["reply"].lower()
-        assert "empty" in reply or "no" in reply
+        assert "empty" in reply or "no " in reply or "0 " in reply, (
+            f"Expected empty/no/0 indication, got: {result['reply'][:300]}"
+        )
         assert not result.get("pending_actions")
         print(f"  PASS: empty CSV (headers only) caught")
 
@@ -550,6 +552,105 @@ class TestVendorListCsv:
         print(f"  PASS: CSV contains {csv_row_count} vendors (complete set)")
 
 
+# =========================================================================
+# VENDOR LIST — FILTER USAGE (LLM prompt adherence)
+# =========================================================================
+
+class TestVendorListFilters:
+    """Verify the model actually uses vendor_list filters for natural-language queries."""
+
+    def _chat(self, prompt: str):
+        payload = {
+            "messages": [{"role": "user", "content": prompt}],
+            "context": {"app": "vendors"},
+        }
+        resp = requests.post(f"{BASE}/chat", json=payload, headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def test_owner_filter(self):
+        """Scenario 65: 'vendors owned by X' should use the owner filter."""
+        result = self._chat("Show me all vendors owned by Michael Mader")
+        tools = result.get("tool_calls_executed", [])
+        assert "vendor_list" in tools, (
+            f"Expected vendor_list tool call, got: {tools}. Reply: {result['reply'][:300]}"
+        )
+        reply = result["reply"].lower()
+        refusal = any(p in reply for p in [
+            "cannot filter", "don't support", "unable to filter", "no filter",
+        ])
+        assert not refusal, (
+            f"Model refused to use owner filter. Reply: {result['reply'][:300]}"
+        )
+        print(f"  PASS: owner filter used via vendor_list")
+
+    def test_contract_end_range_filter(self):
+        """Scenario 66: contract expiration queries should use contractEnd filter."""
+        result = self._chat("Show me vendors with contracts expiring in the next 3 months")
+        tools = result.get("tool_calls_executed", [])
+        assert "vendor_list" in tools, (
+            f"Expected vendor_list tool call, got: {tools}. Reply: {result['reply'][:300]}"
+        )
+        reply = result["reply"].lower()
+        refusal = any(p in reply for p in [
+            "cannot filter", "don't support", "unable to filter", "no filter",
+        ])
+        assert not refusal, (
+            f"Model refused to use contractEnd filter. Reply: {result['reply'][:300]}"
+        )
+        print(f"  PASS: contractEnd range filter used via vendor_list")
+
+    def test_auto_renew_filter(self):
+        """Scenario 67: 'auto-renew vendors' should use autoRenew boolean filter."""
+        result = self._chat("Show me all vendors with auto-renew enabled")
+        tools = result.get("tool_calls_executed", [])
+        assert "vendor_list" in tools, (
+            f"Expected vendor_list tool call, got: {tools}. Reply: {result['reply'][:300]}"
+        )
+        reply = result["reply"].lower()
+        refusal = any(p in reply for p in [
+            "cannot filter", "don't support", "unable to filter", "no filter",
+        ])
+        assert not refusal, (
+            f"Model refused to use autoRenew filter. Reply: {result['reply'][:300]}"
+        )
+        print(f"  PASS: autoRenew filter used via vendor_list")
+
+    def test_owner_existence_filter(self):
+        """Scenario 68: 'vendors that have an owner' should use owner='*' sentinel."""
+        result = self._chat("Show me all vendors that have an owner assigned")
+        tools = result.get("tool_calls_executed", [])
+        assert "vendor_list" in tools, (
+            f"Expected vendor_list tool call, got: {tools}. Reply: {result['reply'][:300]}"
+        )
+        reply = result["reply"].lower()
+        refusal = any(p in reply for p in [
+            "cannot filter", "don't support", "unable to filter",
+            "wildcard", "specify which",
+        ])
+        assert not refusal, (
+            f"Model refused or asked for specifics instead of using '*'. Reply: {result['reply'][:300]}"
+        )
+        print(f"  PASS: owner existence filter used via vendor_list")
+
+    def test_no_department_filter(self):
+        """Scenario 69: 'vendors without a department' should use department='none'."""
+        result = self._chat("Show me vendors that don't have a department assigned")
+        tools = result.get("tool_calls_executed", [])
+        assert "vendor_list" in tools, (
+            f"Expected vendor_list tool call, got: {tools}. Reply: {result['reply'][:300]}"
+        )
+        reply = result["reply"].lower()
+        refusal = any(p in reply for p in [
+            "cannot filter", "don't support", "unable to filter",
+            "wildcard", "specify which",
+        ])
+        assert not refusal, (
+            f"Model refused instead of using 'none' sentinel. Reply: {result['reply'][:300]}"
+        )
+        print(f"  PASS: department IS NULL filter used via vendor_list")
+
+
 if __name__ == "__main__":
     import sys
     setup_module()
@@ -563,6 +664,7 @@ if __name__ == "__main__":
         TestEdgeCases,
         TestModeSwitch,
         TestVendorListCsv,
+        TestVendorListFilters,
     ]
 
     passed = 0

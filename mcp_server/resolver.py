@@ -32,6 +32,8 @@ RESOLVE_FIELDS = {"department", "owner", "secondaryOwner",
 
 OWNER_FIELDS = {"owner", "secondaryOwner"}
 
+NULL_SENTINELS = {"*", "none"}
+
 RANGE_FIELDS: dict[str, str] = {
     "contractStart": "v.contract_start",
     "contractEnd": "v.contract_end",
@@ -98,6 +100,9 @@ def resolve_filter(field: str, value: Any) -> dict:
         {"status": "did_you_mean", "field": "...", "suggestion": "...", ...}
         {"status": "invalid_filter", "field": "...", "provided": "...", "valid_values": [...]}
     """
+    if isinstance(value, str) and value in NULL_SENTINELS:
+        return {"status": "ok", "field": field, "value": value}
+
     if field in ENUM_FIELDS:
         valid = ENUM_FIELDS[field]
         if value in valid:
@@ -231,6 +236,8 @@ def validate_filters(filters: dict | None) -> dict | None:
         if result["status"] != "ok":
             return result
         filters[field] = result["value"]
+        if result["value"] in NULL_SENTINELS:
+            continue
         if field == "owner" and "user_ids" in result:
             filters["_owner_ids"] = result["user_ids"]
         elif field == "secondaryOwner" and "user_ids" in result:
