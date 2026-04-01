@@ -462,6 +462,7 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
                 csv_content = parsed.pop("csv", None)
                 csv_filename = parsed.pop("csv_filename", None)
                 if csv_content and csv_filename:
+                    downloads = [d for d in downloads if d.filename != csv_filename]
                     downloads.append(Download(filename=csv_filename, content=csv_content))
 
                 messages.append({
