@@ -65,16 +65,29 @@ correct), "this year" → "YTD", "February" → "2026-02".
 **filters**: A dict of field/value pairs to narrow results. Multiple \
 filters are AND-combined. Use filters whenever the user specifies a \
 subset of vendors — e.g. "1099 vendors", "ACH vendors", "vendors in \
-marketing". Supported fields and values:
+marketing", "vendors owned by Michael". Supported fields and values:
 - paymentMethod: Check, ACH, CreditCard, Wire, PayPal
 - accountType: Business, Individual
 - track1099: true, false
 - billingFrequency: monthly, annual, usage-based
 - sourceSystem: billcom, aws-ce, gcp, manual
-- department: (validated against actual data)
-- owner: (validated against actual data)
+- department: (person's name — fuzzy matched, e.g. "Marketing")
+- owner: (person's name — fuzzy matched, e.g. "Michael Mader")
+- secondaryOwner: (person's name — fuzzy matched)
+- purpose, spendType, renewalRate, terminationTerms: (validated)
+- autoRenew: true, false
+- contractStart, contractEnd: date or {"from": ..., "to": ...}
+- contractMonths, renewalNotice: number or {"min": ..., "max": ...}
+
+IMPORTANT: When the user asks about vendors "owned by" or "belonging to" \
+a person, ALWAYS use the owner filter. Pass the person's name exactly as \
+the user said it — the tool handles fuzzy matching internally.
 
 Examples:
+- "show me all vendors owned by Michael Mader" → \
+vendor_list(filters={"owner": "Michael Mader"})
+- "vendors with contracts expiring in the next 3 months" → \
+vendor_list(filters={"contractEnd": {"from": "2026-04-01", "to": "2026-07-01"}})
 - "spend on 1099 vendors in Q1 by payment type" → \
 spend_by_dimension(dimension="paymentMethod", period="2026-Q1", \
 filters={"track1099": true})
@@ -84,7 +97,7 @@ top_vendors(n=10, period="YTD", filters={"paymentMethod": "ACH"})
 spend_total(period="2025-Q4", filters={"department": "Marketing"})
 
 **dimension** (spend_by_dimension): paymentMethod, accountType, track1099, \
-billingFrequency, sourceSystem, department, owner, vendorName.
+billingFrequency, sourceSystem, department, owner, secondaryOwner, vendorName.
 
 ## Spend detail (per-service / per-SKU breakdowns)
 
