@@ -236,7 +236,7 @@ def validate_filters(filters: dict | None) -> dict | None:
         if result["status"] != "ok":
             return result
         filters[field] = result["value"]
-        if result["value"] in NULL_SENTINELS:
+        if isinstance(result["value"], str) and result["value"] in NULL_SENTINELS:
             continue
         if field == "owner" and "user_ids" in result:
             filters["_owner_ids"] = result["user_ids"]
