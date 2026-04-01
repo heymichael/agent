@@ -1037,7 +1037,7 @@ def process_csv_upload(profile: TableCsvProfile, content: str) -> dict:
                 current_display = str(v.get(spec.csv_name, "")) if v else "—"
                 current_display = current_display or "—"
             elif spec.col_type == "bool":
-                current_display = "Yes" if v.get(spec.csv_name) else "No"
+                current_display = "Yes" if (v and v.get(spec.csv_name)) else "No"
             else:
                 current_raw = v.get(spec.csv_name, "") if v else ""
                 current_display = str(current_raw) if current_raw else "—"

@@ -31,8 +31,7 @@ SAMPLE_VENDORS = [
     {
         "id": "aaa-111", "name": "Acme Corp", "department": "Engineering",
         "owner": "alice@example.com", "secondaryOwner": None,
-        "paymentMethod": "ACH", "billingFrequency": "monthly",
-        "accountType": "Business", "track1099": True,
+        "billingFrequency": "monthly",
         "purpose": "Cloud hosting", "spendType": None,
         "contractStartDate": "2025-01-01", "contractEndDate": None,
         "autoRenew": True,
@@ -40,8 +39,7 @@ SAMPLE_VENDORS = [
     {
         "id": "bbb-222", "name": "Beta Inc", "department": "Marketing",
         "owner": "bob@example.com", "secondaryOwner": None,
-        "paymentMethod": "Check", "billingFrequency": "annual",
-        "accountType": "Individual", "track1099": False,
+        "billingFrequency": "annual",
         "purpose": None, "spendType": None,
         "contractStartDate": None, "contractEndDate": None,
         "autoRenew": False,
@@ -60,6 +58,11 @@ SAMPLE_USERS = [
 ]
 
 
+GOOD_UUID_1 = "a0000000-0000-0000-0000-000000000001"
+GOOD_UUID_2 = "a0000000-0000-0000-0000-000000000002"
+BAD_UUID = "b0000000-0000-0000-0000-00000000dead"
+
+
 def _tiny_profile():
     """A minimal profile for unit-testing the generic pipeline."""
     return TableCsvProfile(
@@ -70,7 +73,7 @@ def _tiny_profile():
             CsvColumnSpec("active", "is_active", "bool"),
             CsvColumnSpec("builtOn", "built_on", "date"),
         ],
-        id_check_fn=lambda ids: {i: i != "bad-id" for i in ids},
+        id_check_fn=lambda ids: {i: i != BAD_UUID for i in ids},
         pk_key="widget_id",
     )
 
@@ -164,16 +167,16 @@ class TestValidateCsvIds:
 
     def test_existing_ids_pass(self):
         p = _tiny_profile()
-        rows = [{"id": "good-1"}, {"id": "good-2"}]
+        rows = [{"id": GOOD_UUID_1}, {"id": GOOD_UUID_2}]
         errors = validate_csv_ids(p, rows)
         assert errors == []
 
     def test_missing_id_flagged(self):
         p = _tiny_profile()
-        rows = [{"id": "good-1"}, {"id": "bad-id"}]
+        rows = [{"id": GOOD_UUID_1}, {"id": BAD_UUID}]
         errors = validate_csv_ids(p, rows)
         assert len(errors) == 1
-        assert errors[0]["value"] == "bad-id"
+        assert errors[0]["value"] == BAD_UUID
         assert errors[0]["row"] == 3
 
 
@@ -292,19 +295,23 @@ class TestProcessCsvUpload:
 
     def test_bad_id_stops_at_id_check(self):
         p = _tiny_profile()
-        result = process_csv_upload(p, "id,name\nbad-id,X\n")
+        result = process_csv_upload(p, f"id,name\n{BAD_UUID},X\n")
         assert result["ok"] is False
         assert result["stage"] == "id_check"
 
     def test_invalid_value_stops_at_value_check(self):
         p = _tiny_profile()
-        result = process_csv_upload(p, "id,color\ngood-1,purple\n")
+        result = process_csv_upload(p, f"id,color\n{GOOD_UUID_1},purple\n")
         assert result["ok"] is False
         assert result["stage"] == "value_check"
 
-    def test_valid_csv_returns_confirm_action(self):
+    @patch("service.tools.pg_client.list_vendors", return_value=[
+        {"id": GOOD_UUID_1, "name": "Widget A", "color": "blue", "is_active": True},
+        {"id": GOOD_UUID_2, "name": "Widget B", "color": "red", "is_active": True},
+    ])
+    def test_valid_csv_returns_confirm_action(self, _mock):
         p = _tiny_profile()
-        csv = "id,color,active\ngood-1,red,true\ngood-2,blue,false\n"
+        csv = f"id,color,active\n{GOOD_UUID_1},red,true\n{GOOD_UUID_2},blue,false\n"
         result = process_csv_upload(p, csv)
         assert result["ok"] is True
         assert result["action"] == "confirm_csv_batch"
@@ -312,7 +319,7 @@ class TestProcessCsvUpload:
 
     def test_no_changes_detected(self):
         p = _tiny_profile()
-        csv = "id\ngood-1\n"
+        csv = f"id\n{GOOD_UUID_1}\n"
         result = process_csv_upload(p, csv)
         assert result["ok"] is True
         assert "No changes" in result["message"]
@@ -327,7 +334,7 @@ class TestVendorCsvProfile:
 
     def test_has_all_expected_columns(self):
         headers = set(VENDOR_CSV_PROFILE.csv_headers)
-        for col in ("name", "department", "owner", "paymentMethod", "track1099", "purpose"):
+        for col in ("name", "department", "owner", "billingFrequency", "purpose"):
             assert col in headers, f"Missing expected column: {col}"
 
     def test_department_is_fk_type(self):
@@ -335,10 +342,10 @@ class TestVendorCsvProfile:
         assert spec.col_type == "fk"
         assert spec.db_name == "department_id"
 
-    def test_paymentMethod_is_enum_type(self):
-        spec = VENDOR_CSV_PROFILE.get_spec("paymentMethod")
+    def test_billingFrequency_is_enum_type(self):
+        spec = VENDOR_CSV_PROFILE.get_spec("billingFrequency")
         assert spec.col_type == "enum"
-        assert "ACH" in spec.valid_values
+        assert "monthly" in spec.valid_values
 
 
 # ── Vendor tool handlers ────────────────────────────────────────────────
@@ -362,7 +369,7 @@ class TestGenerateVendorEditCsv:
         import json
         from service.tools import execute_generate_vendor_edit_csv
 
-        result = json.loads(execute_generate_vendor_edit_csv({"department": "Engineering"}))
+        result = json.loads(execute_generate_vendor_edit_csv({"departments": ["Engineering"]}))
         assert result["ok"] is True
         assert result["row_count"] == 1
 
