@@ -553,3 +553,75 @@ class TestNewFilters:
         with patch("mcp_server.resolver.get_pool"):
             result = resolve_filter("nonexistentField", "value")
         assert result["status"] == "invalid_filter"
+
+
+# ── Null sentinel filters ─────────────────────────────────────────────
+
+class TestNullSentinelFilters:
+    def test_star_resolver_accepts(self):
+        """'*' sentinel should pass validation on any field without DB lookup."""
+        result = resolve_filter("owner", "*")
+        assert result["status"] == "ok"
+        assert result["value"] == "*"
+
+    def test_none_resolver_accepts(self):
+        """'none' sentinel should pass validation on any field."""
+        result = resolve_filter("department", "none")
+        assert result["status"] == "ok"
+        assert result["value"] == "none"
+
+    def test_star_on_enum_field(self):
+        """'*' should work on enum fields too (e.g. paymentMethod)."""
+        result = resolve_filter("paymentMethod", "*")
+        assert result["status"] == "ok"
+
+    def test_star_on_range_field(self):
+        """'*' should work on range fields (e.g. contractEnd)."""
+        result = resolve_filter("contractEnd", "*")
+        assert result["status"] == "ok"
+
+    def test_star_produces_is_not_null_sql(self):
+        """'*' should produce IS NOT NULL in SQL clause."""
+        from mcp_server.tools import _append_filter_clauses
+        clauses, params = [], []
+        _append_filter_clauses({"owner": "*"}, clauses, params)
+        assert len(clauses) == 1
+        assert "IS NOT NULL" in clauses[0]
+        assert params == []
+
+    def test_none_produces_is_null_sql(self):
+        """'none' should produce IS NULL in SQL clause."""
+        from mcp_server.tools import _append_filter_clauses
+        clauses, params = [], []
+        _append_filter_clauses({"department": "none"}, clauses, params)
+        assert len(clauses) == 1
+        assert "IS NULL" in clauses[0]
+        assert params == []
+
+    def test_owner_star_uses_owner_id_column(self):
+        """Owner '*' should check v.owner_id (not the joined email column)."""
+        from mcp_server.tools import _append_filter_clauses
+        clauses, params = [], []
+        _append_filter_clauses({"owner": "*"}, clauses, params)
+        assert "v.owner_id IS NOT NULL" in clauses[0]
+
+    def test_validate_filters_skips_owner_id_stashing(self):
+        """validate_filters should not stash _owner_ids for sentinel values."""
+        from mcp_server.resolver import validate_filters
+        filters = {"owner": "*"}
+        err = validate_filters(filters)
+        assert err is None
+        assert "_owner_ids" not in filters
+
+    def test_sentinel_with_vendor_list(self):
+        """Full integration: vendor_list with owner='*' should emit IS NOT NULL."""
+        rows = [_make_vendor_row(i) for i in range(3)]
+        pool = _build_mock_pool({
+            "COUNT(*)": {"cnt": 3},
+            "LIMIT": rows,
+        })
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_vendor_list({"filters": {"owner": "*"}})
+        assert result["status"] == "ok"
+        assert result["data"]["total"] == 3

@@ -107,10 +107,25 @@ def _month_to_date(month_str: str) -> str:
     return f"{month_str}-01"
 
 
+_NULL_SENTINEL_COL = {
+    "owner": "v.owner_id",
+    "secondaryOwner": "v.secondary_owner_id",
+    "department": "v.department_id",
+}
+
+
 def _append_filter_clauses(filters: dict, clauses: list, params: list) -> None:
     """Append SQL clauses and params for each filter field."""
+    from mcp_server.resolver import NULL_SENTINELS
+
     for field, value in filters.items():
         if field.startswith("_"):
+            continue
+
+        if isinstance(value, str) and value in NULL_SENTINELS:
+            sql_col = _NULL_SENTINEL_COL.get(field) or FIELD_TO_SQL.get(field) or RANGE_FIELDS.get(field)
+            if sql_col:
+                clauses.append(f"{sql_col} IS NOT NULL" if value == "*" else f"{sql_col} IS NULL")
             continue
 
         if field == "owner" and "_owner_ids" in filters:
