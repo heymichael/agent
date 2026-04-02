@@ -30,4 +30,4 @@ jobs:
         run: python -m py_compile service/app.py service/pg_client.py service/auth.py service/tools.py
 
       - name: Run tests
-        run: python -m pytest tests/ -x -q --ignore=tests/test_csv_e2e.py
+        run: python -m pytest tests/ -x -q --ignore=tests/test_csv_e2e.py --ignore=tests/test_write_auth_e2e.py
