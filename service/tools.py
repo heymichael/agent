@@ -548,6 +548,21 @@ def _build_caller_context(caller_email: str) -> dict | None:
     return {"allowed_vendor_ids": effective_ids, "is_finance_admin": False}
 
 
+def _check_write_auth(caller_email: str, vendor_id: str, vendor_name: str | None = None) -> str | None:
+    """Return a not_authorized JSON string if the caller cannot edit this vendor."""
+    ctx = _build_caller_context(caller_email)
+    if ctx.get("is_finance_admin"):
+        return None
+    allowed = ctx.get("allowed_vendor_ids") or []
+    if vendor_id not in allowed:
+        name = vendor_name or vendor_id
+        return json.dumps({
+            "status": "not_authorized",
+            "message": f"You don't have permission to edit {name}.",
+        })
+    return None
+
+
 def execute_vendor_lookup(args: dict, caller_email: str = "") -> str:
     return json.dumps(handle_vendor_lookup(args))
 
@@ -732,6 +747,10 @@ def execute_modify_vendor(args: dict, caller_email: str = "") -> str:
         })
 
     vendor = result.vendor
+
+    denied = _check_write_auth(caller_email, vendor["id"], vendor.get("name"))
+    if denied:
+        return denied
 
     field_args = {k: v for k, v in args.items() if k != "identifier" and v is not None}
     if not field_args:
@@ -1235,7 +1254,25 @@ def execute_process_vendor_csv(args: dict, caller_email: str = "") -> str:
     if not csv_attachments:
         return json.dumps({"ok": False, "error": "No CSV file attached. Please attach a CSV file and try again."})
 
-    return json.dumps(process_csv_upload(VENDOR_CSV_PROFILE, csv_attachments[0]["content"]))
+    result = process_csv_upload(VENDOR_CSV_PROFILE, csv_attachments[0]["content"])
+
+    if result.get("ok") and result.get("updates"):
+        ctx = _build_caller_context(caller_email)
+        if not ctx.get("is_finance_admin"):
+            allowed = set(ctx.get("allowed_vendor_ids") or [])
+            denied_vendors = [
+                u.get("vendor_name", u.get(VENDOR_CSV_PROFILE.pk_key, "Unknown"))
+                for u in result["updates"]
+                if u.get(VENDOR_CSV_PROFILE.pk_key) not in allowed
+            ]
+            if denied_vendors:
+                return json.dumps({
+                    "status": "not_authorized",
+                    "message": f"You don't have permission to edit {len(denied_vendors)} vendor(s): {', '.join(denied_vendors)}.",
+                    "denied_vendors": denied_vendors,
+                })
+
+    return json.dumps(result)
 
 
 TOOL_HANDLERS = {

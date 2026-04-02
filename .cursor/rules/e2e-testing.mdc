@@ -1,19 +1,33 @@
 ---
 description: How to start infrastructure and run e2e tests against the live agent
-globs: tests/test_csv_e2e.py
+globs: tests/test_csv_e2e.py,tests/test_write_auth_e2e.py
 alwaysApply: false
 ---
 
 # Running e2e tests
 
-E2e tests in `tests/test_csv_e2e.py` hit the live `/chat` endpoint through the full LLM pipeline. They require two services running locally.
+E2e tests hit the live `/chat` endpoint through the full LLM pipeline. They require two services running locally.
+
+## Test file map
+
+Three test files cover the write pipeline. Each targets a different layer:
+
+| File | Layer | Runs as | What it tests |
+|------|-------|---------|---------------|
+| `test_csv_e2e.py` | Input validation | Admin | Bad columns, invalid UUIDs, edge cases, read-only queries |
+| `test_csv_e2e.py` | Business logic | Admin | CSV confirm flow, single-vendor edits (auth gate is bypassed) |
+| `test_write_auth_e2e.py` | Authorization | Scoped user | Allowed/denied edits, mixed CSV rejection |
+| `test_write_auth.py` | Authorization | Mocked (unit) | Same auth logic, no network — fast and deterministic |
+
+The **input validation** layer fails requests before the auth check runs — outcome is the same regardless of caller identity. The **business logic** layer is reached only after auth passes (admin bypass). The **authorization** layer is the only one whose outcome depends on who the caller is.
+
+`test_write_auth_e2e.py` uses the `X-Test-Email` header (defined in `service/auth.py`) to override `DEV_AUTH_EMAIL` and authenticate as a scoped user. This only works when `DEV_AUTH_EMAIL` is set (dev mode) — production uses real Firebase tokens and ignores the header.
 
 ## Pre-flight: check what's already running
 
 Before starting anything, check existing terminals for running processes:
 
 ```sh
-head -n 10 /path/to/terminals/*.txt   # scan for cloud-sql-proxy / uvicorn
 lsof -ti:5433 2>/dev/null && echo "proxy up" || echo "proxy down"
 lsof -ti:8080 2>/dev/null && echo "agent up" || echo "agent down"
 ```
@@ -27,7 +41,27 @@ cloud-sql-proxy haderach-ai:us-central1:haderach-main --port 5433 \
   --credentials-file=agent-local-dev-sa-key.json
 ```
 
-## 2. Agent server (port 8080)
+If the proxy shows as "up" but connections fail, the process may be stale. Kill it (`kill $(lsof -ti:5433)`) and restart. After starting, confirm the log shows `The proxy has started successfully and is ready for new connections!`.
+
+## 2. Verify database connectivity
+
+After the proxy is up, test a direct connection before starting the agent. This catches stale proxies, credential issues, and network problems early:
+
+```sh
+cd /path/to/agent
+.venv/bin/python -c "
+from dotenv import load_dotenv; load_dotenv('.env', interpolate=False)
+import os, psycopg
+conn = psycopg.connect(os.environ['DATABASE_URL'], connect_timeout=10)
+print(conn.execute('SELECT 1').fetchone())
+conn.close()
+print('DB connection OK')
+"
+```
+
+If this fails, do not proceed — the agent server and tests will both fail with `PoolTimeout` errors. Common fixes: restart the proxy, check the credentials file, verify Cloud SQL instance is running.
+
+## 3. Agent server (port 8080)
 
 The `.env` file has all credentials (`OPENAI_API_KEY`, `DATABASE_URL`, `DEV_AUTH_EMAIL`). The app loads them via `load_dotenv()` at import time. **Do not manually export secrets from gcloud** — it's error-prone due to shell escaping and unnecessary.
 
@@ -38,17 +72,28 @@ cd /path/to/agent
 
 Always use `--reload` so code changes are picked up automatically.
 
-## 3. Verify before running tests
+If the proxy was restarted while the agent was running, the agent's connection pool will be broken. Kill the agent (`kill $(lsof -ti:8080)`) and restart it so it creates a fresh pool against the new proxy.
+
+## 4. Verify before running tests
 
 ```sh
 curl -s http://127.0.0.1:8080/health   # should return {"status":"ok"}
 ```
 
-## 4. Run tests
+## 5. Run tests
 
 ```sh
-.venv/bin/python -m pytest tests/test_csv_e2e.py -v -s                    # full suite (~4 min)
-.venv/bin/python -m pytest tests/test_csv_e2e.py::TestCountThenList -v -s # multi-turn only
+# Admin e2e suite (~4 min) — input validation + business logic
+.venv/bin/python -m pytest tests/test_csv_e2e.py -v -s
+
+# Scoped-user e2e suite (~1 min) — authorization gate
+.venv/bin/python -m pytest tests/test_write_auth_e2e.py -v -s
+
+# Unit tests for write auth — no server needed
+.venv/bin/python -m pytest tests/test_write_auth.py -v -s
+
+# Specific class
+.venv/bin/python -m pytest tests/test_csv_e2e.py::TestCountThenList -v -s
 ```
 
-Tests use `requests` with 30s timeouts. No `--timeout` pytest plugin is installed.
+Tests use `requests` with 30–60s timeouts. No `--timeout` pytest plugin is installed.
