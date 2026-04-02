@@ -553,3 +553,26 @@ def submit_feedback(req: FeedbackRequest, caller: dict = Depends(get_verified_us
         comment=req.comment,
     )
     return {"ok": True}
+
+
+class SiteFeedbackRequest(BaseModel):
+    app_id: str
+    open_panes: dict | None = None
+    feedback_text: str
+
+
+@app.post("/feedback/site", status_code=201)
+def submit_site_feedback(
+    req: SiteFeedbackRequest, caller: dict = Depends(get_verified_user)
+):
+    caller_email = caller.get("email", "")
+    caller_user_id = pg_client.get_user_id_by_email(caller_email)
+    if not caller_user_id:
+        raise HTTPException(status_code=403, detail="User not found")
+    pg_client.insert_site_feedback(
+        user_id=caller_user_id,
+        app_id=req.app_id,
+        open_panes=req.open_panes,
+        feedback_text=req.feedback_text,
+    )
+    return {"ok": True}

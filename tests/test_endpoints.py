@@ -288,3 +288,92 @@ class TestGetSpend:
         assert "data" in data
         row = data["data"][0]
         assert set(row.keys()) == {"vendor", "month", "amount"}
+
+
+# ── POST /feedback/site ──────────────────────────────────────────────────
+
+class TestSiteFeedback:
+
+    def teardown_method(self):
+        _teardown()
+
+    @patch.object(pg_client, "insert_site_feedback")
+    @patch.object(pg_client, "get_user_id_by_email")
+    def test_submit_feedback(self, mock_uid, mock_insert):
+        mock_uid.return_value = "user-uuid-123"
+        client = _make_client()
+
+        resp = client.post("/feedback/site", json={
+            "app_id": "vendors",
+            "open_panes": {"chat": True, "analytics": False, "data": False},
+            "feedback_text": "Great app!",
+        })
+
+        assert resp.status_code == 201
+        assert resp.json() == {"ok": True}
+        mock_insert.assert_called_once_with(
+            user_id="user-uuid-123",
+            app_id="vendors",
+            open_panes={"chat": True, "analytics": False, "data": False},
+            feedback_text="Great app!",
+        )
+
+    @patch.object(pg_client, "insert_site_feedback")
+    @patch.object(pg_client, "get_user_id_by_email")
+    def test_submit_feedback_null_panes(self, mock_uid, mock_insert):
+        mock_uid.return_value = "user-uuid-123"
+        client = _make_client()
+
+        resp = client.post("/feedback/site", json={
+            "app_id": "card",
+            "feedback_text": "Needs dark mode",
+        })
+
+        assert resp.status_code == 201
+        mock_insert.assert_called_once_with(
+            user_id="user-uuid-123",
+            app_id="card",
+            open_panes=None,
+            feedback_text="Needs dark mode",
+        )
+
+    @patch.object(pg_client, "get_user_id_by_email")
+    def test_unknown_user_returns_403(self, mock_uid):
+        mock_uid.return_value = None
+        client = _make_client()
+
+        resp = client.post("/feedback/site", json={
+            "app_id": "vendors",
+            "feedback_text": "Hello",
+        })
+
+        assert resp.status_code == 403
+
+    def test_unauthenticated_returns_401(self):
+        app.dependency_overrides.clear()
+        client = TestClient(app)
+
+        resp = client.post("/feedback/site", json={
+            "app_id": "vendors",
+            "feedback_text": "Hello",
+        })
+
+        assert resp.status_code == 401
+
+    def test_missing_feedback_text_returns_422(self):
+        client = _make_client()
+
+        resp = client.post("/feedback/site", json={
+            "app_id": "vendors",
+        })
+
+        assert resp.status_code == 422
+
+    def test_missing_app_id_returns_422(self):
+        client = _make_client()
+
+        resp = client.post("/feedback/site", json={
+            "feedback_text": "Hello",
+        })
+
+        assert resp.status_code == 422
