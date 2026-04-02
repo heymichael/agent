@@ -1,0 +1,54 @@
+---
+description: How to start infrastructure and run e2e tests against the live agent
+globs: tests/test_csv_e2e.py
+alwaysApply: false
+---
+
+# Running e2e tests
+
+E2e tests in `tests/test_csv_e2e.py` hit the live `/chat` endpoint through the full LLM pipeline. They require two services running locally.
+
+## Pre-flight: check what's already running
+
+Before starting anything, check existing terminals for running processes:
+
+```sh
+head -n 10 /path/to/terminals/*.txt   # scan for cloud-sql-proxy / uvicorn
+lsof -ti:5433 2>/dev/null && echo "proxy up" || echo "proxy down"
+lsof -ti:8080 2>/dev/null && echo "agent up" || echo "agent down"
+```
+
+If the agent server is running **without** `--reload`, it won't pick up code changes. Kill and restart it.
+
+## 1. Cloud SQL Proxy (port 5433)
+
+```sh
+cloud-sql-proxy haderach-ai:us-central1:haderach-main --port 5433 \
+  --credentials-file=agent-local-dev-sa-key.json
+```
+
+## 2. Agent server (port 8080)
+
+The `.env` file has all credentials (`OPENAI_API_KEY`, `DATABASE_URL`, `DEV_AUTH_EMAIL`). The app loads them via `load_dotenv()` at import time. **Do not manually export secrets from gcloud** — it's error-prone due to shell escaping and unnecessary.
+
+```sh
+cd /path/to/agent
+.venv/bin/uvicorn service.app:app --reload --port 8080
+```
+
+Always use `--reload` so code changes are picked up automatically.
+
+## 3. Verify before running tests
+
+```sh
+curl -s http://127.0.0.1:8080/health   # should return {"status":"ok"}
+```
+
+## 4. Run tests
+
+```sh
+.venv/bin/python -m pytest tests/test_csv_e2e.py -v -s                    # full suite (~4 min)
+.venv/bin/python -m pytest tests/test_csv_e2e.py::TestCountThenList -v -s # multi-turn only
+```
+
+Tests use `requests` with 30s timeouts. No `--timeout` pytest plugin is installed.

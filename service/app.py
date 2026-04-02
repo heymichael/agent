@@ -98,7 +98,9 @@ def get_openai_client() -> OpenAI:
 
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: str | None = None
+    tool_calls: list[dict] | None = None
+    tool_call_id: str | None = None
 
 
 class Attachment(BaseModel):
@@ -152,6 +154,7 @@ class ChatResponse(BaseModel):
     disambiguation: Disambiguation | None = None
     downloads: list[Download] = []
     session_id: str | None = None
+    tool_messages: list[dict] = []
 
 
 @app.get("/health")
@@ -403,7 +406,7 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
     messages = [{"role": "system", "content": system_prompt}]
     for m in req.messages:
         content = m.content
-        if m == req.messages[-1] and att_dicts:
+        if m == req.messages[-1] and m.role == "user" and att_dicts:
             summaries = []
             for att in att_dicts:
                 lines = att["content"].splitlines()
@@ -411,13 +414,22 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
                 summaries.append(
                     f"[Attached: {att['filename']} — {len(lines) - 1} data rows | columns: {cols}]"
                 )
-            content = content + "\n\n" + "\n".join(summaries)
-        messages.append({"role": m.role, "content": content})
+            content = (content or "") + "\n\n" + "\n".join(summaries)
+        msg: dict = {"role": m.role}
+        if m.tool_call_id:
+            msg["tool_call_id"] = m.tool_call_id
+            msg["content"] = m.content or ""
+        elif content is not None:
+            msg["content"] = content
+        if m.tool_calls:
+            msg["tool_calls"] = m.tool_calls
+        messages.append(msg)
 
     tool_calls_executed: list[str] = []
     pending_actions: list[PendingAction] = []
     disambiguation: Disambiguation | None = None
     downloads: list[Download] = []
+    tool_messages_this_turn: list[dict] = []
     max_rounds = 10
 
     has_csv_attachment = any(
@@ -443,7 +455,9 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
         choice = response.choices[0]
 
         if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-            messages.append(choice.message.model_dump())
+            assistant_tool_msg = choice.message.model_dump()
+            messages.append(assistant_tool_msg)
+            tool_messages_this_turn.append(assistant_tool_msg)
 
             for tc in choice.message.tool_calls:
                 fn_name = tc.function.name
@@ -465,11 +479,13 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
                     downloads = [d for d in downloads if d.filename != csv_filename]
                     downloads.append(Download(filename=csv_filename, content=csv_content))
 
-                messages.append({
+                tool_result_msg = {
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "content": _truncate_tool_result(json.dumps(parsed)),
-                })
+                }
+                messages.append(tool_result_msg)
+                tool_messages_this_turn.append(tool_result_msg)
 
                 if parsed.get("action") == "confirm_csv_batch":
                     pending_actions.append(PendingAction(
@@ -496,17 +512,33 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
             continue
 
         reply = choice.message.content or ""
-        all_msgs = [{"role": m.role, "content": m.content} for m in req.messages]
+        all_msgs = []
+        for m in req.messages:
+            entry: dict = {"role": m.role, "content": m.content}
+            if m.tool_calls:
+                entry["tool_calls"] = m.tool_calls
+            if m.tool_call_id:
+                entry["tool_call_id"] = m.tool_call_id
+            all_msgs.append(entry)
+        all_msgs.extend(tool_messages_this_turn)
         all_msgs.append({"role": "assistant", "content": reply})
         if caller_user_id:
             try:
                 pg_client.upsert_chat_session(session_id, caller_user_id, app_context, all_msgs)
             except Exception:
                 logger.exception("Failed to persist chat session %s", session_id)
-        return ChatResponse(reply=reply, tool_calls_executed=tool_calls_executed, pending_actions=pending_actions, disambiguation=disambiguation, downloads=downloads, session_id=session_id)
+        return ChatResponse(reply=reply, tool_calls_executed=tool_calls_executed, pending_actions=pending_actions, disambiguation=disambiguation, downloads=downloads, session_id=session_id, tool_messages=tool_messages_this_turn)
 
     fallback_reply = "I hit the maximum number of tool-call rounds. Please try again."
-    all_msgs = [{"role": m.role, "content": m.content} for m in req.messages]
+    all_msgs = []
+    for m in req.messages:
+        entry = {"role": m.role, "content": m.content}
+        if m.tool_calls:
+            entry["tool_calls"] = m.tool_calls
+        if m.tool_call_id:
+            entry["tool_call_id"] = m.tool_call_id
+        all_msgs.append(entry)
+    all_msgs.extend(tool_messages_this_turn)
     all_msgs.append({"role": "assistant", "content": fallback_reply})
     if caller_user_id:
         try:
@@ -520,6 +552,7 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
         disambiguation=disambiguation,
         downloads=downloads,
         session_id=session_id,
+        tool_messages=tool_messages_this_turn,
     )
 
 

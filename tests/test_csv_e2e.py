@@ -651,6 +651,135 @@ class TestVendorListFilters:
         print(f"  PASS: department IS NULL filter used via vendor_list")
 
 
+# =========================================================================
+# MULTI-TURN: COUNT → LIST WITH TOOL HISTORY (bug 113#9)
+#
+# Validates that replaying tool_messages from a count turn gives the model
+# enough context to call vendor_list and produce a real CSV download,
+# even when the follow-up prompt is vague.  Five levels of clarity:
+#   1. Fully explicit (restates filter + requests CSV)
+#   2. Clear pronoun reference (asks for CSV of "them")
+#   3. Medium — "show me the list"
+#   4. Vague — "can I get those?"
+#   5. Minimal — "gimme"
+# =========================================================================
+
+class TestCountThenList:
+    """Multi-turn: count query → follow-up asking for the list.
+
+    Each test sends a count prompt, captures tool_messages from the
+    response, then sends a follow-up that replays them. The follow-up
+    should trigger vendor_list and produce a CSV download.
+    """
+
+    def _count_then_list(self, count_prompt: str, list_prompt: str, label: str):
+        """Run a two-turn count→list flow and assert a CSV download is produced."""
+        # Turn 1: count query
+        payload1 = {
+            "messages": [{"role": "user", "content": count_prompt}],
+            "context": {"app": "vendors"},
+        }
+        resp1 = requests.post(f"{BASE}/chat", json=payload1, headers=HEADERS, timeout=30)
+        resp1.raise_for_status()
+        turn1 = resp1.json()
+
+        tools1 = turn1.get("tool_calls_executed", [])
+        assert "vendor_count" in tools1, (
+            f"[{label}] Turn 1 should call vendor_count, got: {tools1}. "
+            f"Reply: {turn1['reply'][:300]}"
+        )
+
+        tool_msgs = turn1.get("tool_messages", [])
+        assert len(tool_msgs) >= 2, (
+            f"[{label}] Expected tool_messages from turn 1, got {len(tool_msgs)}"
+        )
+
+        # Build turn-2 messages: replay tool_messages as hidden entries
+        turn2_messages = [
+            {"role": "user", "content": count_prompt},
+        ]
+        for tm in tool_msgs:
+            msg = {"role": tm["role"]}
+            if tm.get("content") is not None:
+                msg["content"] = tm["content"]
+            if tm.get("tool_calls"):
+                msg["tool_calls"] = tm["tool_calls"]
+            if tm.get("tool_call_id"):
+                msg["tool_call_id"] = tm["tool_call_id"]
+            turn2_messages.append(msg)
+        turn2_messages.append({"role": "assistant", "content": turn1["reply"]})
+        turn2_messages.append({"role": "user", "content": list_prompt})
+
+        payload2 = {
+            "messages": turn2_messages,
+            "context": {"app": "vendors"},
+        }
+        resp2 = requests.post(f"{BASE}/chat", json=payload2, headers=HEADERS, timeout=30)
+        resp2.raise_for_status()
+        turn2 = resp2.json()
+
+        tools2 = turn2.get("tool_calls_executed", [])
+        downloads = turn2.get("downloads", [])
+
+        csv_tools = {"vendor_list", "generate_vendor_edit_csv"}
+        assert csv_tools.intersection(tools2), (
+            f"[{label}] Turn 2 should call a CSV-producing tool, got: {tools2}. "
+            f"Reply: {turn2['reply'][:300]}"
+        )
+        assert len(downloads) >= 1, (
+            f"[{label}] Turn 2 should produce a CSV download, got none. "
+            f"Reply: {turn2['reply'][:300]}"
+        )
+
+        reply_lower = turn2["reply"].lower()
+        hallucinated = "download" in reply_lower and len(downloads) == 0
+        assert not hallucinated, (
+            f"[{label}] Model mentioned a download but none was produced (hallucination)"
+        )
+
+        print(f"  PASS [{label}]: vendor_list called, CSV produced ({len(downloads)} file(s))")
+
+    def test_1_fully_explicit(self):
+        """Follow-up restates the filter and explicitly requests CSV."""
+        self._count_then_list(
+            "How many vendors are in Engineering?",
+            "Give me a CSV of the vendors in Engineering",
+            "explicit",
+        )
+
+    def test_2_clear_reference(self):
+        """Follow-up uses pronoun 'them' and requests CSV."""
+        self._count_then_list(
+            "How many vendors are in Engineering?",
+            "Can you export them to a CSV?",
+            "clear-ref",
+        )
+
+    def test_3_medium_reference(self):
+        """Follow-up asks to 'see the list' without mentioning CSV or filter."""
+        self._count_then_list(
+            "How many vendors are in Engineering?",
+            "Show me the list",
+            "medium",
+        )
+
+    def test_4_vague_reference(self):
+        """Follow-up uses a vague pronoun — 'can I get those?'"""
+        self._count_then_list(
+            "How many vendors are in Engineering?",
+            "Can I get those?",
+            "vague",
+        )
+
+    def test_5_minimal(self):
+        """Follow-up is a single word — 'gimme'."""
+        self._count_then_list(
+            "How many vendors are in Engineering?",
+            "gimme",
+            "minimal",
+        )
+
+
 if __name__ == "__main__":
     import sys
     setup_module()
@@ -665,6 +794,7 @@ if __name__ == "__main__":
         TestModeSwitch,
         TestVendorListCsv,
         TestVendorListFilters,
+        TestCountThenList,
     ]
 
     passed = 0
