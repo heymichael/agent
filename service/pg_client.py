@@ -1111,3 +1111,28 @@ def upsert_feedback(
             """,
             (chat_session_id, message_seq, user_id, signal, comment),
         )
+
+
+def insert_site_feedback(
+    user_id: str,
+    app_id: str,
+    open_panes: dict | None,
+    feedback_text: str,
+) -> None:
+    """Insert a general site feedback entry."""
+    import json as _json
+
+    pool = get_pool()
+    with pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO site_feedback (user_id, app_id, open_panes, feedback_text)
+            VALUES (%s, %s, %s::jsonb, %s)
+            """,
+            (
+                user_id,
+                app_id,
+                _json.dumps(open_panes) if open_panes else None,
+                feedback_text,
+            ),
+        )
