@@ -26,7 +26,8 @@ def get_verified_user(request: Request) -> dict:
     a synthetic token for that email. Never set this in production.
     """
     if _DEV_AUTH_EMAIL:
-        return {"email": _DEV_AUTH_EMAIL, "uid": "dev-local"}
+        email = request.headers.get("X-Test-Email", _DEV_AUTH_EMAIL)
+        return {"email": email, "uid": "dev-local"}
 
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):

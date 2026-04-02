@@ -243,17 +243,34 @@ they would be re-created on the next nightly sync. The guard is enforced in
 both the `delete_vendor` tool handler and the `DELETE /vendors/{id}` REST
 endpoint.
 
-## Caller context (spend permissions)
+## Caller context (access control)
+
+`_build_caller_context` in `service/tools.py` resolves the caller's effective
+vendor set via `resolve_effective_vendor_ids` in `pg_client.py` — combining
+`user_allowed_departments`, `user_allowed_vendors`, and `user_denied_vendors`
+from the join tables. Finance admins (`is_finance_admin`) bypass all checks.
+Filtering is always active; there is no feature flag gate.
+
+### Read path (spend queries)
 
 All MCP analytics tool handlers accept an optional `caller_context` with
 `allowed_vendor_ids` and `is_finance_admin`. Spend tools filter results to
-the caller's allowed vendor list via SQL WHERE clauses. Finance admins bypass
-filtering.
+the caller's allowed vendor list via SQL WHERE clauses.
 
-`_build_caller_context` resolves the caller's effective vendor set via
-`resolve_effective_vendor_ids` in `pg_client.py` — combining
-`user_allowed_departments`, `user_allowed_vendors`, and `user_denied_vendors`
-from the join tables. Filtering is always active; there is no feature flag gate.
+### Write path (vendor edits)
+
+Write tools (`modify_vendor`, `process_vendor_csv`) enforce the same access
+controls as analytics via `_check_write_auth` in `service/tools.py`:
+
+- `modify_vendor` — after resolving the vendor by identifier, checks the
+  vendor's ID against the caller's effective vendor set. Returns
+  `not_authorized` if the vendor is out of scope.
+- `process_vendor_csv` — after CSV validation passes, checks every vendor ID
+  in the resolved updates against the caller's allowed set. If any vendor is
+  out of scope, the entire batch is rejected (no partial processing).
+
+Adding vendors (`add_vendor`) and generating edit CSVs
+(`generate_vendor_edit_csv`) remain open to all authenticated users.
 
 ## Runtime
 
@@ -275,6 +292,14 @@ verifies the token via Firebase Admin SDK and extracts the caller's email. Reque
 without a valid token are rejected with HTTP 401.
 
 The `/health` endpoint is unauthenticated.
+
+### Dev-mode identity override
+
+When `DEV_AUTH_EMAIL` is set (local development only), token verification is
+skipped. An `X-Test-Email` request header can override the authenticated
+identity for that request, enabling e2e tests to exercise different access
+levels without restarting the server. The header is ignored in production
+(where `DEV_AUTH_EMAIL` is never set).
 
 ## API endpoints
 

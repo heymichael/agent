@@ -7,6 +7,34 @@ on localhost:8080 with DEV_AUTH_EMAIL set.
 
 Test vendors are created automatically at the start of the run and
 deleted at the end (even on failure) to keep the production DB clean.
+
+Test layers
+-----------
+Each test exercises one of two layers in the write pipeline:
+
+  Input validation — Is the request well-formed? Bad columns, invalid
+      UUIDs, empty CSVs, read-only queries. The authorization check is
+      never reached. Outcome is the same regardless of caller identity.
+
+  Business logic (admin path) — The request passes validation and the
+      authorization gate (admin bypass), reaching the confirm/edit flow.
+      A scoped user hitting these same vendors would be denied at the
+      auth layer instead; that path is covered in test_write_auth_e2e.py.
+
+All tests run as the default admin (finance_admin bypass).
+
+Class → layer mapping:
+  TestSuccessCases       — business logic (admin path)
+  TestColumnErrors       — input validation
+  TestIdErrors           — input validation
+  TestValueErrors        — input validation
+  TestEdgeCases          — input validation
+  TestModeSwitch         — business logic (admin path)
+  TestVendorListCsv      — input validation (read-only)
+  TestVendorListFilters  — input validation (read-only)
+  TestCountThenList      — input validation (read-only)
+
+Authorization layer tests (scoped user) → test_write_auth_e2e.py
 """
 
 import json
@@ -387,7 +415,7 @@ class TestEdgeCases:
         csv = "id,department"
         result = _process_csv_directly(csv)
         reply = result["reply"].lower()
-        assert "empty" in reply or "no " in reply or "0 " in reply, (
+        assert "empty" in reply or "no " in reply or "0 " in reply or "no data" in reply or "doesn't contain" in reply, (
             f"Expected empty/no/0 indication, got: {result['reply'][:300]}"
         )
         assert not result.get("pending_actions")

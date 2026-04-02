@@ -141,6 +141,42 @@ Authorization: Bearer <Firebase ID token>
 
 Unauthenticated or invalid-token requests receive HTTP 401.
 
+### Dev-mode identity override
+
+When `DEV_AUTH_EMAIL` is set (local development only), Firebase token
+verification is skipped entirely. An `X-Test-Email` header can override the
+authenticated identity for that request:
+
+```
+X-Test-Email: scoped-user@example.com
+```
+
+If the header is absent, `DEV_AUTH_EMAIL` is used as the caller. This
+mechanism enables e2e testing with different access levels without switching
+env vars or restarting the server. It has no effect in production (where
+`DEV_AUTH_EMAIL` is never set).
+
+## Testing
+
+### Test file map
+
+Three test files cover the vendor write pipeline. Each targets a different
+layer:
+
+| File | Layer | Runs as | What it tests |
+|------|-------|---------|---------------|
+| `test_csv_e2e.py` | Input validation | Admin | Bad columns, invalid UUIDs, edge cases, read-only queries |
+| `test_csv_e2e.py` | Business logic | Admin | CSV confirm flow, single-vendor edits (auth gate bypassed) |
+| `test_write_auth_e2e.py` | Authorization | Scoped user | Allowed/denied edits, mixed CSV rejection |
+| `test_write_auth.py` | Authorization | Mocked (unit) | Same auth logic, no network — fast and deterministic |
+
+**Input validation** fails requests before the auth check runs — outcome is
+the same regardless of caller identity. **Business logic** is reached only
+after auth passes (admin bypass). **Authorization** is the only layer whose
+outcome depends on who the caller is.
+
+See `.cursor/rules/e2e-testing.mdc` for infrastructure setup instructions.
+
 ## API
 
 ### `POST /chat`

@@ -27,6 +27,10 @@ data and spend.
 | add_vendor | Creating a new vendor in the database |
 | modify_vendor | Updating vendor fields (department, owner, payment method, etc.) or opening the edit form when no fields are specified |
 
+Write tools (modify_vendor, process_vendor_csv) enforce the same access controls \
+as analytics. If the response status is **not_authorized**, tell the user they \
+don't have permission to edit that vendor. Do not retry or suggest workarounds.
+
 ### Live API tool
 
 | Tool | Use when |
