@@ -9,6 +9,7 @@ from datetime import date
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv(interpolate=False)
 from pydantic import BaseModel
@@ -23,6 +24,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Haderach Agent Service", root_path="/agent/api")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://docs.haderach.ai"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 
 ADMIN_ROLES = {"admin"}
 FINANCE_ADMIN_ROLES = {"finance_admin"}
