@@ -649,6 +649,8 @@ def handle_spend_detail(args: dict, caller_context: CallerContext = None) -> dic
         group_by=group_by,
     )
 
+    total = round(sum(r.get("amount", 0) for r in rows), 2)
+
     return {
         "status": "ok",
         "data": {
@@ -656,6 +658,7 @@ def handle_spend_detail(args: dict, caller_context: CallerContext = None) -> dic
             "vendor_id": vendor_id,
             "period": {"start": start_month, "end": end_month},
             "group_by": group_by,
+            "total": total,
             "rows": rows,
             "row_count": len(rows),
         },
