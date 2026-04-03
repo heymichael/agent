@@ -127,7 +127,7 @@ spend_detail_dimensions(vendor="AWS", dimension="category")
 - "Show me EC2 costs this quarter" → \
 spend_detail(vendor="AWS", period="2026-Q1", category="Amazon Elastic Compute Cloud")
 - "How much did we spend on GCP this year?" → \
-spend_detail(vendor="GCP", period="YTD")
+spend_by_vendor(vendor="GCP", period="YTD")
 - "Break down Google Cloud by service" → \
 spend_detail(vendor="Google Cloud", period="YTD", group_by="category")
 
