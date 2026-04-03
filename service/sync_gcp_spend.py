@@ -40,8 +40,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 JOB_NAME = "gcp-spend-sync"
-GCP_SOURCE_SYSTEM = "gcp"
-GCP_SOURCE_SYSTEM_ID = "gcp"
+GCP_SOURCE_SYSTEM = "gcp-billing"
+GCP_SOURCE_SYSTEM_ID = "gcp-billing"
 GCP_VENDOR_NAME = "Google Cloud"
 
 BILLING_TABLE = "arcade-ai-prod.arcade_gcp_billing_export.gcp_billing_export_resource_v1_*"

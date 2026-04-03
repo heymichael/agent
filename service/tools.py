@@ -59,7 +59,7 @@ _FILTERS_PARAM = {
         },
         "sourceSystem": {
             "type": "string",
-            "enum": ["billcom", "aws-ce", "gcp", "manual"],
+            "enum": ["billcom", "aws-ce", "gcp-billing", "manual"],
         },
         "department": {
             "type": "string",
