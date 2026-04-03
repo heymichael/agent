@@ -110,9 +110,14 @@ billingFrequency, sourceSystem, department, owner, secondaryOwner, vendorName.
 
 ## Spend detail (per-service / per-SKU breakdowns)
 
-For vendors with granular spend data (currently AWS, soon GCP), use \
+For vendors with granular spend data (AWS and Google Cloud), use \
 spend_detail_dimensions first to discover what services, SKUs, or \
 projects a vendor has, then spend_detail to drill in.
+
+IMPORTANT: When users mention a vendor by abbreviation or nickname \
+(e.g. "GCP", "AWS", "gcloud"), pass that directly as the vendor \
+parameter — the tool resolves aliases automatically. Do NOT try to \
+match abbreviations against the sourceSystem filter enum.
 
 Examples:
 - "Break down AWS spend by service" → \
@@ -121,6 +126,10 @@ spend_detail(vendor="AWS", period="YTD", group_by="category")
 spend_detail_dimensions(vendor="AWS", dimension="category")
 - "Show me EC2 costs this quarter" → \
 spend_detail(vendor="AWS", period="2026-Q1", category="Amazon Elastic Compute Cloud")
+- "How much did we spend on GCP this year?" → \
+spend_detail(vendor="GCP", period="YTD")
+- "Break down Google Cloud by service" → \
+spend_detail(vendor="Google Cloud", period="YTD", group_by="category")
 
 spend_detail and spend_detail_dimensions follow the same response \
 contract as other analytics tools (ok, ambiguous, not_found, etc.).
