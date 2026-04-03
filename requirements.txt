@@ -8,6 +8,7 @@ python-dotenv>=1.1,<2
 python-dateutil>=2.9,<3
 firebase-admin>=6.6,<7
 boto3>=1.35,<2
+google-cloud-bigquery>=3.41,<4
 requests>=2.32,<3
 mcp>=1.0,<2
 pytest>=8.0,<9
