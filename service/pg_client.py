@@ -480,13 +480,13 @@ def query_spend_detail(
         """
     else:
         sql = f"""
-            SELECT d.category, d.subcategory, d.project, d.user_email,
-                   TO_CHAR(d.date, 'YYYY-MM') AS month,
-                   d.amount, d.metadata
+            SELECT TO_CHAR(d.date, 'YYYY-MM') AS month,
+                   SUM(d.amount) AS amount
             FROM vendor_spend_detail d
             WHERE d.vendor_id = %s AND d.date >= %s AND d.date <= %s
             {filters}
-            ORDER BY d.date, d.amount DESC
+            GROUP BY d.date
+            ORDER BY d.date
         """
 
     with pool.connection() as conn:
