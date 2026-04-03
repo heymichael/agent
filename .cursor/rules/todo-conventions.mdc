@@ -11,9 +11,13 @@ All tasks are managed centrally in the **haderach-tasks** repo at `../haderach-t
 
 Write the task file to `../haderach-tasks/` with `group: agent` and `phase: agent` in the frontmatter. Follow the taskmd format and conventions defined in `haderach-tasks/.cursor/rules/todo-conventions.mdc`.
 
-Use plain integer IDs with no leading zeros (e.g., `"7"` not `"007"`). Check existing files in `../haderach-tasks/` to determine the next available ID.
+Use plain integer IDs with no leading zeros (e.g., `"7"` not `"007"`). Check existing files in both `../haderach-tasks/` and `../haderach-tasks/bugs/` to determine the next available ID (tasks and bugs share one ID space).
 
 If the task is ambiguous about which app it belongs to (e.g., cross-cutting infra work), prompt the user to specify the `group` value (`card`, `stocks`, `home`, `vendors`, `admin`, `agent`, or `platform`).
+
+## Filing a bug from this repo
+
+Write the bug file to `../haderach-tasks/bugs/` with `group: agent` and `phase: agent`. Follow the format in `haderach-tasks/.cursor/rules/bug-conventions.mdc`. Bugs use the same ID space as tasks.
 
 ## Reading tasks
 

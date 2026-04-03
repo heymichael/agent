@@ -63,7 +63,7 @@ full connection string.
 
 Tables: `departments`, `roles`, `vendors`, `vendor_monthly_spend`,
 `vendor_spend_detail`, `sync_job_log`, `sync_job_step`, `users`, `apps`,
-`branding`
+`branding`, `chat_feedback`, `site_feedback`
 
 Join tables: `user_roles`, `user_allowed_departments`, `user_allowed_vendors`,
 `user_denied_vendors`, `app_granting_roles`
@@ -112,6 +112,16 @@ Access controls via `user_allowed_departments`, `user_allowed_vendors`,
 **apps** — app definitions with slug, label, path. Roles via
 `app_granting_roles` join table.
 
+**chat_feedback** — per-message thumbs up/down feedback. Keyed on
+`(chat_session_id, message_seq)` with `user_id` FK. Stores `rating`
+(positive/negative), optional `comment`, and `collected` boolean for
+analytics pipeline tracking. Schema: `migrations/006_chat_feedback.sql`,
+`migrations/008_feedback_collected.sql`.
+
+**site_feedback** — general site/app feedback. Stores `user_id`, `app_id`,
+`open_panes` (JSONB snapshot of UI state), and `feedback_text`.
+Schema: `migrations/007_site_feedback.sql`.
+
 ## MCP analytics layer
 
 Analytics tools are backed by the `mcp_server/` module, which provides:
@@ -147,6 +157,7 @@ protocol overhead). It can also be run as a standalone MCP server via
 | `service/sync_billcom_spend.py` | Nightly Bill.com bills → Postgres spend aggregation sync |
 | `service/sync_tracker.py` | Step-level execution tracking for sync jobs (writes to `sync_job_log` / `sync_job_step`) |
 | `service/sync_aws_spend.py` | Nightly AWS Cost Explorer → detail rows + summary rollup (with step logging) |
+| `service/sync_gcp_spend.py` | Nightly GCP BigQuery billing export → detail rows + summary rollup (with step logging) |
 | `mcp_server/tools.py` | Intent-aligned analytics tool handlers — SQL queries for all aggregation |
 | `mcp_server/resolver.py` | Filter validation (`resolve_filter`, `validate_filters`), field-to-SQL column mapping |
 | `mcp_server/period_parser.py` | Deterministic period string parser |
@@ -182,8 +193,11 @@ protocol overhead). It can also be run as a standalone MCP server via
 | Tool | Params | Effect |
 |---|---|---|
 | `add_vendor` | name (+ optional fields) | Creates a new vendor row |
-| `delete_vendor` | identifier | Returns confirmation prompt. Blocked for synced vendors |
-| `modify_vendor` | identifier | Opens edit modal in UI |
+| `modify_vendor` | identifier, field, value | Opens edit modal in UI. Access-controlled per caller's vendor set |
+| `process_vendor_csv` | (CSV attachment) | Validates uploaded CSV, resolves FK/enum values, returns `confirm_csv_batch` pending action |
+| `generate_vendor_edit_csv` | vendor_names | Generates a downloadable CSV pre-populated with the named vendors for bulk editing |
+
+`delete_vendor` is disabled from agent tool definitions — deletion must go through a system admin. The handler and REST endpoint still exist but are not exposed to the LLM.
 
 ### Live API tool
 
@@ -228,7 +242,7 @@ storage required.
 - `accountType`: Business, Individual
 - `track1099`: true, false
 - `billingFrequency`: monthly, annual, usage-based
-- `sourceSystem`: billcom, aws-ce, gcp, manual
+- `sourceSystem`: billcom, aws-ce, gcp-billing, manual
 
 **Resolve (validated against Postgres data at query time):**
 - `vendor` — full resolution pipeline
@@ -282,6 +296,7 @@ Adding vendors (`add_vendor`) and generating edit CSVs
   - `DATABASE_URL` (auto-managed by Terraform)
   - `VENDOR_BILL_CREDENTIALS` (Bill.com v3 API: userName, password, orgId, devKey)
   - `VENDOR_AWS_BILLING_CREDENTIALS` (AWS CE: access_key_id, secret_access_key, region)
+  - `VENDOR_GCP_BILLING_CREDENTIALS` (GCP BigQuery: service account JSON key with BigQuery read access)
 - **Model**: configurable via `OPENAI_MODEL` env var (default: `gpt-4o-mini`)
 
 ## Authentication
@@ -312,6 +327,8 @@ levels without restarting the server. The header is ignored in production
 | `GET` | `/vendors` | Required | List all vendors with full field set |
 | `DELETE` | `/vendors/{vendor_id}` | Required | Delete a vendor (blocked for synced vendors) |
 | `PATCH` | `/vendors/{vendor_id}` | Required | Partial update a vendor |
+| `POST` | `/feedback` | Required | Submit thumbs up/down on a chat message |
+| `POST` | `/feedback/site` | Required | Submit general site/app feedback |
 | `GET` | `/apps` | Required | List all app definitions |
 | `PATCH` | `/apps/{app_id}` | `admin` | Update app label, granting roles, or sort order |
 | `GET` | `/users?role=...` | Required | List users (optional role filter) |

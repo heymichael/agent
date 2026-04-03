@@ -87,6 +87,9 @@ python -m service.sync_billcom_spend
 
 # AWS Cost Explorer (~10s) — detail rows (by Service + UsageType) + summary rollup
 python -m service.sync_aws_spend
+
+# GCP BigQuery billing export — detail rows (by Service + SKU) + summary rollup
+python -m service.sync_gcp_spend
 ```
 
 All scripts are idempotent — each run upserts rows via `ON CONFLICT DO UPDATE`.
@@ -118,7 +121,16 @@ vendor-native (no semantic normalization).
 | Vendor | `category` | `subcategory` | `project` | `metadata` |
 |--------|-----------|--------------|----------|-----------|
 | AWS | Service | UsageType | — | — |
-| GCP (planned) | service.description | sku.description | project.id | `{"sku_id": ..., "region": ...}` |
+| GCP | service.description | sku.description | project.id | `{"sku_id": ..., "region": ...}` |
+
+## Feedback
+
+Two feedback channels are stored in Postgres:
+
+- **Chat feedback** (`POST /feedback`) — per-message thumbs up/down with optional comment. Keyed on `(chat_session_id, message_seq)`.
+- **Site feedback** (`POST /feedback/site`) — general app feedback with a JSONB snapshot of the user's open panes for context.
+
+Both require authentication. Schema: `migrations/006_chat_feedback.sql`, `migrations/007_site_feedback.sql`, `migrations/008_feedback_collected.sql`.
 
 ## Hidden vendors
 
@@ -197,9 +209,23 @@ Response:
 {
   "reply": "You have 150 1099 vendors.",
   "tool_calls_executed": ["vendor_count"],
-  "downloads": []
+  "pending_actions": [],
+  "disambiguation": null,
+  "downloads": [],
+  "session_id": "uuid",
+  "tool_messages": []
 }
 ```
+
+| Field | Type | Purpose |
+|---|---|---|
+| `reply` | string | Agent's natural-language response |
+| `tool_calls_executed` | string[] | Names of tools called this turn |
+| `pending_actions` | PendingAction[] | `confirm_edit` or `confirm_csv_batch` actions for the frontend to present |
+| `disambiguation` | object \| null | Ambiguous vendor match with candidates for inline selection |
+| `downloads` | Download[] | CSV files to offer as downloads (`filename`, `content`, `mime`) |
+| `session_id` | string | Chat session ID for multi-turn continuity and feedback |
+| `tool_messages` | dict[] | Raw tool call/result messages from this turn, replayed by the frontend on the next request for multi-turn context |
 
 When tools generate downloadable content (e.g., `vendor_list` with 10+
 results), the `downloads` array contains objects with `filename`, `content`
