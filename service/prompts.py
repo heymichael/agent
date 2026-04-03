@@ -74,7 +74,7 @@ marketing", "vendors owned by Michael". Supported fields and values:
 - accountType: Business, Individual
 - track1099: true, false
 - billingFrequency: monthly, annual, usage-based
-- sourceSystem: billcom, aws-ce, gcp, manual
+- sourceSystem: billcom, aws-ce, gcp-billing, manual
 - department: (person's name — fuzzy matched, e.g. "Marketing")
 - owner: (person's name — fuzzy matched, e.g. "Michael Mader")
 - secondaryOwner: (person's name — fuzzy matched)
