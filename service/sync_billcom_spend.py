@@ -85,12 +85,13 @@ def _aggregate_bills(bills: list[dict]) -> dict[tuple[str, str], dict]:
     skipped = 0
     for bill in bills:
         vendor_id = bill.get("vendorId")
-        due_date = bill.get("dueDate")
-        if not vendor_id or not due_date:
+        invoice = bill.get("invoice") or {}
+        invoice_date = invoice.get("invoiceDate")
+        if not vendor_id or not invoice_date:
             skipped += 1
             continue
 
-        month = due_date[:7]  # "YYYY-MM"
+        month = invoice_date[:7]  # "YYYY-MM"
         amount = float(bill.get("amount", 0) or 0)
 
         key = (vendor_id, month)
@@ -98,7 +99,7 @@ def _aggregate_bills(bills: list[dict]) -> dict[tuple[str, str], dict]:
         buckets[key]["billCount"] += 1
 
     if skipped:
-        logger.warning("Skipped %d bills missing vendorId or dueDate", skipped)
+        logger.warning("Skipped %d bills missing vendorId or invoiceDate", skipped)
 
     return dict(buckets)
 
