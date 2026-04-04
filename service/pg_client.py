@@ -442,12 +442,16 @@ def query_spend_detail(
     subcategory: str | None = None,
     project: str | None = None,
     group_by: str | None = None,
+    secondary_group_by: str | None = None,
 ) -> list[dict]:
     """Query vendor_spend_detail with optional filters and grouping.
 
     When group_by is set (one of 'category', 'subcategory', 'project'),
-    returns rows grouped and summed by that dimension.  Otherwise returns
-    individual detail rows.
+    returns rows grouped and summed by that dimension with a month column.
+
+    When secondary_group_by is also set, returns a 2D cross-tab: rows have
+    both dimension_value (group_by) and secondary_value (secondary_group_by)
+    with amounts summed across the entire period (no month column).
     """
     pool = get_pool()
     start_date = _month_to_date(start_month)
@@ -468,7 +472,20 @@ def query_spend_detail(
 
     valid_group_by = {"category", "subcategory", "project"}
 
-    if group_by and group_by in valid_group_by:
+    if (group_by and group_by in valid_group_by
+            and secondary_group_by and secondary_group_by in valid_group_by
+            and group_by != secondary_group_by):
+        sql = f"""
+            SELECT d.{group_by} AS dimension_value,
+                   d.{secondary_group_by} AS secondary_value,
+                   SUM(d.amount) AS amount
+            FROM vendor_spend_detail d
+            WHERE d.vendor_id = %s AND d.date >= %s AND d.date <= %s
+            {filters}
+            GROUP BY d.{group_by}, d.{secondary_group_by}
+            ORDER BY amount DESC
+        """
+    elif group_by and group_by in valid_group_by:
         sql = f"""
             SELECT d.{group_by} AS dimension_value,
                    TO_CHAR(d.date, 'YYYY-MM') AS month,

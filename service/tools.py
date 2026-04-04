@@ -242,6 +242,11 @@ TOOL_DEFINITIONS = [
                     },
                     "period": _PERIOD_PARAM,
                     "filters": _FILTERS_PARAM,
+                    "metric": {
+                        "type": "string",
+                        "enum": ["spend", "vendorCount", "billCount"],
+                        "description": "Which metric to return. Defaults to spend.",
+                    },
                 },
             },
         },
@@ -268,6 +273,11 @@ TOOL_DEFINITIONS = [
                     },
                     "period": _PERIOD_PARAM,
                     "filters": _FILTERS_PARAM,
+                    "metric": {
+                        "type": "string",
+                        "enum": ["spend", "vendorCount", "billCount"],
+                        "description": "Which metric to return. Defaults to spend.",
+                    },
                 },
                 "required": ["dimension"],
             },
@@ -287,6 +297,11 @@ TOOL_DEFINITIONS = [
                     },
                     "period": _PERIOD_PARAM,
                     "filters": _FILTERS_PARAM,
+                    "metric": {
+                        "type": "string",
+                        "enum": ["spend", "vendorCount", "billCount"],
+                        "description": "Which metric to return. Defaults to spend.",
+                    },
                 },
             },
         },
@@ -312,7 +327,12 @@ TOOL_DEFINITIONS = [
                     "group_by": {
                         "type": "string",
                         "enum": ["category", "subcategory", "project"],
-                        "description": "Group and sum results by this dimension.",
+                        "description": "Primary dimension for rows. Results are grouped by this dimension with months as columns.",
+                    },
+                    "secondary_group_by": {
+                        "type": "string",
+                        "enum": ["category", "subcategory", "project"],
+                        "description": "Secondary dimension for columns. When set, produces a cross-tab: group_by values as rows, secondary_group_by values as columns, amounts summed across the period. Must differ from group_by.",
                     },
                     "category": {
                         "type": "string",
@@ -442,30 +462,6 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["identifier"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "execute_python",
-            "description": (
-                "Execute Python code to query external vendor APIs for TRANSACTIONAL data: "
-                "Bill.com bills/spend/PII or AWS Cost Explorer cloud costs. "
-                "Use vendor_lookup first to get the sourceSystemId and sourceSystem, then use it here. "
-                "Pre-installed libraries: boto3, requests, json, os, datetime, math, re, collections, decimal. "
-                "Vendor credentials are available as environment variables (never print them). "
-                "Print the result as JSON to stdout."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "Python code to execute. Must print results as JSON to stdout.",
-                    },
-                },
-                "required": ["code"],
             },
         },
     },
@@ -1289,7 +1285,6 @@ TOOL_HANDLERS = {
     "spend_detail_dimensions": execute_spend_detail_dimensions,
     "add_vendor": execute_add_vendor,
     "modify_vendor": execute_modify_vendor,
-    "execute_python": execute_execute_python,
     "generate_vendor_edit_csv": execute_generate_vendor_edit_csv,
     "process_vendor_csv": execute_process_vendor_csv,
 }

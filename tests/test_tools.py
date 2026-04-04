@@ -20,6 +20,7 @@ from mcp_server.tools import (
     handle_spend_by_vendor,
     handle_spend_by_dimension,
     handle_top_vendors,
+    handle_spend_detail,
 )
 
 
@@ -625,3 +626,313 @@ class TestNullSentinelFilters:
             result = handle_vendor_list({"filters": {"owner": "*"}})
         assert result["status"] == "ok"
         assert result["data"]["total"] == 3
+
+
+# ── Table payload on tabular handlers ────────────────────────────────────
+
+def _assert_table_shape(table: dict, expected_columns: list[str] | None = None):
+    """Verify a table payload has the required fields and valid types."""
+    assert "metric" in table and isinstance(table["metric"], str)
+    assert "columns" in table and isinstance(table["columns"], list)
+    assert "rows" in table and isinstance(table["rows"], list)
+    assert "filename" in table and isinstance(table["filename"], str)
+    assert table["filename"].endswith(".csv")
+    if expected_columns:
+        assert table["columns"] == expected_columns
+
+
+class TestTablePayloadPresence:
+    """Verify that tabular handlers include a well-formed table field."""
+
+    def test_spend_by_vendor_single_has_table(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_by_vendor({"vendor": "Acme Corp"})
+        assert "table" in result
+        _assert_table_shape(result["table"], ["Month", "Spend"])
+        assert len(result["table"]["rows"]) == len(result["data"]["months"])
+
+    def test_spend_by_vendor_all_has_table(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_by_vendor({})
+        assert "table" in result
+        _assert_table_shape(result["table"], ["Vendor", "Spend"])
+        assert len(result["table"]["rows"]) == result["data"]["totalVendors"]
+
+    def test_spend_by_dimension_has_table(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_by_dimension({"dimension": "paymentMethod"})
+        assert "table" in result
+        _assert_table_shape(result["table"], ["Payment Method", "Spend"])
+        assert len(result["table"]["rows"]) == len(result["data"]["groups"])
+
+    def test_top_vendors_has_table(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_top_vendors({})
+        assert "table" in result
+        _assert_table_shape(result["table"], ["Vendor", "Spend"])
+        assert len(result["table"]["rows"]) == len(result["data"]["vendors"])
+
+    def test_vendor_count_grouped_has_table(self):
+        pool = _build_mock_pool({
+            "COALESCE(": [
+                {"grp": "Engineering", "cnt": 2},
+                {"grp": "Marketing", "cnt": 1},
+            ],
+        })
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_vendor_count({"group_by": "department"})
+        assert "table" in result
+        _assert_table_shape(result["table"])
+        assert result["table"]["metric"] == "Vendor Count"
+        assert len(result["table"]["rows"]) == 2
+
+    def test_vendor_count_ungrouped_has_no_table(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_vendor_count({})
+        assert "table" not in result
+
+    def test_spend_total_has_no_table(self):
+        """spend_total returns a single number — no table payload."""
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_total({})
+        assert "table" not in result
+
+    def test_vendor_list_has_no_table(self):
+        """vendor_list uses CSV downloads, not table payloads."""
+        rows = [_make_vendor_row(i) for i in range(3)]
+        pool = _build_mock_pool({"COUNT(*)": {"cnt": 3}, "LIMIT": rows})
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_vendor_list({})
+        assert "table" not in result
+
+    def test_error_responses_have_no_table(self):
+        """Invalid inputs should not produce a table field."""
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_by_dimension({})
+        assert result["status"] == "invalid_filter"
+        assert "table" not in result
+
+
+# ── Metric parameter ────────────────────────────────────────────────────
+
+class TestMetricParameter:
+    """Verify the metric parameter selects the correct data field."""
+
+    def test_spend_by_vendor_single_metric_billcount(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_by_vendor({"vendor": "Acme Corp", "metric": "billCount"})
+        table = result["table"]
+        assert table["metric"] == "Bill Count"
+        assert table["columns"] == ["Month", "Bill Count"]
+        for row in table["rows"]:
+            assert isinstance(row[1], int)
+
+    def test_spend_by_vendor_all_metric_billcount(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_by_vendor({"metric": "billCount"})
+        table = result["table"]
+        assert table["metric"] == "Bill Count"
+        assert table["columns"] == ["Vendor", "Bill Count"]
+
+    def test_spend_by_dimension_metric_vendor_count(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_by_dimension({"dimension": "paymentMethod", "metric": "vendorCount"})
+        table = result["table"]
+        assert table["metric"] == "Vendor Count"
+        assert table["columns"] == ["Payment Method", "Vendor Count"]
+
+    def test_top_vendors_metric_billcount(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_top_vendors({"metric": "billCount"})
+        table = result["table"]
+        assert table["metric"] == "Bill Count"
+
+    def test_default_metric_is_spend(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_top_vendors({})
+        assert result["table"]["metric"] == "Spend"
+
+    def test_unknown_metric_falls_back_to_spend(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_top_vendors({"metric": "unknown"})
+        assert result["table"]["metric"] == "Spend"
+
+
+# ── execute_python removed from tool schemas ─────────────────────────────
+
+class TestExecutePythonRemoved:
+    """Verify execute_python is no longer exposed to the LLM."""
+
+    def test_not_in_tool_definitions(self):
+        from service.tools import TOOL_DEFINITIONS
+        names = [t["function"]["name"] for t in TOOL_DEFINITIONS]
+        assert "execute_python" not in names
+
+    def test_not_in_tool_handlers(self):
+        from service.tools import TOOL_HANDLERS
+        assert "execute_python" not in TOOL_HANDLERS
+
+
+# ── spend_detail pivot table ─────────────────────────────────────────────
+
+class TestSpendDetailPivotTable:
+    """Verify spend_detail produces a pivoted table when group_by is set."""
+
+    def _make_detail_pool(self, detail_rows):
+        """Build a pool with vendor resolution + spend_detail rows."""
+        return _build_mock_pool({
+            "WHERE id::text": {"id": "v_acme", "name": "Acme Corp"},
+            "LOWER(v.name) = LOWER": _FULL_VENDOR_ACME,
+            "WHERE v.id": _FULL_VENDOR_ACME,
+            "FROM vendors ORDER BY": [
+                {"id": "v_acme", "name": "Acme Corp", "aliases": ["Acme"]},
+            ],
+            "similarity": [],
+            "vendor_spend_detail": detail_rows,
+        })
+
+    def test_grouped_pivot_categories_as_rows_months_as_columns(self):
+        detail_rows = [
+            {"dimension_value": "BigQuery", "month": "2026-01", "amount": Decimal("5000.00")},
+            {"dimension_value": "BigQuery", "month": "2026-02", "amount": Decimal("4600.00")},
+            {"dimension_value": "Compute Engine", "month": "2026-01", "amount": Decimal("1200.00")},
+            {"dimension_value": "Compute Engine", "month": "2026-02", "amount": Decimal("1400.00")},
+        ]
+        pool = self._make_detail_pool(detail_rows)
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_spend_detail({"vendor": "Acme Corp", "group_by": "category", "period": "2026"})
+
+        assert result["status"] == "ok"
+        table = result["table"]
+        _assert_table_shape(table)
+        assert table["columns"] == ["Category", "2026-01", "2026-02"]
+        assert len(table["rows"]) == 2
+        bq_row = next(r for r in table["rows"] if r[0] == "BigQuery")
+        assert bq_row == ["BigQuery", 5000.0, 4600.0]
+
+    def test_grouped_single_month_uses_amount_column(self):
+        detail_rows = [
+            {"dimension_value": "BigQuery", "month": "2026-01", "amount": Decimal("5000.00")},
+            {"dimension_value": "Compute Engine", "month": "2026-01", "amount": Decimal("1200.00")},
+        ]
+        pool = self._make_detail_pool(detail_rows)
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_spend_detail({"vendor": "Acme Corp", "group_by": "category", "period": "2026-01"})
+
+        table = result["table"]
+        assert table["columns"] == ["Category", "Amount"]
+        assert len(table["rows"]) == 2
+
+    def test_grouped_sorts_by_total_descending(self):
+        detail_rows = [
+            {"dimension_value": "Small", "month": "2026-01", "amount": Decimal("100.00")},
+            {"dimension_value": "Large", "month": "2026-01", "amount": Decimal("9000.00")},
+            {"dimension_value": "Medium", "month": "2026-01", "amount": Decimal("3000.00")},
+        ]
+        pool = self._make_detail_pool(detail_rows)
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_spend_detail({"vendor": "Acme Corp", "group_by": "category", "period": "2026"})
+
+        labels = [r[0] for r in result["table"]["rows"]]
+        assert labels == ["Large", "Medium", "Small"]
+
+    def test_ungrouped_uses_month_amount_columns(self):
+        detail_rows = [
+            {"month": "2026-01", "amount": Decimal("5000.00")},
+            {"month": "2026-02", "amount": Decimal("4600.00")},
+        ]
+        pool = self._make_detail_pool(detail_rows)
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_spend_detail({"vendor": "Acme Corp", "period": "2026"})
+
+        table = result["table"]
+        assert table["columns"] == ["Month", "Amount"]
+        assert len(table["rows"]) == 2
+        assert table["rows"][0] == ["2026-01", 5000.0]
+
+    def test_2d_crosstab_category_by_project(self):
+        detail_rows = [
+            {"dimension_value": "BigQuery", "secondary_value": "arcade-ai-prod", "amount": Decimal("9000.00")},
+            {"dimension_value": "BigQuery", "secondary_value": "arcade-ai-staging", "amount": Decimal("500.00")},
+            {"dimension_value": "Compute Engine", "secondary_value": "arcade-ai-prod", "amount": Decimal("2000.00")},
+            {"dimension_value": "Compute Engine", "secondary_value": "arcade-ai-staging", "amount": Decimal("300.00")},
+        ]
+        pool = self._make_detail_pool(detail_rows)
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_spend_detail({
+                "vendor": "Acme Corp",
+                "group_by": "category",
+                "secondary_group_by": "project",
+                "period": "2026",
+            })
+
+        assert result["status"] == "ok"
+        table = result["table"]
+        _assert_table_shape(table)
+        assert table["columns"][0] == "Category"
+        assert "arcade-ai-prod" in table["columns"]
+        assert "arcade-ai-staging" in table["columns"]
+        assert len(table["rows"]) == 2
+        bq_row = next(r for r in table["rows"] if r[0] == "BigQuery")
+        prod_idx = table["columns"].index("arcade-ai-prod")
+        staging_idx = table["columns"].index("arcade-ai-staging")
+        assert bq_row[prod_idx] == 9000.0
+        assert bq_row[staging_idx] == 500.0
+
+    def test_2d_crosstab_sorts_by_total(self):
+        detail_rows = [
+            {"dimension_value": "Small", "secondary_value": "p1", "amount": Decimal("100.00")},
+            {"dimension_value": "Large", "secondary_value": "p1", "amount": Decimal("9000.00")},
+        ]
+        pool = self._make_detail_pool(detail_rows)
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_spend_detail({
+                "vendor": "Acme Corp",
+                "group_by": "category",
+                "secondary_group_by": "project",
+                "period": "2026",
+            })
+
+        labels = [r[0] for r in result["table"]["rows"]]
+        assert labels == ["Large", "Small"]
+
+    def test_2d_crosstab_fills_missing_cells_with_zero(self):
+        detail_rows = [
+            {"dimension_value": "BigQuery", "secondary_value": "prod", "amount": Decimal("5000.00")},
+            {"dimension_value": "Compute Engine", "secondary_value": "staging", "amount": Decimal("300.00")},
+        ]
+        pool = self._make_detail_pool(detail_rows)
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_spend_detail({
+                "vendor": "Acme Corp",
+                "group_by": "category",
+                "secondary_group_by": "project",
+                "period": "2026",
+            })
+
+        table = result["table"]
+        bq_row = next(r for r in table["rows"] if r[0] == "BigQuery")
+        staging_idx = table["columns"].index("staging")
+        assert bq_row[staging_idx] == 0

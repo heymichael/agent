@@ -165,12 +165,21 @@ class Download(BaseModel):
     mime: str = "text/csv"
 
 
+class TablePayload(BaseModel):
+    metric: str
+    columns: list[str]
+    rows: list[list]
+    filename: str
+    filters: dict[str, str] = {}
+
+
 class ChatResponse(BaseModel):
     reply: str
     tool_calls_executed: list[str]
     pending_actions: list[PendingAction] = []
     disambiguation: Disambiguation | None = None
     downloads: list[Download] = []
+    tables: list[TablePayload] = []
     session_id: str | None = None
     tool_messages: list[dict] = []
 
@@ -529,6 +538,7 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
     pending_actions: list[PendingAction] = []
     disambiguation: Disambiguation | None = None
     downloads: list[Download] = []
+    tables: list[TablePayload] = []
     tool_messages_this_turn: list[dict] = []
     max_rounds = 10
 
@@ -579,6 +589,11 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
                     downloads = [d for d in downloads if d.filename != csv_filename]
                     downloads.append(Download(filename=csv_filename, content=csv_content))
 
+                table_payload = parsed.pop("table", None)
+                if table_payload:
+                    tables.append(TablePayload(**table_payload))
+                    parsed["_table_rendered"] = True
+
                 tool_result_msg = {
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -627,7 +642,7 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
                 pg_client.upsert_chat_session(session_id, caller_user_id, app_context, all_msgs)
             except Exception:
                 logger.exception("Failed to persist chat session %s", session_id)
-        return ChatResponse(reply=reply, tool_calls_executed=tool_calls_executed, pending_actions=pending_actions, disambiguation=disambiguation, downloads=downloads, session_id=session_id, tool_messages=tool_messages_this_turn)
+        return ChatResponse(reply=reply, tool_calls_executed=tool_calls_executed, pending_actions=pending_actions, disambiguation=disambiguation, downloads=downloads, tables=tables, session_id=session_id, tool_messages=tool_messages_this_turn)
 
     fallback_reply = "I hit the maximum number of tool-call rounds. Please try again."
     all_msgs = []
@@ -651,6 +666,7 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
         pending_actions=pending_actions,
         disambiguation=disambiguation,
         downloads=downloads,
+        tables=tables,
         session_id=session_id,
         tool_messages=tool_messages_this_turn,
     )

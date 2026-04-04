@@ -206,6 +206,171 @@ def _build_vendor_where(
     return " WHERE " + " AND ".join(clauses), params
 
 
+METRIC_MAP = {
+    "spend": ("totalAmount", "Spend"),
+    "vendorCount": ("vendorCount", "Vendor Count"),
+    "billCount": ("billCount", "Bill Count"),
+}
+
+
+def _build_table(
+    columns: list[str],
+    rows: list[list],
+    metric_label: str,
+    filename: str,
+    filters: dict[str, str] | None = None,
+) -> dict:
+    table = {"metric": metric_label, "columns": columns, "rows": rows, "filename": filename}
+    if filters:
+        table["filters"] = filters
+    return table
+
+
+def _slugify_period(start: str | None, end: str | None) -> str:
+    if start and end:
+        return f"{start}-to-{end}"
+    if start:
+        return f"from-{start}"
+    return "all-time"
+
+
+_FILTER_LABELS = {
+    "paymentMethod": "Payment Method",
+    "accountType": "Account Type",
+    "track1099": "1099 Tracked",
+    "billingFrequency": "Billing Frequency",
+    "sourceSystem": "Source System",
+    "department": "Department",
+    "owner": "Owner",
+    "secondaryOwner": "Secondary Owner",
+}
+
+
+def _active_filters(
+    *,
+    vendor_name: str | None = None,
+    period: str | None = None,
+    start_month: str | None = None,
+    end_month: str | None = None,
+    filters: dict | None = None,
+    category: str | None = None,
+    project: str | None = None,
+) -> dict[str, str]:
+    """Build a human-readable dict of active filters for the table payload."""
+    result: dict[str, str] = {}
+    if vendor_name:
+        result["Vendor"] = vendor_name
+    if period:
+        result["Period"] = period
+    elif start_month and end_month:
+        result["Period"] = f"{start_month} – {end_month}"
+    elif start_month:
+        result["Period"] = f"from {start_month}"
+    if category:
+        result["Category"] = category
+    if project:
+        result["Project"] = project
+    if filters:
+        for key, val in filters.items():
+            label = _FILTER_LABELS.get(key, key)
+            result[label] = str(val)
+    return result
+
+
+_DIM_LABELS = {
+    "category": "Category",
+    "subcategory": "Subcategory",
+    "project": "Project",
+    "item": "Item",
+}
+
+
+def _dim_label(dim: str) -> str:
+    return _DIM_LABELS.get(dim, dim.title())
+
+
+def _crosstab_detail_table(
+    rows: list[dict],
+    row_label: str,
+    col_label: str,
+    safe_name: str,
+    group_by: str,
+    secondary_group_by: str,
+    period_slug: str,
+    filters: dict[str, str] | None = None,
+) -> dict:
+    """Build a 2D cross-tab: group_by values as rows, secondary_group_by
+    values as columns, amounts summed across the period."""
+    col_totals: dict[str, float] = {}
+    row_totals: dict[str, float] = {}
+    grid: dict[str, dict[str, float]] = {}
+
+    for r in rows:
+        row_key = r.get("dimension_value", "")
+        col_key = r.get("secondary_value", "")
+        amount = round(r.get("amount", 0), 2)
+        grid.setdefault(row_key, {})[col_key] = amount
+        row_totals[row_key] = row_totals.get(row_key, 0) + amount
+        col_totals[col_key] = col_totals.get(col_key, 0) + amount
+
+    sorted_rows = sorted(row_totals, key=lambda k: row_totals[k], reverse=True)
+    sorted_cols = sorted(col_totals, key=lambda k: col_totals[k], reverse=True)
+
+    columns = [row_label] + sorted_cols
+    table_rows = [
+        [rk] + [grid.get(rk, {}).get(ck, 0) for ck in sorted_cols]
+        for rk in sorted_rows
+    ]
+
+    return _build_table(
+        columns, table_rows, "Spend",
+        f"{safe_name}-{group_by}-by-{secondary_group_by}-{period_slug}.csv",
+        filters=filters,
+    )
+
+
+def _pivot_detail_table(
+    rows: list[dict],
+    group_by_label: str,
+    safe_name: str,
+    group_by: str,
+    period_slug: str,
+    filters: dict[str, str] | None = None,
+) -> dict:
+    """Pivot spend_detail rows (dimension_value × month) into a table
+    with dimensions as rows and months as columns."""
+    from collections import OrderedDict
+
+    months: list[str] = sorted({r["month"] for r in rows if "month" in r})
+    dim_totals: dict[str, float] = {}
+    grid: dict[str, dict[str, float]] = {}
+
+    for r in rows:
+        dim = r.get("dimension_value", "")
+        month = r.get("month", "")
+        amount = r.get("amount", 0)
+        grid.setdefault(dim, {})[month] = round(amount, 2)
+        dim_totals[dim] = dim_totals.get(dim, 0) + amount
+
+    sorted_dims = sorted(dim_totals, key=lambda d: dim_totals[d], reverse=True)
+
+    if len(months) == 1:
+        columns = [group_by_label, "Amount"]
+        table_rows = [[dim, grid[dim].get(months[0], 0)] for dim in sorted_dims]
+    else:
+        columns = [group_by_label] + months
+        table_rows = [
+            [dim] + [grid[dim].get(m, 0) for m in months]
+            for dim in sorted_dims
+        ]
+
+    return _build_table(
+        columns, table_rows, "Spend",
+        f"{safe_name}-detail-by-{group_by}-{period_slug}.csv",
+        filters=filters,
+    )
+
+
 # ── Tool handlers ────────────────────────────────────────────────────────
 
 def handle_vendor_lookup(args: dict, caller_context: CallerContext = None) -> dict:
@@ -258,7 +423,20 @@ def handle_vendor_count(args: dict, caller_context: CallerContext = None) -> dic
 
         counts = {r["grp"]: r["cnt"] for r in rows}
         total = sum(counts.values())
-        return {"status": "ok", "data": {"counts": counts, "total": total}}
+        group_label = group_by.replace("paymentMethod", "Payment Method").replace(
+            "accountType", "Account Type"
+        ).replace("billingFrequency", "Billing Frequency").replace(
+            "sourceSystem", "Source System"
+        ).replace("track1099", "1099 Tracked").replace("department", "Department").replace(
+            "owner", "Owner"
+        )
+        table_rows = [[grp, cnt] for grp, cnt in counts.items()]
+        af = _active_filters(filters=filters) if filters else {}
+        table = _build_table(
+            [group_label, "Count"], table_rows, "Vendor Count",
+            f"vendor-count-by-{group_by}.csv", filters=af,
+        )
+        return {"status": "ok", "data": {"counts": counts, "total": total}, "table": table}
 
     with pool.connection() as conn:
         row = conn.execute(
@@ -457,6 +635,9 @@ def handle_spend_by_vendor(args: dict, caller_context: CallerContext = None) -> 
     )
     pool = get_pool()
 
+    metric_key = args.get("metric", "spend")
+    data_field, metric_label = METRIC_MAP.get(metric_key, METRIC_MAP["spend"])
+
     if vendor_id:
         with pool.connection() as conn:
             rows = conn.execute(
@@ -471,6 +652,15 @@ def handle_spend_by_vendor(args: dict, caller_context: CallerContext = None) -> 
             for r in rows
         ]
         total = round(sum(m["totalAmount"] for m in months), 2)
+        period_slug = _slugify_period(start_month, end_month)
+        safe_name = (vendor_name or "vendor").lower().replace(" ", "-")
+        table_rows = [[m["month"], m[data_field]] for m in months]
+        af = _active_filters(vendor_name=vendor_name, period=period,
+                             start_month=start_month, end_month=end_month, filters=filters or None)
+        table = _build_table(
+            ["Month", metric_label], table_rows, metric_label,
+            f"{safe_name}-{metric_key}-by-month-{period_slug}.csv", filters=af,
+        )
         return {
             "status": "ok",
             "vendor_id": vendor_id,
@@ -480,18 +670,21 @@ def handle_spend_by_vendor(args: dict, caller_context: CallerContext = None) -> 
                 "totalAmount": total,
                 "period": {"start": start_month, "end": end_month},
             },
+            "table": table,
         }
 
     # All vendors — ranked by total
     with pool.connection() as conn:
         rows = conn.execute(
             f"SELECT v.id::text AS vendor_id, v.name AS vendor_name,"
-            f" SUM(s.total_amount) AS total, SUM(s.bill_count) AS bills"
+            f" SUM(s.total_amount) AS total, SUM(s.bill_count) AS bills,"
+            f" COUNT(DISTINCT s.vendor_id) AS vendors"
             f" {_SPEND_BASE_JOIN} {where_sql}"
             f" GROUP BY v.id, v.name ORDER BY total DESC LIMIT 50",
             params,
         ).fetchall()
 
+    metric_map_all = {"totalAmount": "total", "billCount": "bills"}
     results = [
         {"vendor_id": r["vendor_id"], "vendor_name": r["vendor_name"],
          "totalAmount": round(float(r["total"]), 2), "billCount": int(r["bills"])}
@@ -499,6 +692,13 @@ def handle_spend_by_vendor(args: dict, caller_context: CallerContext = None) -> 
     ]
     grand_total = round(sum(v["totalAmount"] for v in results), 2)
 
+    period_slug = _slugify_period(start_month, end_month)
+    table_rows = [[r["vendor_name"], r[data_field]] for r in results]
+    af = _active_filters(period=period, start_month=start_month, end_month=end_month, filters=filters or None)
+    table = _build_table(
+        ["Vendor", metric_label], table_rows, metric_label,
+        f"all-vendors-{metric_key}-{period_slug}.csv", filters=af,
+    )
     return {
         "status": "ok",
         "data": {
@@ -507,6 +707,7 @@ def handle_spend_by_vendor(args: dict, caller_context: CallerContext = None) -> 
             "grandTotal": grand_total,
             "period": {"start": start_month, "end": end_month},
         },
+        "table": table,
     }
 
 
@@ -532,6 +733,9 @@ def handle_spend_by_dimension(args: dict, caller_context: CallerContext = None) 
     if filter_err:
         return filter_err
 
+    metric_key = args.get("metric", "spend")
+    data_field, metric_label = METRIC_MAP.get(metric_key, METRIC_MAP["spend"])
+
     where_sql, params = _build_where(filters, start_month, end_month, caller_context=caller_context)
     pool = get_pool()
 
@@ -545,6 +749,7 @@ def handle_spend_by_dimension(args: dict, caller_context: CallerContext = None) 
             params,
         ).fetchall()
 
+    metric_row_map = {"totalAmount": "total", "billCount": "bills", "vendorCount": "vendors"}
     groups = {
         r["grp"]: {
             "totalAmount": round(float(r["total"]), 2),
@@ -555,6 +760,20 @@ def handle_spend_by_dimension(args: dict, caller_context: CallerContext = None) 
     }
     grand_total = round(sum(g["totalAmount"] for g in groups.values()), 2)
 
+    dim_label = dimension.replace("paymentMethod", "Payment Method").replace(
+        "accountType", "Account Type"
+    ).replace("billingFrequency", "Billing Frequency").replace(
+        "sourceSystem", "Source System"
+    ).replace("track1099", "1099 Tracked").replace("department", "Department").replace(
+        "owner", "Owner").replace("vendorName", "Vendor")
+    period_slug = _slugify_period(start_month, end_month)
+    table_rows = [[grp, g[data_field]] for grp, g in groups.items()]
+    af = _active_filters(period=period, start_month=start_month, end_month=end_month, filters=filters or None)
+    table = _build_table(
+        [dim_label, metric_label], table_rows, metric_label,
+        f"spend-by-{dimension}-{period_slug}.csv", filters=af,
+    )
+
     return {
         "status": "ok",
         "data": {
@@ -563,6 +782,7 @@ def handle_spend_by_dimension(args: dict, caller_context: CallerContext = None) 
             "grandTotal": grand_total,
             "period": {"start": start_month, "end": end_month},
         },
+        "table": table,
     }
 
 
@@ -580,6 +800,9 @@ def handle_top_vendors(args: dict, caller_context: CallerContext = None) -> dict
     filter_err = validate_filters(filters)
     if filter_err:
         return filter_err
+
+    metric_key = args.get("metric", "spend")
+    data_field, metric_label = METRIC_MAP.get(metric_key, METRIC_MAP["spend"])
 
     where_sql, params = _build_where(filters, start_month, end_month, caller_context=caller_context)
     pool = get_pool()
@@ -600,6 +823,14 @@ def handle_top_vendors(args: dict, caller_context: CallerContext = None) -> dict
     ]
     grand_total = round(sum(v["totalAmount"] for v in ranked), 2)
 
+    period_slug = _slugify_period(start_month, end_month)
+    table_rows = [[r["vendor_name"], r[data_field]] for r in ranked]
+    af = _active_filters(period=period, start_month=start_month, end_month=end_month, filters=filters or None)
+    table = _build_table(
+        ["Vendor", metric_label], table_rows, metric_label,
+        f"top-{n}-vendors-{metric_key}-{period_slug}.csv", filters=af,
+    )
+
     return {
         "status": "ok",
         "data": {
@@ -608,6 +839,7 @@ def handle_top_vendors(args: dict, caller_context: CallerContext = None) -> dict
             "n": n,
             "period": {"start": start_month, "end": end_month},
         },
+        "table": table,
     }
 
 
@@ -618,6 +850,7 @@ def handle_spend_detail(args: dict, caller_context: CallerContext = None) -> dic
     vendor_input = args.get("vendor")
     period = args.get("period")
     group_by = args.get("group_by")
+    secondary_group_by = args.get("secondary_group_by")
     category = args.get("category")
     project = args.get("project")
 
@@ -647,9 +880,51 @@ def handle_spend_detail(args: dict, caller_context: CallerContext = None) -> dic
         category=category,
         project=project,
         group_by=group_by,
+        secondary_group_by=secondary_group_by,
     )
 
+    if not rows and (category or project):
+        pool = get_pool()
+        bad_field = "category" if category else "project"
+        bad_value = category or project
+        with pool.connection() as conn:
+            valid = conn.execute(
+                f"SELECT DISTINCT d.{bad_field} AS val FROM vendor_spend_detail d"
+                f" WHERE d.vendor_id = %s AND d.{bad_field} IS NOT NULL ORDER BY val",
+                (vendor_id,),
+            ).fetchall()
+        return {
+            "status": "invalid_filter",
+            "field": bad_field,
+            "provided": bad_value,
+            "valid_values": [r["val"] for r in valid],
+        }
+
     total = round(sum(r.get("amount", 0) for r in rows), 2)
+
+    group_by_label = _dim_label(group_by or "item")
+    safe_name = vendor.get("name", vendor_id).lower().replace(" ", "-")
+    period_slug = _slugify_period(start_month, end_month)
+    af = _active_filters(
+        vendor_name=vendor.get("name"), period=period,
+        start_month=start_month, end_month=end_month,
+        category=category, project=project,
+    )
+
+    if secondary_group_by and any("secondary_value" in r for r in rows):
+        secondary_label = _dim_label(secondary_group_by)
+        table = _crosstab_detail_table(
+            rows, group_by_label, secondary_label,
+            safe_name, group_by, secondary_group_by, period_slug, filters=af,
+        )
+    elif group_by and any("dimension_value" in r for r in rows):
+        table = _pivot_detail_table(rows, group_by_label, safe_name, group_by, period_slug, filters=af)
+    else:
+        table_rows = [[r.get("month", ""), r.get("amount", 0)] for r in rows]
+        table = _build_table(
+            ["Month", "Amount"], table_rows, "Spend",
+            f"{safe_name}-detail-by-month-{period_slug}.csv", filters=af,
+        )
 
     return {
         "status": "ok",
@@ -658,10 +933,12 @@ def handle_spend_detail(args: dict, caller_context: CallerContext = None) -> dic
             "vendor_id": vendor_id,
             "period": {"start": start_month, "end": end_month},
             "group_by": group_by,
+            "secondary_group_by": secondary_group_by,
             "total": total,
             "rows": rows,
             "row_count": len(rows),
         },
+        "table": table,
     }
 
 
