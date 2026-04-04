@@ -88,6 +88,7 @@ def _vendor_row_to_dict(row: dict) -> dict:
         "renewalRate": row.get("renewal_rate"),
         "renewalNoticeDays": row.get("renewal_notice"),
         "terminationTerms": row.get("termination_terms"),
+        "isContractor": row.get("is_contractor", False),
         "lastSyncedAt": _ts_str(row.get("synced_at")),
     }
 
@@ -756,7 +757,8 @@ def delete_user(email: str) -> bool:
 def get_user_access_context(email: str) -> dict | None:
     """Load a user's access control fields for spend filtering.
 
-    Returns {roles, allowed_departments, allowed_vendor_ids, denied_vendor_ids}.
+    Returns {user_id, roles, allowed_departments, allowed_vendor_ids,
+    denied_vendor_ids}.
     """
     pool = get_pool()
     normalized = email.strip().lower()
@@ -766,6 +768,7 @@ def get_user_access_context(email: str) -> dict | None:
             return None
         user_id = str(row["id"])
         return {
+            "user_id": user_id,
             "roles": _load_user_roles(conn, user_id),
             "allowed_departments": _load_user_allowed_departments(conn, user_id),
             "allowed_vendor_ids": _load_user_allowed_vendors(conn, user_id),
@@ -777,27 +780,134 @@ def resolve_effective_vendor_ids(
     allowed_departments: list[str],
     allowed_vendor_ids: list[str],
     denied_vendor_ids: list[str],
+    user_id: str | None = None,
 ) -> list[str]:
     """Compute the effective set of vendor IDs a user can access.
 
-    (vendors in allowed_departments UNION allowed_vendor_ids) MINUS denied_vendor_ids.
+    Formula: ((dept vendors UNION allowed) MINUS denied) MINUS
+    (contractors without a user_contractor_access grant).
+
+    When user_id is None the contractor filter is skipped (backward compat).
     """
+    base_sql = """
+        SELECT id FROM vendors
+        WHERE department_id IN (
+            SELECT id FROM departments WHERE name = ANY(%s)
+        )
+        UNION
+        SELECT unnest(%s::text[])::uuid
+        EXCEPT
+        SELECT unnest(%s::text[])::uuid
+    """
+    base_params: list = [
+        allowed_departments or [],
+        allowed_vendor_ids or [],
+        denied_vendor_ids or [],
+    ]
+
+    if user_id is not None:
+        sql = f"""SELECT id::text FROM ({base_sql}) AS base
+                  WHERE base.id NOT IN (
+                      SELECT v.id FROM vendors v
+                      WHERE v.is_contractor = true
+                        AND v.id NOT IN (
+                            SELECT uca.vendor_id
+                            FROM user_contractor_access uca
+                            WHERE uca.user_id = %s
+                        )
+                  )"""
+        base_params.append(user_id)
+    else:
+        sql = f"SELECT id::text FROM ({base_sql}) AS base"
+
+    pool = get_pool()
+    with pool.connection() as conn:
+        rows = conn.execute(sql, base_params).fetchall()
+    return sorted(r["id"] for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Contractor access
+# ---------------------------------------------------------------------------
+
+
+def set_vendor_is_contractor(
+    vendor_id: str, is_contractor: bool, actor_user_id: str,
+) -> dict:
+    """Update the is_contractor flag on a vendor. Returns the updated vendor."""
+    pool = get_pool()
+    with pool.connection() as conn:
+        cur = conn.execute(
+            "UPDATE vendors SET is_contractor = %s, modified_at = %s WHERE id = %s RETURNING id",
+            (is_contractor, _now(), vendor_id),
+        )
+        if cur.fetchone() is None:
+            raise ValueError(f"Vendor '{vendor_id}' not found")
+    return get_vendor(vendor_id)
+
+
+def grant_contractor_access(
+    user_id: str, vendor_id: str, granted_by_user_id: str,
+) -> None:
+    """Grant a user access to a contractor vendor."""
+    pool = get_pool()
+    with pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO user_contractor_access (user_id, vendor_id, granted_by)
+               VALUES (%s, %s, %s)
+               ON CONFLICT (user_id, vendor_id) DO NOTHING""",
+            (user_id, vendor_id, granted_by_user_id),
+        )
+
+
+def revoke_contractor_access(user_id: str, vendor_id: str) -> bool:
+    """Revoke a user's access to a contractor vendor. Returns True if a row was deleted."""
+    pool = get_pool()
+    with pool.connection() as conn:
+        cur = conn.execute(
+            "DELETE FROM user_contractor_access WHERE user_id = %s AND vendor_id = %s RETURNING user_id",
+            (user_id, vendor_id),
+        )
+        return cur.fetchone() is not None
+
+
+def list_contractor_access(vendor_id: str) -> list[dict]:
+    """List users with access to a specific contractor vendor."""
     pool = get_pool()
     with pool.connection() as conn:
         rows = conn.execute(
-            """SELECT id::text FROM vendors
-               WHERE department_id IN (SELECT id FROM departments WHERE name = ANY(%s))
-               UNION
-               SELECT unnest(%s::text[])
-               EXCEPT
-               SELECT unnest(%s::text[])""",
-            (
-                allowed_departments or [],
-                allowed_vendor_ids or [],
-                denied_vendor_ids or [],
-            ),
+            """SELECT u.id::text AS user_id, u.email,
+                      u.first_name, u.last_name,
+                      uca.granted_by::text, uca.granted_at,
+                      ug.email AS granted_by_email
+               FROM user_contractor_access uca
+               JOIN users u ON u.id = uca.user_id
+               LEFT JOIN users ug ON ug.id = uca.granted_by
+               WHERE uca.vendor_id = %s
+               ORDER BY u.email""",
+            (vendor_id,),
         ).fetchall()
-    return sorted(r["id"] for r in rows)
+    return [
+        {
+            "userId": r["user_id"],
+            "email": r["email"],
+            "firstName": r["first_name"],
+            "lastName": r["last_name"],
+            "grantedBy": r["granted_by_email"],
+            "grantedAt": _ts_str(r["granted_at"]),
+        }
+        for r in rows
+    ]
+
+
+def list_contractor_vendors() -> list[dict]:
+    """List all vendors where is_contractor = true."""
+    pool = get_pool()
+    with pool.connection() as conn:
+        rows = conn.execute(
+            f"{_VENDOR_LIST_SQL} WHERE v.is_contractor = true ORDER BY LOWER(v.name)"
+        ).fetchall()
+    return [_vendor_row_to_dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------

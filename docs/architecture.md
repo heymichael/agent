@@ -66,7 +66,7 @@ Tables: `departments`, `roles`, `vendors`, `vendor_monthly_spend`,
 `branding`, `chat_feedback`, `site_feedback`
 
 Join tables: `user_roles`, `user_allowed_departments`, `user_allowed_vendors`,
-`user_denied_vendors`, `app_granting_roles`
+`user_denied_vendors`, `user_contractor_access`, `app_granting_roles`
 
 All primary keys are UUID. All relationships enforced via foreign keys.
 Full schema: `migrations/001_init.sql`.
@@ -76,8 +76,15 @@ Full schema: `migrations/001_init.sql`.
 **vendors** — all vendors regardless of source. Identified by `(source_system,
 source_system_id)` unique natural key with UUID `id` as surrogate PK. The
 `hidden_from_agent` boolean (default `false`) excludes duplicate vendors from
-agent interactions while preserving their data. Schema:
-`migrations/004_hidden_from_agent.sql`.
+agent interactions while preserving their data. The `is_contractor` boolean
+(default `true`) marks contractor vendors whose transactional data requires
+explicit per-user access grants from a `finance_admin`. Schema:
+`migrations/004_hidden_from_agent.sql`, `migrations/009_contractor_access.sql`.
+
+**user_contractor_access** — per-user, per-vendor access grants for contractor
+vendors. Keyed on `(user_id, vendor_id)`. Records who granted access
+(`granted_by`) and when (`granted_at`). Only `finance_admin` users can
+create/delete rows. Schema: `migrations/009_contractor_access.sql`.
 
 **vendor_monthly_spend** — monthly spend summaries per vendor. `date` column
 stores the first of each month. Unique on `(vendor_id, date)`. Derived from
@@ -171,6 +178,9 @@ protocol overhead). It can also be run as a standalone MCP server via
 | `migrations/003_sync_job_log.sql` | Sync job run + step tracking tables |
 | `migrations/004_hidden_from_agent.sql` | Add `hidden_from_agent` boolean to vendors |
 | `migrations/005_branding.sql` | Singleton branding table (logo SVG + lockup toggle) |
+| `migrations/009_contractor_access.sql` | `is_contractor` flag on vendors + `user_contractor_access` grant table |
+| `scripts/export_contractor_csv.py` | Export all vendors as CSV for contractor classification backfill |
+| `scripts/import_contractor_csv.py` | Import classified CSV to set `is_contractor` on vendors |
 
 ## Supported tools
 
@@ -262,8 +272,10 @@ endpoint.
 `_build_caller_context` in `service/tools.py` resolves the caller's effective
 vendor set via `resolve_effective_vendor_ids` in `pg_client.py` — combining
 `user_allowed_departments`, `user_allowed_vendors`, and `user_denied_vendors`
-from the join tables. Finance admins (`is_finance_admin`) bypass all checks.
-Filtering is always active; there is no feature flag gate.
+from the join tables. Contractor vendors (`is_contractor = true`) are
+additionally excluded unless the caller has an explicit
+`user_contractor_access` row. Finance admins (`is_finance_admin`) bypass all
+checks. Filtering is always active; there is no feature flag gate.
 
 ### Read path (spend queries)
 
@@ -336,6 +348,11 @@ levels without restarting the server. The header is ignored in production
 | `POST` | `/users` | `admin` | Create a new user |
 | `PATCH` | `/users/{email}` | `admin` or `finance_admin` | Update user roles/name (`admin`) or access fields (`finance_admin`) |
 | `DELETE` | `/users/{email}` | `admin` | Delete a user |
+| `PATCH` | `/vendors/{vendor_id}/contractor` | `finance_admin` | Set/unset `is_contractor` flag |
+| `GET` | `/vendors/contractors` | `finance_admin` | List all contractor vendors |
+| `GET` | `/vendors/{vendor_id}/access` | `finance_admin` | List users with contractor access to a vendor |
+| `POST` | `/vendors/{vendor_id}/access` | `finance_admin` | Grant a user contractor access |
+| `DELETE` | `/vendors/{vendor_id}/access/{user_email}` | `finance_admin` | Revoke a user's contractor access |
 
 ## MCP server (standalone)
 

@@ -55,11 +55,20 @@ def require_admin(caller: dict) -> str:
     return email
 
 
+def require_finance_admin(caller: dict) -> str:
+    """Verify the caller has the finance_admin role. Returns the caller email."""
+    email, roles = _get_caller_roles(caller)
+    if not FINANCE_ADMIN_ROLES.intersection(roles):
+        raise HTTPException(status_code=403, detail="Requires finance_admin role")
+    return email
+
+
 def _resolve_caller_access(caller: dict) -> set[str] | None:
     """Resolve the caller's effective vendor set for REST endpoint filtering.
 
     Returns None for finance_admin (full access) or a set of allowed vendor
     IDs for restricted users. Empty set means no vendor access.
+    Contractor vendors without an explicit grant are excluded.
     """
     email = caller.get("email", "")
     if not email:
@@ -73,6 +82,7 @@ def _resolve_caller_access(caller: dict) -> set[str] | None:
         ctx.get("allowed_departments", []),
         ctx.get("allowed_vendor_ids", []),
         ctx.get("denied_vendor_ids", []),
+        user_id=ctx.get("user_id"),
     ))
 
 MAX_TOOL_RESULT_CHARS = 20_000
@@ -376,6 +386,88 @@ def batch_update_vendors(req: BatchUpdateRequest, caller: dict = Depends(get_ver
         return {"ok": True, "updated": count}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Contractor management (finance_admin only)
+# ---------------------------------------------------------------------------
+
+
+class SetContractorRequest(BaseModel):
+    is_contractor: bool
+
+
+@app.patch("/vendors/{vendor_id}/contractor")
+def set_vendor_contractor(
+    vendor_id: str,
+    req: SetContractorRequest,
+    caller: dict = Depends(get_verified_user),
+):
+    email = require_finance_admin(caller)
+    actor_id = pg_client.get_user_id_by_email(email)
+    if not actor_id:
+        raise HTTPException(status_code=403, detail="User not found")
+    try:
+        vendor = pg_client.set_vendor_is_contractor(vendor_id, req.is_contractor, actor_id)
+        return {"ok": True, "vendor": vendor}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/vendors/contractors")
+def list_contractor_vendors(caller: dict = Depends(get_verified_user)):
+    require_finance_admin(caller)
+    return pg_client.list_contractor_vendors()
+
+
+@app.get("/vendors/{vendor_id}/access")
+def list_vendor_access(vendor_id: str, caller: dict = Depends(get_verified_user)):
+    require_finance_admin(caller)
+    vendor = pg_client.get_vendor(vendor_id)
+    if not vendor:
+        raise HTTPException(status_code=404, detail=f"Vendor '{vendor_id}' not found")
+    return pg_client.list_contractor_access(vendor_id)
+
+
+class GrantAccessRequest(BaseModel):
+    user_email: str
+
+
+@app.post("/vendors/{vendor_id}/access", status_code=201)
+def grant_vendor_access(
+    vendor_id: str,
+    req: GrantAccessRequest,
+    caller: dict = Depends(get_verified_user),
+):
+    email = require_finance_admin(caller)
+    actor_id = pg_client.get_user_id_by_email(email)
+    if not actor_id:
+        raise HTTPException(status_code=403, detail="User not found")
+    vendor = pg_client.get_vendor(vendor_id)
+    if not vendor:
+        raise HTTPException(status_code=404, detail=f"Vendor '{vendor_id}' not found")
+    target_user_id = pg_client.get_user_id_by_email(req.user_email)
+    if not target_user_id:
+        raise HTTPException(status_code=404, detail=f"User '{req.user_email}' not found")
+    pg_client.grant_contractor_access(target_user_id, vendor_id, actor_id)
+    return {"ok": True}
+
+
+@app.delete("/vendors/{vendor_id}/access/{user_email}")
+def revoke_vendor_access(
+    vendor_id: str,
+    user_email: str,
+    caller: dict = Depends(get_verified_user),
+):
+    require_finance_admin(caller)
+    vendor = pg_client.get_vendor(vendor_id)
+    if not vendor:
+        raise HTTPException(status_code=404, detail=f"Vendor '{vendor_id}' not found")
+    target_user_id = pg_client.get_user_id_by_email(user_email)
+    if not target_user_id:
+        raise HTTPException(status_code=404, detail=f"User '{user_email}' not found")
+    pg_client.revoke_contractor_access(target_user_id, vendor_id)
+    return {"ok": True}
 
 
 @app.get("/spend")

@@ -25,6 +25,7 @@ VENDOR_ALPHA = {"id": "v-alpha", "name": "Alpha Corp"}
 VENDOR_BETA = {"id": "v-beta", "name": "Beta Inc"}
 
 FINANCE_ADMIN_CTX = {
+    "user_id": "uid-admin",
     "roles": ["finance_admin"],
     "allowed_departments": [],
     "allowed_vendor_ids": [],
@@ -32,6 +33,7 @@ FINANCE_ADMIN_CTX = {
 }
 
 SCOPED_USER_CTX = {
+    "user_id": "uid-scoped",
     "roles": [],
     "allowed_departments": ["Engineering"],
     "allowed_vendor_ids": [],
@@ -199,3 +201,54 @@ class TestProcessVendorCsvAuth:
             result = json.loads(execute_process_vendor_csv({}, caller_email="user@co.com"))
         assert result["ok"] is False
         assert result["stage"] == "column_check"
+
+
+# ── Contractor filtering via _build_caller_context ───────────────────────
+
+class TestContractorFiltering:
+    """Verify that resolve_effective_vendor_ids receives user_id for contractor filtering."""
+
+    def test_user_id_passed_to_resolve(self):
+        """_build_caller_context passes user_id from access context to resolve_effective_vendor_ids."""
+        from service.tools import _build_caller_context
+
+        with (
+            patch.object(pg_client, "get_user_access_context", return_value=SCOPED_USER_CTX),
+            patch.object(pg_client, "resolve_effective_vendor_ids", return_value=["v-alpha"]) as mock_resolve,
+        ):
+            ctx = _build_caller_context("user@co.com")
+
+        mock_resolve.assert_called_once_with(
+            ["Engineering"], [], [],
+            user_id="uid-scoped",
+        )
+        assert ctx == {"allowed_vendor_ids": ["v-alpha"], "is_finance_admin": False}
+
+    def test_finance_admin_skips_resolve(self):
+        """finance_admin bypasses resolve_effective_vendor_ids entirely."""
+        from service.tools import _build_caller_context
+
+        with (
+            patch.object(pg_client, "get_user_access_context", return_value=FINANCE_ADMIN_CTX),
+            patch.object(pg_client, "resolve_effective_vendor_ids") as mock_resolve,
+        ):
+            ctx = _build_caller_context("admin@co.com")
+
+        mock_resolve.assert_not_called()
+        assert ctx == {"is_finance_admin": True}
+
+    def test_contractor_excluded_without_grant(self):
+        """A contractor vendor should be excluded when no user_contractor_access row exists."""
+        p1, p2 = _mock_access(SCOPED_USER_CTX, ["v-alpha"])
+        with p1, p2:
+            result = _check_write_auth("user@co.com", "v-contractor", "ContractorCo")
+        assert result is not None
+        data = json.loads(result)
+        assert data["status"] == "not_authorized"
+
+    def test_contractor_included_with_grant(self):
+        """A contractor vendor should be accessible when resolve returns it (grant exists)."""
+        p1, p2 = _mock_access(SCOPED_USER_CTX, ["v-alpha", "v-contractor"])
+        with p1, p2:
+            result = _check_write_auth("user@co.com", "v-contractor", "ContractorCo")
+        assert result is None
