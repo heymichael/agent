@@ -1,0 +1,15 @@
+---
+description: Pointer to canonical architecture documentation
+alwaysApply: true
+---
+
+# Architecture pointer
+
+- Use `docs/architecture.md` as the canonical source for:
+  - Repo layout and ownership boundaries
+  - Routing/rewrite topology and precedence
+  - Build and deploy flow
+  - Common change playbooks and invariants
+- When planning or implementing multi-file changes, check that file first.
+- If code and docs diverge, update `docs/architecture.md` in the same change.
+- For cross-repo context (repo purposes, relationships, shared infra), read `../haderach-tasks/repos.md`.
