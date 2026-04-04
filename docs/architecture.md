@@ -265,11 +265,18 @@ class TablePayload(BaseModel):
     columns: list[str]
     rows: list[list]
     filename: str
+    filters: dict[str, str] = {}
 ```
 
-The LLM only sees the remaining `data` dict and writes a brief natural-
-language summary. The frontend renders each `TablePayload` as an inline
-table component with copy (tab-separated) and download (CSV) actions.
+The `filters` dict contains human-readable label/value pairs for any
+active filters on the query (e.g. `{"Vendor": "Google Cloud",
+"Period": "YTD", "Project": "arcade-ai-prod"}`). The frontend can
+render these as filter chips or a subtitle on the table.
+
+The LLM only sees the remaining `data` dict — plus a `_table_rendered: true`
+hint so it knows a table UI is being shown and should write only a brief
+caption. The frontend renders each `TablePayload` as an inline table
+component with copy (tab-separated) and download (CSV) actions.
 
 **Tools that produce a table:** `spend_by_vendor`, `spend_by_dimension`,
 `top_vendors`, `spend_detail`, `vendor_count` (grouped).
@@ -278,6 +285,17 @@ table component with copy (tab-separated) and download (CSV) actions.
 `top_vendors` accept an optional `metric` parameter (`spend`,
 `vendorCount`, `billCount`) that selects which value goes into the table
 rows. Defaults to the natural metric for each tool.
+
+**Pivot and cross-tab:** `spend_detail` produces three table layouts:
+
+- **No `group_by`** — simple `[Month, Amount]` table
+- **`group_by` only** — pivoted: dimension values as rows (sorted by
+  total descending), months as columns. Single-month queries collapse
+  to `[Dimension, Amount]`.
+- **`group_by` + `secondary_group_by`** — 2D cross-tab: `group_by`
+  values as rows, `secondary_group_by` values as columns, amounts summed
+  across the period. Both axes sorted by total descending, missing cells
+  filled with 0.
 
 ## Parameter classification
 

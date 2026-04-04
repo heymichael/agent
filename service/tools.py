@@ -327,7 +327,12 @@ TOOL_DEFINITIONS = [
                     "group_by": {
                         "type": "string",
                         "enum": ["category", "subcategory", "project"],
-                        "description": "Group and sum results by this dimension.",
+                        "description": "Primary dimension for rows. Results are grouped by this dimension with months as columns.",
+                    },
+                    "secondary_group_by": {
+                        "type": "string",
+                        "enum": ["category", "subcategory", "project"],
+                        "description": "Secondary dimension for columns. When set, produces a cross-tab: group_by values as rows, secondary_group_by values as columns, amounts summed across the period. Must differ from group_by.",
                     },
                     "category": {
                         "type": "string",

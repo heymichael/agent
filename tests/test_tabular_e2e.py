@@ -243,6 +243,120 @@ class TestTableProseContract:
         )
         print(f"  PASS: no numbered list in reply when table present")
 
+    def test_no_markdown_table_in_reply(self):
+        """The reply should not contain a markdown table when a table widget is present."""
+        result = _chat("Break down GCP spend by project this year")
+        tables = result.get("tables", [])
+        if not tables:
+            print(f"  SKIP: no table returned")
+            return
+
+        reply = result["reply"]
+        pipe_rows = re.findall(r"^\|.+\|", reply, re.MULTILINE)
+        assert len(pipe_rows) == 0, (
+            f"Reply contains a markdown table ({len(pipe_rows)} pipe-delimited rows) "
+            f"when a table widget is already rendered. Reply: {reply[:500]}"
+        )
+        print(f"  PASS: no markdown table in reply when table widget present")
+
+    def test_no_bullet_list_of_data_in_reply(self):
+        """The reply should not use bullet lists to restate table data."""
+        result = _chat("Show me our top 5 vendors by spend this year")
+        tables = result.get("tables", [])
+        if not tables or not tables[0]["rows"]:
+            print(f"  SKIP: no table data to verify against")
+            return
+
+        reply = result["reply"]
+        bullets = re.findall(r"^[-*]\s", reply, re.MULTILINE)
+        assert len(bullets) == 0, (
+            f"Reply contains {len(bullets)} bullet points when a table widget is "
+            f"present. Reply: {reply[:500]}"
+        )
+        print(f"  PASS: no bullet list in reply when table present")
+
+
+# =========================================================================
+# SPEND DETAIL ROUTING AND CROSS-TAB
+# =========================================================================
+
+class TestSpendDetailRouting:
+    """Verify the LLM routes breakdown requests correctly."""
+
+    def test_category_breakdown_uses_spend_detail_not_dimensions(self):
+        """Asking to break down by category should call spend_detail, not
+        spend_detail_dimensions."""
+        result = _chat("Break down GCP spend by category this year")
+        tools = result.get("tool_calls_executed", [])
+        assert "spend_detail" in tools, (
+            f"Expected spend_detail, got: {tools}. Reply: {result['reply'][:300]}"
+        )
+        assert "spend_detail_dimensions" not in tools, (
+            f"Should not call spend_detail_dimensions for a breakdown request, got: {tools}"
+        )
+        tables = result.get("tables", [])
+        assert len(tables) >= 1, (
+            f"Expected a table from spend_detail. Reply: {result['reply'][:300]}"
+        )
+        assert tables[0]["columns"][0] == "Category", (
+            f"First column should be 'Category', got: {tables[0]['columns']}"
+        )
+        print(f"  PASS: used spend_detail (not dimensions) with {len(tables[0]['rows'])} rows")
+
+    def test_cross_tab_uses_single_call_with_secondary_group_by(self):
+        """A 2D cross-tab request should use one spend_detail call with
+        secondary_group_by, not two separate calls."""
+        result = _chat(
+            "For GCP this year, show me a table with categories as rows "
+            "and projects as columns"
+        )
+        tools = result.get("tool_calls_executed", [])
+        assert tools.count("spend_detail") == 1, (
+            f"Expected exactly 1 spend_detail call, got {tools.count('spend_detail')} "
+            f"in: {tools}. Reply: {result['reply'][:300]}"
+        )
+        tables = result.get("tables", [])
+        assert len(tables) == 1, (
+            f"Expected exactly 1 table (cross-tab), got {len(tables)}. "
+            f"Reply: {result['reply'][:300]}"
+        )
+        table = tables[0]
+        assert table["columns"][0] == "Category", (
+            f"First column should be 'Category' (row dimension), got: {table['columns']}"
+        )
+        assert len(table["columns"]) >= 3, (
+            f"Cross-tab should have at least 3 columns (dimension + 2 projects), "
+            f"got: {table['columns']}"
+        )
+        print(
+            f"  PASS: single spend_detail call produced cross-tab with "
+            f"{len(table['rows'])} rows × {len(table['columns']) - 1} projects"
+        )
+
+
+# =========================================================================
+# EMPTY RESULTS — NO TABLE, GRACEFUL MESSAGING
+# =========================================================================
+
+class TestEmptyResultHandling:
+    """Verify graceful handling when queries return no data."""
+
+    def test_invalid_filter_lists_valid_values(self):
+        """A bogus project filter should list valid projects — no table."""
+        result = _chat(
+            "Show me GCP spend this year filtered to the xyznonexistent project"
+        )
+        tables = result.get("tables", [])
+        assert len(tables) == 0, (
+            f"Expected no table for invalid filter, got {len(tables)} table(s). "
+            f"Reply: {result['reply'][:300]}"
+        )
+        reply = result["reply"].lower()
+        assert "arcade" in reply or "project" in reply, (
+            f"Reply should mention valid projects. Reply: {result['reply'][:300]}"
+        )
+        print(f"  PASS: invalid filter returned valid values, no table")
+
 
 # =========================================================================
 # EXECUTE_PYTHON NOT OFFERED
@@ -274,6 +388,8 @@ if __name__ == "__main__":
         TestTablePayloadOnResponse,
         TestMetricParameter,
         TestTableProseContract,
+        TestSpendDetailRouting,
+        TestEmptyResultHandling,
         TestExecutePythonNotOffered,
     ]
 

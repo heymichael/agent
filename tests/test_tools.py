@@ -786,3 +786,153 @@ class TestExecutePythonRemoved:
     def test_not_in_tool_handlers(self):
         from service.tools import TOOL_HANDLERS
         assert "execute_python" not in TOOL_HANDLERS
+
+
+# ── spend_detail pivot table ─────────────────────────────────────────────
+
+class TestSpendDetailPivotTable:
+    """Verify spend_detail produces a pivoted table when group_by is set."""
+
+    def _make_detail_pool(self, detail_rows):
+        """Build a pool with vendor resolution + spend_detail rows."""
+        return _build_mock_pool({
+            "WHERE id::text": {"id": "v_acme", "name": "Acme Corp"},
+            "LOWER(v.name) = LOWER": _FULL_VENDOR_ACME,
+            "WHERE v.id": _FULL_VENDOR_ACME,
+            "FROM vendors ORDER BY": [
+                {"id": "v_acme", "name": "Acme Corp", "aliases": ["Acme"]},
+            ],
+            "similarity": [],
+            "vendor_spend_detail": detail_rows,
+        })
+
+    def test_grouped_pivot_categories_as_rows_months_as_columns(self):
+        detail_rows = [
+            {"dimension_value": "BigQuery", "month": "2026-01", "amount": Decimal("5000.00")},
+            {"dimension_value": "BigQuery", "month": "2026-02", "amount": Decimal("4600.00")},
+            {"dimension_value": "Compute Engine", "month": "2026-01", "amount": Decimal("1200.00")},
+            {"dimension_value": "Compute Engine", "month": "2026-02", "amount": Decimal("1400.00")},
+        ]
+        pool = self._make_detail_pool(detail_rows)
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_spend_detail({"vendor": "Acme Corp", "group_by": "category", "period": "2026"})
+
+        assert result["status"] == "ok"
+        table = result["table"]
+        _assert_table_shape(table)
+        assert table["columns"] == ["Category", "2026-01", "2026-02"]
+        assert len(table["rows"]) == 2
+        bq_row = next(r for r in table["rows"] if r[0] == "BigQuery")
+        assert bq_row == ["BigQuery", 5000.0, 4600.0]
+
+    def test_grouped_single_month_uses_amount_column(self):
+        detail_rows = [
+            {"dimension_value": "BigQuery", "month": "2026-01", "amount": Decimal("5000.00")},
+            {"dimension_value": "Compute Engine", "month": "2026-01", "amount": Decimal("1200.00")},
+        ]
+        pool = self._make_detail_pool(detail_rows)
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_spend_detail({"vendor": "Acme Corp", "group_by": "category", "period": "2026-01"})
+
+        table = result["table"]
+        assert table["columns"] == ["Category", "Amount"]
+        assert len(table["rows"]) == 2
+
+    def test_grouped_sorts_by_total_descending(self):
+        detail_rows = [
+            {"dimension_value": "Small", "month": "2026-01", "amount": Decimal("100.00")},
+            {"dimension_value": "Large", "month": "2026-01", "amount": Decimal("9000.00")},
+            {"dimension_value": "Medium", "month": "2026-01", "amount": Decimal("3000.00")},
+        ]
+        pool = self._make_detail_pool(detail_rows)
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_spend_detail({"vendor": "Acme Corp", "group_by": "category", "period": "2026"})
+
+        labels = [r[0] for r in result["table"]["rows"]]
+        assert labels == ["Large", "Medium", "Small"]
+
+    def test_ungrouped_uses_month_amount_columns(self):
+        detail_rows = [
+            {"month": "2026-01", "amount": Decimal("5000.00")},
+            {"month": "2026-02", "amount": Decimal("4600.00")},
+        ]
+        pool = self._make_detail_pool(detail_rows)
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_spend_detail({"vendor": "Acme Corp", "period": "2026"})
+
+        table = result["table"]
+        assert table["columns"] == ["Month", "Amount"]
+        assert len(table["rows"]) == 2
+        assert table["rows"][0] == ["2026-01", 5000.0]
+
+    def test_2d_crosstab_category_by_project(self):
+        detail_rows = [
+            {"dimension_value": "BigQuery", "secondary_value": "arcade-ai-prod", "amount": Decimal("9000.00")},
+            {"dimension_value": "BigQuery", "secondary_value": "arcade-ai-staging", "amount": Decimal("500.00")},
+            {"dimension_value": "Compute Engine", "secondary_value": "arcade-ai-prod", "amount": Decimal("2000.00")},
+            {"dimension_value": "Compute Engine", "secondary_value": "arcade-ai-staging", "amount": Decimal("300.00")},
+        ]
+        pool = self._make_detail_pool(detail_rows)
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_spend_detail({
+                "vendor": "Acme Corp",
+                "group_by": "category",
+                "secondary_group_by": "project",
+                "period": "2026",
+            })
+
+        assert result["status"] == "ok"
+        table = result["table"]
+        _assert_table_shape(table)
+        assert table["columns"][0] == "Category"
+        assert "arcade-ai-prod" in table["columns"]
+        assert "arcade-ai-staging" in table["columns"]
+        assert len(table["rows"]) == 2
+        bq_row = next(r for r in table["rows"] if r[0] == "BigQuery")
+        prod_idx = table["columns"].index("arcade-ai-prod")
+        staging_idx = table["columns"].index("arcade-ai-staging")
+        assert bq_row[prod_idx] == 9000.0
+        assert bq_row[staging_idx] == 500.0
+
+    def test_2d_crosstab_sorts_by_total(self):
+        detail_rows = [
+            {"dimension_value": "Small", "secondary_value": "p1", "amount": Decimal("100.00")},
+            {"dimension_value": "Large", "secondary_value": "p1", "amount": Decimal("9000.00")},
+        ]
+        pool = self._make_detail_pool(detail_rows)
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_spend_detail({
+                "vendor": "Acme Corp",
+                "group_by": "category",
+                "secondary_group_by": "project",
+                "period": "2026",
+            })
+
+        labels = [r[0] for r in result["table"]["rows"]]
+        assert labels == ["Large", "Small"]
+
+    def test_2d_crosstab_fills_missing_cells_with_zero(self):
+        detail_rows = [
+            {"dimension_value": "BigQuery", "secondary_value": "prod", "amount": Decimal("5000.00")},
+            {"dimension_value": "Compute Engine", "secondary_value": "staging", "amount": Decimal("300.00")},
+        ]
+        pool = self._make_detail_pool(detail_rows)
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_spend_detail({
+                "vendor": "Acme Corp",
+                "group_by": "category",
+                "secondary_group_by": "project",
+                "period": "2026",
+            })
+
+        table = result["table"]
+        bq_row = next(r for r in table["rows"] if r[0] == "BigQuery")
+        staging_idx = table["columns"].index("staging")
+        assert bq_row[staging_idx] == 0

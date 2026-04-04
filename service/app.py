@@ -170,6 +170,7 @@ class TablePayload(BaseModel):
     columns: list[str]
     rows: list[list]
     filename: str
+    filters: dict[str, str] = {}
 
 
 class ChatResponse(BaseModel):
@@ -591,6 +592,7 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
                 table_payload = parsed.pop("table", None)
                 if table_payload:
                     tables.append(TablePayload(**table_payload))
+                    parsed["_table_rendered"] = True
 
                 tool_result_msg = {
                     "role": "tool",

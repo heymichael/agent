@@ -348,6 +348,7 @@ class TestTablePayloadPopping:
         tool_content = json.loads(tool_result_msg["content"])
         assert "table" not in tool_content
         assert "data" in tool_content
+        assert tool_content.get("_table_rendered") is True
 
     @patch.object(pg_client, "upsert_chat_session")
     @patch.object(pg_client, "get_user_id_by_email", return_value="uid-1")
