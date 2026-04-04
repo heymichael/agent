@@ -44,6 +44,7 @@ def _teardown():
 def _access_ctx(roles=None, departments=None, vendor_ids=None, denied=None):
     """Build a user access context dict."""
     return {
+        "user_id": "uid-test",
         "roles": roles or [],
         "allowed_departments": departments or [],
         "allowed_vendor_ids": vendor_ids or [],
@@ -377,3 +378,207 @@ class TestSiteFeedback:
         })
 
         assert resp.status_code == 422
+
+
+# ── Contractor management endpoints ─────────────────────────────────────
+
+SAMPLE_VENDOR_ALPHA = {
+    "id": "v_alpha", "name": "Alpha Corp", "department": "Engineering",
+    "isContractor": False,
+}
+
+FINANCE_ADMIN_USER = {
+    "id": "uid-fa",
+    "email": "fa@example.com",
+    "firstName": "Finance",
+    "lastName": "Admin",
+    "roles": ["finance_admin"],
+    "allowedDepartments": [],
+    "allowedVendorIds": [],
+    "deniedVendorIds": [],
+    "allowedVendors": [],
+}
+
+REGULAR_USER = {
+    "id": "uid-reg",
+    "email": "user@example.com",
+    "firstName": "Regular",
+    "lastName": "User",
+    "roles": ["viewer"],
+    "allowedDepartments": [],
+    "allowedVendorIds": [],
+    "deniedVendorIds": [],
+    "allowedVendors": [],
+}
+
+
+class TestSetContractor:
+
+    def teardown_method(self):
+        _teardown()
+
+    @patch.object(pg_client, "set_vendor_is_contractor")
+    @patch.object(pg_client, "get_user_id_by_email")
+    @patch.object(pg_client, "get_user")
+    def test_finance_admin_can_set(self, mock_get_user, mock_uid, mock_set):
+        mock_get_user.return_value = FINANCE_ADMIN_USER
+        mock_uid.return_value = "uid-fa"
+        mock_set.return_value = {**SAMPLE_VENDOR_ALPHA, "isContractor": True}
+        client = _make_client("fa@example.com")
+
+        resp = client.patch("/vendors/v_alpha/contractor", json={"is_contractor": True})
+
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        mock_set.assert_called_once_with("v_alpha", True, "uid-fa")
+
+    @patch.object(pg_client, "get_user")
+    def test_non_finance_admin_rejected(self, mock_get_user):
+        mock_get_user.return_value = REGULAR_USER
+        client = _make_client("user@example.com")
+
+        resp = client.patch("/vendors/v_alpha/contractor", json={"is_contractor": True})
+
+        assert resp.status_code == 403
+
+
+class TestListContractors:
+
+    def teardown_method(self):
+        _teardown()
+
+    @patch.object(pg_client, "list_contractor_vendors")
+    @patch.object(pg_client, "get_user")
+    def test_finance_admin_can_list(self, mock_get_user, mock_list):
+        mock_get_user.return_value = FINANCE_ADMIN_USER
+        mock_list.return_value = [SAMPLE_VENDOR_ALPHA]
+        client = _make_client("fa@example.com")
+
+        resp = client.get("/vendors/contractors")
+
+        assert resp.status_code == 200
+        assert len(resp.json()) == 1
+
+    @patch.object(pg_client, "get_user")
+    def test_non_finance_admin_rejected(self, mock_get_user):
+        mock_get_user.return_value = REGULAR_USER
+        client = _make_client("user@example.com")
+
+        resp = client.get("/vendors/contractors")
+
+        assert resp.status_code == 403
+
+
+class TestContractorAccessGrant:
+
+    def teardown_method(self):
+        _teardown()
+
+    @patch.object(pg_client, "grant_contractor_access")
+    @patch.object(pg_client, "get_vendor")
+    @patch.object(pg_client, "get_user_id_by_email")
+    @patch.object(pg_client, "get_user")
+    def test_grant_access(self, mock_get_user, mock_uid, mock_get_vendor, mock_grant):
+        mock_get_user.return_value = FINANCE_ADMIN_USER
+        mock_uid.side_effect = lambda e: "uid-fa" if e == "fa@example.com" else "uid-target"
+        mock_get_vendor.return_value = SAMPLE_VENDOR_ALPHA
+        client = _make_client("fa@example.com")
+
+        resp = client.post(
+            "/vendors/v_alpha/access",
+            json={"user_email": "target@example.com"},
+        )
+
+        assert resp.status_code == 201
+        assert resp.json()["ok"] is True
+        mock_grant.assert_called_once_with("uid-target", "v_alpha", "uid-fa")
+
+    @patch.object(pg_client, "get_user")
+    def test_non_finance_admin_rejected(self, mock_get_user):
+        mock_get_user.return_value = REGULAR_USER
+        client = _make_client("user@example.com")
+
+        resp = client.post(
+            "/vendors/v_alpha/access",
+            json={"user_email": "target@example.com"},
+        )
+
+        assert resp.status_code == 403
+
+
+class TestContractorAccessRevoke:
+
+    def teardown_method(self):
+        _teardown()
+
+    @patch.object(pg_client, "revoke_contractor_access")
+    @patch.object(pg_client, "get_vendor")
+    @patch.object(pg_client, "get_user_id_by_email")
+    @patch.object(pg_client, "get_user")
+    def test_revoke_access(self, mock_get_user, mock_uid, mock_get_vendor, mock_revoke):
+        mock_get_user.return_value = FINANCE_ADMIN_USER
+        mock_uid.return_value = "uid-target"
+        mock_get_vendor.return_value = SAMPLE_VENDOR_ALPHA
+        client = _make_client("fa@example.com")
+
+        resp = client.delete("/vendors/v_alpha/access/target@example.com")
+
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        mock_revoke.assert_called_once_with("uid-target", "v_alpha")
+
+    @patch.object(pg_client, "get_user")
+    def test_non_finance_admin_rejected(self, mock_get_user):
+        mock_get_user.return_value = REGULAR_USER
+        client = _make_client("user@example.com")
+
+        resp = client.delete("/vendors/v_alpha/access/target@example.com")
+
+        assert resp.status_code == 403
+
+    @patch.object(pg_client, "get_vendor")
+    @patch.object(pg_client, "get_user_id_by_email")
+    @patch.object(pg_client, "get_user")
+    def test_vendor_not_found(self, mock_get_user, mock_uid, mock_get_vendor):
+        mock_get_user.return_value = FINANCE_ADMIN_USER
+        mock_uid.return_value = "uid-target"
+        mock_get_vendor.return_value = None
+        client = _make_client("fa@example.com")
+
+        resp = client.delete("/vendors/v_alpha/access/target@example.com")
+
+        assert resp.status_code == 404
+
+
+class TestListContractorAccess:
+
+    def teardown_method(self):
+        _teardown()
+
+    @patch.object(pg_client, "list_contractor_access")
+    @patch.object(pg_client, "get_vendor")
+    @patch.object(pg_client, "get_user")
+    def test_list_access(self, mock_get_user, mock_get_vendor, mock_list):
+        mock_get_user.return_value = FINANCE_ADMIN_USER
+        mock_get_vendor.return_value = SAMPLE_VENDOR_ALPHA
+        mock_list.return_value = [
+            {"userId": "uid-1", "email": "u1@co.com",
+             "firstName": "A", "lastName": "B",
+             "grantedBy": "fa@co.com", "grantedAt": "2026-01-01T00:00:00Z"},
+        ]
+        client = _make_client("fa@example.com")
+
+        resp = client.get("/vendors/v_alpha/access")
+
+        assert resp.status_code == 200
+        assert len(resp.json()) == 1
+        assert resp.json()[0]["email"] == "u1@co.com"
+
+    @patch.object(pg_client, "get_user")
+    def test_non_finance_admin_rejected(self, mock_get_user):
+        mock_get_user.return_value = REGULAR_USER
+        client = _make_client("user@example.com")
+
+        resp = client.get("/vendors/v_alpha/access")
+
+        assert resp.status_code == 403

@@ -528,6 +528,7 @@ def _build_caller_context(caller_email: str) -> dict | None:
 
     Resolves the caller's effective vendor set from their
     allowed_departments, allowed_vendor_ids, and denied_vendor_ids.
+    Contractor vendors without an explicit grant are excluded.
     finance_admin users bypass filtering entirely.
     """
     if not caller_email:
@@ -544,6 +545,7 @@ def _build_caller_context(caller_email: str) -> dict | None:
         user.get("allowed_departments", []),
         user.get("allowed_vendor_ids", []),
         user.get("denied_vendor_ids", []),
+        user_id=user.get("user_id"),
     )
     return {"allowed_vendor_ids": effective_ids, "is_finance_admin": False}
 
