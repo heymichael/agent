@@ -20,6 +20,7 @@ from mcp_server.tools import (
     handle_spend_by_vendor,
     handle_spend_by_dimension,
     handle_top_vendors,
+    handle_spend_detail,
 )
 
 
@@ -625,3 +626,163 @@ class TestNullSentinelFilters:
             result = handle_vendor_list({"filters": {"owner": "*"}})
         assert result["status"] == "ok"
         assert result["data"]["total"] == 3
+
+
+# ── Table payload on tabular handlers ────────────────────────────────────
+
+def _assert_table_shape(table: dict, expected_columns: list[str] | None = None):
+    """Verify a table payload has the required fields and valid types."""
+    assert "metric" in table and isinstance(table["metric"], str)
+    assert "columns" in table and isinstance(table["columns"], list)
+    assert "rows" in table and isinstance(table["rows"], list)
+    assert "filename" in table and isinstance(table["filename"], str)
+    assert table["filename"].endswith(".csv")
+    if expected_columns:
+        assert table["columns"] == expected_columns
+
+
+class TestTablePayloadPresence:
+    """Verify that tabular handlers include a well-formed table field."""
+
+    def test_spend_by_vendor_single_has_table(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_by_vendor({"vendor": "Acme Corp"})
+        assert "table" in result
+        _assert_table_shape(result["table"], ["Month", "Spend"])
+        assert len(result["table"]["rows"]) == len(result["data"]["months"])
+
+    def test_spend_by_vendor_all_has_table(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_by_vendor({})
+        assert "table" in result
+        _assert_table_shape(result["table"], ["Vendor", "Spend"])
+        assert len(result["table"]["rows"]) == result["data"]["totalVendors"]
+
+    def test_spend_by_dimension_has_table(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_by_dimension({"dimension": "paymentMethod"})
+        assert "table" in result
+        _assert_table_shape(result["table"], ["Payment Method", "Spend"])
+        assert len(result["table"]["rows"]) == len(result["data"]["groups"])
+
+    def test_top_vendors_has_table(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_top_vendors({})
+        assert "table" in result
+        _assert_table_shape(result["table"], ["Vendor", "Spend"])
+        assert len(result["table"]["rows"]) == len(result["data"]["vendors"])
+
+    def test_vendor_count_grouped_has_table(self):
+        pool = _build_mock_pool({
+            "COALESCE(": [
+                {"grp": "Engineering", "cnt": 2},
+                {"grp": "Marketing", "cnt": 1},
+            ],
+        })
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_vendor_count({"group_by": "department"})
+        assert "table" in result
+        _assert_table_shape(result["table"])
+        assert result["table"]["metric"] == "Vendor Count"
+        assert len(result["table"]["rows"]) == 2
+
+    def test_vendor_count_ungrouped_has_no_table(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_vendor_count({})
+        assert "table" not in result
+
+    def test_spend_total_has_no_table(self):
+        """spend_total returns a single number — no table payload."""
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_total({})
+        assert "table" not in result
+
+    def test_vendor_list_has_no_table(self):
+        """vendor_list uses CSV downloads, not table payloads."""
+        rows = [_make_vendor_row(i) for i in range(3)]
+        pool = _build_mock_pool({"COUNT(*)": {"cnt": 3}, "LIMIT": rows})
+        p1, p2, p3, p4 = _patch_all(pool)
+        with p1, p2, p3, p4:
+            result = handle_vendor_list({})
+        assert "table" not in result
+
+    def test_error_responses_have_no_table(self):
+        """Invalid inputs should not produce a table field."""
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_by_dimension({})
+        assert result["status"] == "invalid_filter"
+        assert "table" not in result
+
+
+# ── Metric parameter ────────────────────────────────────────────────────
+
+class TestMetricParameter:
+    """Verify the metric parameter selects the correct data field."""
+
+    def test_spend_by_vendor_single_metric_billcount(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_by_vendor({"vendor": "Acme Corp", "metric": "billCount"})
+        table = result["table"]
+        assert table["metric"] == "Bill Count"
+        assert table["columns"] == ["Month", "Bill Count"]
+        for row in table["rows"]:
+            assert isinstance(row[1], int)
+
+    def test_spend_by_vendor_all_metric_billcount(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_by_vendor({"metric": "billCount"})
+        table = result["table"]
+        assert table["metric"] == "Bill Count"
+        assert table["columns"] == ["Vendor", "Bill Count"]
+
+    def test_spend_by_dimension_metric_vendor_count(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_spend_by_dimension({"dimension": "paymentMethod", "metric": "vendorCount"})
+        table = result["table"]
+        assert table["metric"] == "Vendor Count"
+        assert table["columns"] == ["Payment Method", "Vendor Count"]
+
+    def test_top_vendors_metric_billcount(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_top_vendors({"metric": "billCount"})
+        table = result["table"]
+        assert table["metric"] == "Bill Count"
+
+    def test_default_metric_is_spend(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_top_vendors({})
+        assert result["table"]["metric"] == "Spend"
+
+    def test_unknown_metric_falls_back_to_spend(self):
+        p1, p2, p3, p4 = _patch_all()
+        with p1, p2, p3, p4:
+            result = handle_top_vendors({"metric": "unknown"})
+        assert result["table"]["metric"] == "Spend"
+
+
+# ── execute_python removed from tool schemas ─────────────────────────────
+
+class TestExecutePythonRemoved:
+    """Verify execute_python is no longer exposed to the LLM."""
+
+    def test_not_in_tool_definitions(self):
+        from service.tools import TOOL_DEFINITIONS
+        names = [t["function"]["name"] for t in TOOL_DEFINITIONS]
+        assert "execute_python" not in names
+
+    def test_not_in_tool_handlers(self):
+        from service.tools import TOOL_HANDLERS
+        assert "execute_python" not in TOOL_HANDLERS

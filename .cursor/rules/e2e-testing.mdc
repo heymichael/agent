@@ -1,6 +1,6 @@
 ---
 description: How to start infrastructure and run e2e tests against the live agent
-globs: tests/test_csv_e2e.py,tests/test_write_auth_e2e.py
+globs: tests/test_csv_e2e.py,tests/test_write_auth_e2e.py,tests/test_tabular_e2e.py
 alwaysApply: false
 ---
 
@@ -10,7 +10,7 @@ E2e tests hit the live `/chat` endpoint through the full LLM pipeline. They requ
 
 ## Test file map
 
-Three test files cover the write pipeline. Each targets a different layer:
+Four e2e test files cover the write pipeline and the analytics read path. Each targets a different layer:
 
 | File | Layer | Runs as | What it tests |
 |------|-------|---------|---------------|
@@ -18,8 +18,9 @@ Three test files cover the write pipeline. Each targets a different layer:
 | `test_csv_e2e.py` | Business logic | Admin | CSV confirm flow, single-vendor edits (auth gate is bypassed) |
 | `test_write_auth_e2e.py` | Authorization | Scoped user | Allowed/denied edits, mixed CSV rejection |
 | `test_write_auth.py` | Authorization | Mocked (unit) | Same auth logic, no network — fast and deterministic |
+| `test_tabular_e2e.py` | Tabular data contract | Admin | Table payload presence, metric param intent, prose contract, execute_python removal |
 
-The **input validation** layer fails requests before the auth check runs — outcome is the same regardless of caller identity. The **business logic** layer is reached only after auth passes (admin bypass). The **authorization** layer is the only one whose outcome depends on who the caller is.
+The **input validation** layer fails requests before the auth check runs — outcome is the same regardless of caller identity. The **business logic** layer is reached only after auth passes (admin bypass). The **authorization** layer is the only one whose outcome depends on who the caller is. The **tabular data contract** layer verifies the full pipeline from LLM tool selection through structured table payloads on ChatResponse.
 
 `test_write_auth_e2e.py` uses the `X-Test-Email` header (defined in `service/auth.py`) to override `DEV_AUTH_EMAIL` and authenticate as a scoped user. This only works when `DEV_AUTH_EMAIL` is set (dev mode) — production uses real Firebase tokens and ignores the header.
 
@@ -88,6 +89,9 @@ curl -s http://127.0.0.1:8080/health   # should return {"status":"ok"}
 
 # Scoped-user e2e suite (~1 min) — authorization gate
 .venv/bin/python -m pytest tests/test_write_auth_e2e.py -v -s
+
+# Tabular data contract suite (~2 min) — table payloads, metric, prose
+.venv/bin/python -m pytest tests/test_tabular_e2e.py -v -s
 
 # Unit tests for write auth — no server needed
 .venv/bin/python -m pytest tests/test_write_auth.py -v -s

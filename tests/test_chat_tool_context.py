@@ -280,3 +280,90 @@ class TestSessionPersistenceWithToolMessages:
 
         tool_result_entry = next(m for m in persisted_msgs if m.get("tool_call_id"))
         assert tool_result_entry["tool_call_id"] == "call_1"
+
+
+# ── Table payload popping ────────────────────────────────────────────────
+
+TOOL_RESULT_WITH_TABLE = json.dumps({
+    "status": "ok",
+    "data": {"totalAmount": 25000.00},
+    "table": {
+        "metric": "Spend",
+        "columns": ["Month", "Spend"],
+        "rows": [["2026-01", 10000], ["2026-02", 15000]],
+        "filename": "acme-spend-by-month.csv",
+    },
+})
+
+
+class TestTablePayloadPopping:
+    """Verify table is popped from tool result and surfaced on ChatResponse."""
+
+    def teardown_method(self):
+        _teardown()
+
+    @patch.object(pg_client, "upsert_chat_session")
+    @patch.object(pg_client, "get_user_id_by_email", return_value="uid-1")
+    @patch("service.app.get_openai_client")
+    @patch("service.app.TOOL_HANDLERS", {"spend_by_vendor": lambda args, caller_email: TOOL_RESULT_WITH_TABLE})
+    def test_tables_field_populated(self, mock_get_client, mock_uid, mock_upsert):
+        """ChatResponse.tables should contain the popped table payload."""
+        mock_get_client.return_value = _mock_openai_tool_then_text(
+            "spend_by_vendor", {"vendor": "Acme"}, "call_tbl", "Here's the spend breakdown.",
+        )
+        client = _make_client()
+
+        resp = client.post("/chat", json={
+            "messages": [{"role": "user", "content": "Show Acme spend"}],
+            "context": {"app": "vendors"},
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["tables"]) == 1
+        table = data["tables"][0]
+        assert table["metric"] == "Spend"
+        assert table["columns"] == ["Month", "Spend"]
+        assert len(table["rows"]) == 2
+        assert table["filename"] == "acme-spend-by-month.csv"
+
+    @patch.object(pg_client, "upsert_chat_session")
+    @patch.object(pg_client, "get_user_id_by_email", return_value="uid-1")
+    @patch("service.app.get_openai_client")
+    @patch("service.app.TOOL_HANDLERS", {"spend_by_vendor": lambda args, caller_email: TOOL_RESULT_WITH_TABLE})
+    def test_table_stripped_from_tool_result_sent_to_llm(self, mock_get_client, mock_uid, mock_upsert):
+        """The table field should be removed from the tool result before the LLM sees it."""
+        mock_get_client.return_value = _mock_openai_tool_then_text(
+            "spend_by_vendor", {"vendor": "Acme"}, "call_strip", "Summary here.",
+        )
+        client = _make_client()
+
+        resp = client.post("/chat", json={
+            "messages": [{"role": "user", "content": "Show Acme spend"}],
+            "context": {"app": "vendors"},
+        })
+
+        assert resp.status_code == 200
+        tool_result_msg = resp.json()["tool_messages"][1]
+        tool_content = json.loads(tool_result_msg["content"])
+        assert "table" not in tool_content
+        assert "data" in tool_content
+
+    @patch.object(pg_client, "upsert_chat_session")
+    @patch.object(pg_client, "get_user_id_by_email", return_value="uid-1")
+    @patch("service.app.get_openai_client")
+    @patch("service.app.TOOL_HANDLERS", {"vendor_count": lambda args, caller_email: TOOL_RESULT})
+    def test_tables_empty_when_no_table_in_result(self, mock_get_client, mock_uid, mock_upsert):
+        """When a tool result has no table field, tables should be empty."""
+        mock_get_client.return_value = _mock_openai_tool_then_text(
+            "vendor_count", {"filters": {}}, "call_notbl", "14 vendors.",
+        )
+        client = _make_client()
+
+        resp = client.post("/chat", json={
+            "messages": [{"role": "user", "content": "How many vendors?"}],
+            "context": {"app": "vendors"},
+        })
+
+        assert resp.status_code == 200
+        assert resp.json()["tables"] == []

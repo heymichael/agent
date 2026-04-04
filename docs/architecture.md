@@ -4,8 +4,8 @@
 
 The agent service is a shared backend that accepts chat messages, calls OpenAI
 with tool definitions, executes tool calls (SQL analytics layer, Postgres
-writes, sandboxed Python for external APIs), and returns natural-language
-responses. It is consumed by frontend chat panels across Haderach apps.
+writes), and returns natural-language responses with structured data payloads.
+It is consumed by frontend chat panels across Haderach apps.
 
 ## Request flow
 
@@ -42,8 +42,6 @@ FastAPI app.py  (max 10 tool-call rounds, 20K char result truncation)
   │     │
   │     ├─ Write tools ──────► Postgres (vendor CRUD via pg_client)
   │     │   (add/modify/delete_vendor)
-  │     │
-  │     ├─ execute_python ──► Sandbox → Bill.com API / AWS CE
   │     │
   │     ▼
   │   Send tool result back to OpenAI → loop
@@ -155,7 +153,7 @@ protocol overhead). It can also be run as a standalone MCP server via
 |---|---|
 | `service/app.py` | FastAPI application, `/chat` endpoint, orchestration loop, tool-result truncation |
 | `service/auth.py` | Firebase ID token verification dependency (`get_verified_user`) |
-| `service/tools.py` | OpenAI tool schemas + thin handler wrappers that delegate to MCP module |
+| `service/tools.py` | OpenAI tool schemas (with `metric` param on tabular tools) + thin handler wrappers that delegate to MCP module |
 | `service/prompts.py` | System prompt with tool list, response contract rules, and behaviour rules |
 | `service/pg_client.py` | Postgres connection pool, all CRUD queries, vendor/user/app/spend/department/role operations |
 | `service/sandbox.py` | Sandboxed Python executor for LLM-generated code (120s timeout) |
@@ -209,12 +207,6 @@ protocol overhead). It can also be run as a standalone MCP server via
 
 `delete_vendor` is disabled from agent tool definitions — deletion must go through a system admin. The handler and REST endpoint still exist but are not exposed to the LLM.
 
-### Live API tool
-
-| Tool | Params | Effect |
-|---|---|---|
-| `execute_python` | code | Runs sandboxed Python for Bill.com/AWS API queries |
-
 ## Vendor resolution pipeline
 
 All tools that accept a `vendor` parameter use
@@ -244,6 +236,48 @@ surfaced via a `downloads` list on `ChatResponse`. Each download has
 `filename`, `content`, and `mime` fields. The frontend renders a download
 button that triggers a client-side blob download — no server-side file
 storage required.
+
+## Tabular data contract
+
+Analytics tools that return tabular data include a `table` field alongside
+the existing `data` dict:
+
+```python
+{
+    "status": "ok",
+    "data": { ... },
+    "table": {
+        "metric": "Spend",
+        "columns": ["Month", "Amount"],
+        "rows": [["2026-01", 45230], ["2026-02", 51890]],
+        "filename": "aws-spend-by-month-2026-Q1.csv"
+    }
+}
+```
+
+In `app.py`, the `table` field is popped from the tool result before it
+goes into the OpenAI message history (same pattern as CSV downloads). It is
+surfaced via a `tables` list on `ChatResponse`:
+
+```python
+class TablePayload(BaseModel):
+    metric: str
+    columns: list[str]
+    rows: list[list]
+    filename: str
+```
+
+The LLM only sees the remaining `data` dict and writes a brief natural-
+language summary. The frontend renders each `TablePayload` as an inline
+table component with copy (tab-separated) and download (CSV) actions.
+
+**Tools that produce a table:** `spend_by_vendor`, `spend_by_dimension`,
+`top_vendors`, `spend_detail`, `vendor_count` (grouped).
+
+**Metric parameter:** `spend_by_vendor`, `spend_by_dimension`, and
+`top_vendors` accept an optional `metric` parameter (`spend`,
+`vendorCount`, `billCount`) that selects which value goes into the table
+rows. Defaults to the natural metric for each tool.
 
 ## Parameter classification
 
