@@ -6,12 +6,10 @@ upserts granular detail rows into vendor_spend_detail and rolls up to
 vendor_monthly_spend.  Each step is tracked in sync_job_log / sync_job_step.
 
 Field mapping (BigQuery → canonical columns):
+    invoice.month       → date       (first of invoice month)
     service.description → category   (e.g. "Compute Engine")
     sku.description     → subcategory (e.g. "N1 Predefined Instance Core running in Americas")
     project.id          → project    (e.g. "arcade-ai-prod")
-
-Metadata JSONB sidecar:
-    {"sku_id": "...", "region": "..."}
 
 Idempotent: each run overwrites detail and summary rows for all months via
 ON CONFLICT ... DO UPDATE.
@@ -48,16 +46,14 @@ BILLING_TABLE = "arcade-ai-prod.arcade_gcp_billing_export.gcp_billing_export_res
 
 _BILLING_QUERY_TEMPLATE = """
 SELECT
-  FORMAT_TIMESTAMP('%Y-%m-01', usage_start_time) AS month,
+  CONCAT(SUBSTR(invoice.month, 1, 4), '-', SUBSTR(invoice.month, 5, 2), '-01') AS month,
   service.description AS category,
   sku.description AS subcategory,
   project.id AS project_id,
-  sku.id AS sku_id,
-  location.region AS region,
   ROUND(SUM(cost + IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)), 2) AS net_cost
 FROM `{table}`
-WHERE usage_start_time >= @start_date
-GROUP BY month, category, subcategory, project_id, sku_id, region
+WHERE invoice.month >= @start_month
+GROUP BY month, category, subcategory, project_id
 HAVING net_cost != 0
 ORDER BY month, net_cost DESC
 """
@@ -97,9 +93,10 @@ def _fetch_monthly_costs(months: int | None = None) -> list[dict]:
         start = date(2020, 1, 1)
 
     query = _BILLING_QUERY_TEMPLATE.replace("{table}", BILLING_TABLE)
+    start_month = f"{start.year}{start.month:02d}"
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("start_date", "TIMESTAMP", datetime(start.year, start.month, start.day, tzinfo=timezone.utc)),
+            bigquery.ScalarQueryParameter("start_month", "STRING", start_month),
         ]
     )
 
@@ -115,9 +112,7 @@ def _fetch_monthly_costs(months: int | None = None) -> list[dict]:
             "subcategory": row.subcategory,
             "project": row.project_id,
             "amount": float(row.net_cost),
-            "metadata": json.dumps({
-                k: v for k, v in {"sku_id": row.sku_id, "region": row.region}.items() if v
-            }),
+            "metadata": None,
         })
 
     return results
