@@ -127,6 +127,21 @@ analytics pipeline tracking. Schema: `migrations/006_chat_feedback.sql`,
 `open_panes` (JSONB snapshot of UI state), and `feedback_text`.
 Schema: `migrations/007_site_feedback.sql`.
 
+## Domain routing
+
+The agent service hosts two domain agents behind a single `/chat` endpoint.
+The `context.app` field in `ChatRequest` selects the domain:
+
+| `context.app` | Prompt | Tools | Notes |
+|---|---|---|---|
+| `"expenses"` | `EXPENSE_ANALYTICS_PROMPT` | spend_total, spend_by_vendor, spend_by_dimension, top_vendors, spend_detail, spend_detail_dimensions | Read-only analytics |
+| `"vendors"` (default) | `VENDOR_MANAGEMENT_PROMPT` | vendor_lookup, vendor_count, vendor_list, add_vendor, modify_vendor, generate_vendor_edit_csv, process_vendor_csv, ask_expense_agent | CRUD + delegation |
+
+The vendor management agent has an `ask_expense_agent` delegation tool that
+invokes `run_agent_loop()` with the expense analytics prompt and tool set.
+This is a V1 sub-agent pattern — simple one-shot delegation for spend
+questions, with redirect guidance for complex follow-ups.
+
 ## MCP analytics layer
 
 Analytics tools are backed by the `mcp_server/` module, which provides:
@@ -151,10 +166,10 @@ protocol overhead). It can also be run as a standalone MCP server via
 
 | File | Responsibility |
 |---|---|
-| `service/app.py` | FastAPI application, `/chat` endpoint, orchestration loop, tool-result truncation |
+| `service/app.py` | FastAPI application, `/chat` endpoint, `run_agent_loop()` orchestration, domain routing, `ask_expense_agent` sub-agent handler |
 | `service/auth.py` | Firebase ID token verification dependency (`get_verified_user`) |
-| `service/tools.py` | OpenAI tool schemas (with `metric` param on tabular tools) + thin handler wrappers that delegate to MCP module |
-| `service/prompts.py` | System prompt with tool list, response contract rules, and behaviour rules |
+| `service/tools.py` | OpenAI tool schemas, domain-specific tool/handler subsets (EXPENSE_TOOL_*, VENDOR_TOOL_*), thin handler wrappers that delegate to MCP module |
+| `service/prompts.py` | Domain-specific prompts (EXPENSE_ANALYTICS_PROMPT, VENDOR_MANAGEMENT_PROMPT) composed from shared fragments |
 | `service/pg_client.py` | Postgres connection pool, all CRUD queries, vendor/user/app/spend/department/role operations |
 | `service/sandbox.py` | Sandboxed Python executor for LLM-generated code (120s timeout) |
 | `service/billcom_auth.py` | Shared Bill.com v3 login helper |

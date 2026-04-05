@@ -8,6 +8,8 @@ from contextlib import contextmanager
 
 import pytest
 
+pytestmark = [pytest.mark.expense_analytics, pytest.mark.vendor_management]
+
 from mcp_server.resolver import (
     resolve_filter,
     validate_filters,

@@ -20,22 +20,46 @@ Test layers
   TestExecutePythonNotOffered — execute_python no longer callable
 """
 
+import os
 import re
 import requests
 
+import pytest
+
+pytestmark = [pytest.mark.expense_analytics, pytest.mark.vendor_management]
+
 BASE = "http://127.0.0.1:8080"
 HEADERS = {"Content-Type": "application/json"}
+_APP_CONTEXT = os.getenv("TEST_APP_CONTEXT", "vendors")
+_IS_VENDOR_DOMAIN = _APP_CONTEXT != "expenses"
 
 
 def _chat(prompt: str):
     """Send a single-turn chat message and return the parsed response."""
     payload = {
         "messages": [{"role": "user", "content": prompt}],
-        "context": {"app": "vendors"},
+        "context": {"app": _APP_CONTEXT},
     }
     resp = requests.post(f"{BASE}/chat", json=payload, headers=HEADERS, timeout=60)
     resp.raise_for_status()
     return resp.json()
+
+
+def _assert_spend_tool(tools: list[str], expected: set[str], reply: str):
+    """Assert the right spend tool was called, accounting for domain routing.
+
+    Against the expense agent, spend tools are called directly.
+    Against the vendor agent, spend questions are delegated via ask_expense_agent.
+    """
+    if _IS_VENDOR_DOMAIN:
+        assert "ask_expense_agent" in tools, (
+            f"Expected ask_expense_agent (vendor domain delegation), "
+            f"got: {tools}. Reply: {reply[:300]}"
+        )
+    else:
+        assert expected.intersection(tools), (
+            f"Expected one of {expected}, got: {tools}. Reply: {reply[:300]}"
+        )
 
 
 def _assert_table_shape(table: dict):
@@ -68,10 +92,7 @@ class TestTablePayloadOnResponse:
         """Monthly spend for a vendor should produce a table payload."""
         result = _chat("Show me the monthly spend breakdown for AWS this year")
         tools = result.get("tool_calls_executed", [])
-        accepted = {"spend_by_vendor", "spend_detail"}
-        assert accepted.intersection(tools), (
-            f"Expected one of {accepted}, got: {tools}. Reply: {result['reply'][:300]}"
-        )
+        _assert_spend_tool(tools, {"spend_by_vendor", "spend_detail"}, result["reply"])
         tables = result.get("tables", [])
         assert len(tables) >= 1, (
             f"Expected at least 1 table, got {len(tables)}. Reply: {result['reply'][:300]}"
@@ -84,9 +105,7 @@ class TestTablePayloadOnResponse:
         """Top N vendors query should produce a table payload."""
         result = _chat("What are the top 5 vendors by spend this year?")
         tools = result.get("tool_calls_executed", [])
-        assert "top_vendors" in tools, (
-            f"Expected top_vendors, got: {tools}. Reply: {result['reply'][:300]}"
-        )
+        _assert_spend_tool(tools, {"top_vendors"}, result["reply"])
         tables = result.get("tables", [])
         assert len(tables) >= 1, (
             f"Expected at least 1 table. Reply: {result['reply'][:300]}"
@@ -104,9 +123,7 @@ class TestTablePayloadOnResponse:
         """Spend by dimension should produce a table payload."""
         result = _chat("Break down our spend by payment method this year")
         tools = result.get("tool_calls_executed", [])
-        assert "spend_by_dimension" in tools, (
-            f"Expected spend_by_dimension, got: {tools}. Reply: {result['reply'][:300]}"
-        )
+        _assert_spend_tool(tools, {"spend_by_dimension"}, result["reply"])
         tables = result.get("tables", [])
         assert len(tables) >= 1, (
             f"Expected at least 1 table. Reply: {result['reply'][:300]}"
@@ -121,9 +138,7 @@ class TestTablePayloadOnResponse:
         """spend_total returns a single number — no table expected."""
         result = _chat("How much did we spend in total this year?")
         tools = result.get("tool_calls_executed", [])
-        assert "spend_total" in tools, (
-            f"Expected spend_total, got: {tools}. Reply: {result['reply'][:300]}"
-        )
+        _assert_spend_tool(tools, {"spend_total"}, result["reply"])
         tables = result.get("tables", [])
         assert len(tables) == 0, (
             f"spend_total should not produce a table, got {len(tables)}"
@@ -155,9 +170,7 @@ class TestMetricParameter:
         """Asking about bills/invoices should use billCount metric."""
         result = _chat("How many bills did we get from AWS each month this year?")
         tools = result.get("tool_calls_executed", [])
-        assert "spend_by_vendor" in tools, (
-            f"Expected spend_by_vendor, got: {tools}. Reply: {result['reply'][:300]}"
-        )
+        _assert_spend_tool(tools, {"spend_by_vendor"}, result["reply"])
         tables = result.get("tables", [])
         assert len(tables) >= 1, (
             f"Expected a table. Reply: {result['reply'][:300]}"
@@ -288,9 +301,7 @@ class TestSpendDetailRouting:
         spend_detail_dimensions."""
         result = _chat("Break down GCP spend by category this year")
         tools = result.get("tool_calls_executed", [])
-        assert "spend_detail" in tools, (
-            f"Expected spend_detail, got: {tools}. Reply: {result['reply'][:300]}"
-        )
+        _assert_spend_tool(tools, {"spend_detail"}, result["reply"])
         assert "spend_detail_dimensions" not in tools, (
             f"Should not call spend_detail_dimensions for a breakdown request, got: {tools}"
         )
@@ -311,10 +322,7 @@ class TestSpendDetailRouting:
             "and projects as columns"
         )
         tools = result.get("tool_calls_executed", [])
-        assert tools.count("spend_detail") == 1, (
-            f"Expected exactly 1 spend_detail call, got {tools.count('spend_detail')} "
-            f"in: {tools}. Reply: {result['reply'][:300]}"
-        )
+        _assert_spend_tool(tools, {"spend_detail"}, result["reply"])
         tables = result.get("tables", [])
         assert len(tables) == 1, (
             f"Expected exactly 1 table (cross-tab), got {len(tables)}. "
@@ -372,11 +380,81 @@ class TestExecutePythonNotOffered:
         assert "execute_python" not in tools, (
             f"execute_python should not be called, got: {tools}"
         )
-        expected = {"spend_detail", "spend_by_dimension", "spend_by_vendor"}
-        assert expected.intersection(tools), (
-            f"Expected a structured analytics tool, got: {tools}. Reply: {result['reply'][:300]}"
+        _assert_spend_tool(
+            tools, {"spend_detail", "spend_by_dimension", "spend_by_vendor"}, result["reply"]
         )
         print(f"  PASS: used {tools} instead of execute_python")
+
+
+# =========================================================================
+# DELEGATION PARITY — same data through both paths
+# =========================================================================
+
+class TestDelegationParity:
+    """Verify the vendor agent's delegation path returns identical table
+    data to the expense agent's direct path.
+
+    Each test sends the same query to both domains and compares the table
+    payloads (metric, columns, rows).  This catches regressions in the
+    ask_expense_agent handler's table propagation logic.
+    """
+
+    @staticmethod
+    def _chat_direct(prompt: str, app_context: str):
+        payload = {
+            "messages": [{"role": "user", "content": prompt}],
+            "context": {"app": app_context},
+        }
+        resp = requests.post(f"{BASE}/chat", json=payload, headers=HEADERS, timeout=90)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _compare(self, prompt: str):
+        direct = self._chat_direct(prompt, "expenses")
+        delegated = self._chat_direct(prompt, "vendors")
+
+        d_tables = direct.get("tables", [])
+        v_tables = delegated.get("tables", [])
+
+        assert len(d_tables) >= 1, (
+            f"Expense agent returned no table. Reply: {direct['reply'][:300]}"
+        )
+        assert len(v_tables) >= 1, (
+            f"Vendor agent returned no table. Reply: {delegated['reply'][:300]}"
+        )
+
+        dt = d_tables[0]
+        vt = v_tables[0]
+
+        assert dt["metric"] == vt["metric"], (
+            f"Metric mismatch: expense={dt['metric']}, vendor={vt['metric']}"
+        )
+        assert dt["columns"] == vt["columns"], (
+            f"Columns mismatch:\n  expense: {dt['columns']}\n  vendor:  {vt['columns']}"
+        )
+        assert dt["rows"] == vt["rows"], (
+            f"Row data mismatch: expense has {len(dt['rows'])} rows, "
+            f"vendor has {len(vt['rows'])} rows.\n"
+            f"  expense first row: {dt['rows'][:1]}\n"
+            f"  vendor first row:  {vt['rows'][:1]}"
+        )
+        return dt, vt
+
+    def test_spend_by_vendor_parity(self):
+        dt, vt = self._compare("Show me the monthly spend breakdown for AWS this year")
+        print(f"  PASS: table parity — {len(dt['rows'])} rows, metric={dt['metric']}")
+
+    def test_top_vendors_parity(self):
+        dt, vt = self._compare("What are the top 5 vendors by spend this year?")
+        print(f"  PASS: table parity — {len(dt['rows'])} rows, metric={dt['metric']}")
+
+    def test_spend_by_dimension_parity(self):
+        dt, vt = self._compare("Break down our spend by payment method this year")
+        print(f"  PASS: table parity — {len(dt['rows'])} rows, metric={dt['metric']}")
+
+    def test_spend_detail_parity(self):
+        dt, vt = self._compare("Break down GCP spend by category this year")
+        print(f"  PASS: table parity — {len(dt['rows'])} rows, metric={dt['metric']}")
 
 
 # =========================================================================
@@ -391,6 +469,7 @@ if __name__ == "__main__":
         TestSpendDetailRouting,
         TestEmptyResultHandling,
         TestExecutePythonNotOffered,
+        TestDelegationParity,
     ]
 
     passed = 0

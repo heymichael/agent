@@ -7,6 +7,9 @@ Uses FastAPI TestClient with dependency overrides for auth and
 from unittest.mock import patch, MagicMock
 
 import pytest
+
+pytestmark = [pytest.mark.expense_analytics, pytest.mark.vendor_management]
+
 from fastapi.testclient import TestClient
 
 from service.app import app, get_verified_user
@@ -102,6 +105,7 @@ class TestGetCurrentUser:
 
         assert resp.status_code == 404
 
+    @patch("service.auth._DEV_AUTH_EMAIL", None)
     def test_unauthenticated_returns_401(self):
         app.dependency_overrides.clear()
         client = TestClient(app)
@@ -161,6 +165,7 @@ class TestListVendors:
         assert resp.json() == []
         mock_resolve.assert_not_called()
 
+    @patch("service.auth._DEV_AUTH_EMAIL", None)
     def test_unauthenticated_returns_401(self):
         app.dependency_overrides.clear()
         client = TestClient(app)
@@ -257,6 +262,7 @@ class TestGetSpend:
 
         assert resp.status_code == 422
 
+    @patch("service.auth._DEV_AUTH_EMAIL", None)
     def test_unauthenticated_returns_401(self):
         app.dependency_overrides.clear()
         client = TestClient(app)
@@ -350,6 +356,7 @@ class TestSiteFeedback:
 
         assert resp.status_code == 403
 
+    @patch("service.auth._DEV_AUTH_EMAIL", None)
     def test_unauthenticated_returns_401(self):
         app.dependency_overrides.clear()
         client = TestClient(app)

@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.expense_analytics
+
 from mcp_server.period_parser import parse_period, PeriodParseError, _month_offset
 
 
