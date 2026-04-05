@@ -2,6 +2,8 @@
 
 import pytest
 
+pytestmark = [pytest.mark.expense_analytics, pytest.mark.vendor_management]
+
 from service.resolve import (
     CanonicalMatch,
     resolve_canonical_value,

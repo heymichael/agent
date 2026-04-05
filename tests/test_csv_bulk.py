@@ -7,6 +7,8 @@ pipeline, tool handlers, and the batch-update endpoint.
 from unittest.mock import patch, MagicMock
 
 import pytest
+
+pytestmark = pytest.mark.vendor_management
 from fastapi.testclient import TestClient
 
 from service.app import app, get_verified_user

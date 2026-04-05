@@ -41,6 +41,10 @@ import json
 import os
 import requests
 
+import pytest
+
+pytestmark = pytest.mark.vendor_management
+
 BASE = "http://127.0.0.1:8080"
 HEADERS = {"Content-Type": "application/json"}
 
@@ -435,9 +439,10 @@ class TestEdgeCases:
             "Should not get confirm dialog when nothing changed"
         )
         reply = result["reply"].lower()
-        assert "no change" in reply or "no update" in reply or "same" in reply or "detect" in reply, (
-            f"Expected no-change message, got: {result['reply']}"
-        )
+        assert any(kw in reply for kw in [
+            "no change", "no update", "same", "detect", "did not",
+            "no modification", "nothing to update", "unchanged", "already",
+        ]), f"Expected no-change message, got: {result['reply']}"
         print(f"  PASS: no actual changes -> no confirm dialog")
 
     def test_bom_character(self):

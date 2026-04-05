@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import uuid
+from dataclasses import dataclass, field
 from datetime import date
 
 from dotenv import load_dotenv
@@ -15,8 +16,11 @@ load_dotenv(interpolate=False)
 from pydantic import BaseModel
 from openai import OpenAI
 
-from .prompts import VENDOR_AGENT_SYSTEM_PROMPT
-from .tools import TOOL_DEFINITIONS, TOOL_HANDLERS
+from .prompts import EXPENSE_ANALYTICS_PROMPT, VENDOR_MANAGEMENT_PROMPT
+from .tools import (
+    EXPENSE_TOOL_DEFINITIONS, EXPENSE_TOOL_HANDLERS,
+    VENDOR_TOOL_DEFINITIONS, VENDOR_TOOL_HANDLERS,
+)
 from . import pg_client
 from .auth import get_verified_user
 
@@ -182,6 +186,140 @@ class ChatResponse(BaseModel):
     tables: list[TablePayload] = []
     session_id: str | None = None
     tool_messages: list[dict] = []
+
+
+@dataclass
+class AgentResult:
+    """Pure output of a single agent loop — no HTTP or session concerns."""
+    reply: str
+    tool_calls_executed: list[str] = field(default_factory=list)
+    pending_actions: list[PendingAction] = field(default_factory=list)
+    disambiguation: Disambiguation | None = None
+    downloads: list[Download] = field(default_factory=list)
+    tables: list[TablePayload] = field(default_factory=list)
+    tool_messages: list[dict] = field(default_factory=list)
+
+
+def run_agent_loop(
+    *,
+    openai_client: OpenAI,
+    system_prompt: str,
+    messages_in: list[dict],
+    tools: list[dict],
+    tool_handlers: dict[str, callable],
+    caller_email: str,
+    max_rounds: int = 10,
+) -> AgentResult:
+    """Run the LLM tool-calling loop to completion.
+
+    This is the pure orchestration core — no HTTP framework types, no
+    ContextVar side-effects, no session persistence.  Both the /chat
+    HTTP handler and the ask_expense_agent sub-agent tool call this.
+    """
+    messages = [{"role": "system", "content": system_prompt}] + list(messages_in)
+
+    tool_calls_executed: list[str] = []
+    pending_actions: list[PendingAction] = []
+    disambiguation: Disambiguation | None = None
+    downloads: list[Download] = []
+    tables: list[TablePayload] = []
+    tool_messages: list[dict] = []
+
+    for _ in range(max_rounds):
+        try:
+            response = openai_client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+            )
+        except Exception:
+            logger.exception("OpenAI API error in agent loop")
+            return AgentResult(reply="Sorry, I encountered an error contacting the AI service.")
+
+        choice = response.choices[0]
+
+        if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
+            assistant_tool_msg = choice.message.model_dump()
+            messages.append(assistant_tool_msg)
+            tool_messages.append(assistant_tool_msg)
+
+            for tc in choice.message.tool_calls:
+                fn_name = tc.function.name
+                fn_args = json.loads(tc.function.arguments)
+                logger.info("Tool call: %s(%s)", fn_name, fn_args)
+
+                handler = tool_handlers.get(fn_name)
+                if handler is None:
+                    result = json.dumps({"ok": False, "error": f"Unknown tool: {fn_name}"})
+                else:
+                    result = handler(fn_args, caller_email=caller_email)
+
+                tool_calls_executed.append(fn_name)
+
+                parsed = json.loads(result)
+                csv_content = parsed.pop("csv", None)
+                csv_filename = parsed.pop("csv_filename", None)
+                if csv_content and csv_filename:
+                    downloads = [d for d in downloads if d.filename != csv_filename]
+                    downloads.append(Download(filename=csv_filename, content=csv_content))
+
+                table_payload = parsed.pop("table", None)
+                if table_payload:
+                    tables.append(TablePayload(**table_payload))
+                    parsed["_table_rendered"] = True
+
+                tool_result_msg = {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": _truncate_tool_result(json.dumps(parsed)),
+                }
+                messages.append(tool_result_msg)
+                tool_messages.append(tool_result_msg)
+
+                if parsed.get("action") == "confirm_csv_batch":
+                    pending_actions.append(PendingAction(
+                        type="confirm_csv_batch",
+                        updates=parsed.get("updates"),
+                        summary=parsed.get("summary"),
+                    ))
+                elif parsed.get("action") in ("confirm_delete", "open_edit", "confirm_edit"):
+                    vendor = parsed["vendor"]
+                    pending_actions.append(PendingAction(
+                        type=parsed["action"],
+                        vendor_id=vendor["id"],
+                        vendor_name=vendor["name"],
+                        proposed_updates=parsed.get("proposed_updates"),
+                        display_fields=parsed.get("display_fields"),
+                    ))
+                elif parsed.get("status") == "ambiguous":
+                    field_args = {k: v for k, v in fn_args.items() if k != "identifier" and v is not None}
+                    disambiguation = Disambiguation(
+                        candidates=parsed.get("candidates", []),
+                        original_args=field_args if field_args else None,
+                    )
+
+            continue
+
+        return AgentResult(
+            reply=choice.message.content or "",
+            tool_calls_executed=tool_calls_executed,
+            pending_actions=pending_actions,
+            disambiguation=disambiguation,
+            downloads=downloads,
+            tables=tables,
+            tool_messages=tool_messages,
+        )
+
+    return AgentResult(
+        reply="I hit the maximum number of tool-call rounds. Please try again.",
+        tool_calls_executed=tool_calls_executed,
+        pending_actions=pending_actions,
+        disambiguation=disambiguation,
+        downloads=downloads,
+        tables=tables,
+        tool_messages=tool_messages,
+    )
 
 
 @app.get("/health")
@@ -498,21 +636,62 @@ def get_spend(
     return {"data": data}
 
 
+def _execute_ask_expense_agent(args: dict, caller_email: str = "") -> str:
+    """Delegate a spend question to the expense analytics agent via sub-agent loop."""
+    openai_client = get_openai_client()
+    today = date.today().isoformat()
+    inner_result = run_agent_loop(
+        openai_client=openai_client,
+        system_prompt=f"Today's date is {today}.\n\n{EXPENSE_ANALYTICS_PROMPT}",
+        messages_in=[{"role": "user", "content": args["question"]}],
+        tools=EXPENSE_TOOL_DEFINITIONS,
+        tool_handlers=EXPENSE_TOOL_HANDLERS,
+        caller_email=caller_email,
+    )
+    response: dict = {
+        "status": "ok",
+        "reply": inner_result.reply,
+    }
+    if inner_result.tables:
+        t = inner_result.tables[0]
+        response["table"] = {
+            "metric": t.metric,
+            "columns": t.columns,
+            "rows": t.rows,
+            "filename": t.filename,
+            "filters": t.filters,
+        }
+    return json.dumps(response)
+
+
+def _resolve_domain(app_context: str, has_csv: bool) -> tuple[str, list[dict], dict]:
+    """Return (system_prompt_body, tool_definitions, tool_handlers) for a domain."""
+    if app_context == "expenses":
+        return EXPENSE_ANALYTICS_PROMPT, EXPENSE_TOOL_DEFINITIONS, EXPENSE_TOOL_HANDLERS
+
+    tools = VENDOR_TOOL_DEFINITIONS if has_csv else [
+        t for t in VENDOR_TOOL_DEFINITIONS
+        if t["function"]["name"] != "process_vendor_csv"
+    ]
+    handlers = {**VENDOR_TOOL_HANDLERS, "ask_expense_agent": _execute_ask_expense_agent}
+    return VENDOR_MANAGEMENT_PROMPT, tools, handlers
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
     openai_client = get_openai_client()
     caller_email = caller.get("email", "")
     caller_user_id = pg_client.get_user_id_by_email(caller_email)
     session_id = req.session_id or str(uuid.uuid4())
-    app_context = (req.context or {}).get("app", "unknown")
-    logger.info("Chat request from %s (session %s)", caller_email, session_id)
+    app_context = (req.context or {}).get("app", "vendors")
+    logger.info("Chat request from %s (session %s, domain %s)", caller_email, session_id, app_context)
 
     att_dicts = [a.model_dump() for a in (req.attachments or [])]
     _request_attachments.set(att_dicts)
 
     today = date.today().isoformat()
-    system_prompt = f"Today's date is {today}.\n\n{VENDOR_AGENT_SYSTEM_PROMPT}"
-    messages = [{"role": "system", "content": system_prompt}]
+
+    user_messages: list[dict] = []
     for m in req.messages:
         content = m.content
         if m == req.messages[-1] and m.role == "user" and att_dicts:
@@ -532,143 +711,48 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
             msg["content"] = content
         if m.tool_calls:
             msg["tool_calls"] = m.tool_calls
-        messages.append(msg)
-
-    tool_calls_executed: list[str] = []
-    pending_actions: list[PendingAction] = []
-    disambiguation: Disambiguation | None = None
-    downloads: list[Download] = []
-    tables: list[TablePayload] = []
-    tool_messages_this_turn: list[dict] = []
-    max_rounds = 10
+        user_messages.append(msg)
 
     has_csv_attachment = any(
         a.get("filename", "").lower().endswith(".csv") for a in att_dicts
     )
-    active_tools = TOOL_DEFINITIONS if has_csv_attachment else [
-        t for t in TOOL_DEFINITIONS
-        if t["function"]["name"] != "process_vendor_csv"
-    ]
+    prompt_body, active_tools, active_handlers = _resolve_domain(app_context, has_csv_attachment)
+    system_prompt = f"Today's date is {today}.\n\n{prompt_body}"
 
-    for _ in range(max_rounds):
-        try:
-            response = openai_client.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                tools=active_tools,
-                tool_choice="auto",
-            )
-        except Exception as exc:
-            logger.error("OpenAI API error: %s", exc)
-            raise HTTPException(status_code=502, detail="OpenAI API error") from exc
+    result = run_agent_loop(
+        openai_client=openai_client,
+        system_prompt=system_prompt,
+        messages_in=user_messages,
+        tools=active_tools,
+        tool_handlers=active_handlers,
+        caller_email=caller_email,
+    )
 
-        choice = response.choices[0]
-
-        if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-            assistant_tool_msg = choice.message.model_dump()
-            messages.append(assistant_tool_msg)
-            tool_messages_this_turn.append(assistant_tool_msg)
-
-            for tc in choice.message.tool_calls:
-                fn_name = tc.function.name
-                fn_args = json.loads(tc.function.arguments)
-                logger.info("Tool call: %s(%s)", fn_name, fn_args)
-
-                handler = TOOL_HANDLERS.get(fn_name)
-                if handler is None:
-                    result = json.dumps({"ok": False, "error": f"Unknown tool: {fn_name}"})
-                else:
-                    result = handler(fn_args, caller_email=caller_email)
-
-                tool_calls_executed.append(fn_name)
-
-                parsed = json.loads(result)
-                csv_content = parsed.pop("csv", None)
-                csv_filename = parsed.pop("csv_filename", None)
-                if csv_content and csv_filename:
-                    downloads = [d for d in downloads if d.filename != csv_filename]
-                    downloads.append(Download(filename=csv_filename, content=csv_content))
-
-                table_payload = parsed.pop("table", None)
-                if table_payload:
-                    tables.append(TablePayload(**table_payload))
-                    parsed["_table_rendered"] = True
-
-                tool_result_msg = {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": _truncate_tool_result(json.dumps(parsed)),
-                }
-                messages.append(tool_result_msg)
-                tool_messages_this_turn.append(tool_result_msg)
-
-                if parsed.get("action") == "confirm_csv_batch":
-                    pending_actions.append(PendingAction(
-                        type="confirm_csv_batch",
-                        updates=parsed.get("updates"),
-                        summary=parsed.get("summary"),
-                    ))
-                elif parsed.get("action") in ("confirm_delete", "open_edit", "confirm_edit"):
-                    vendor = parsed["vendor"]
-                    pending_actions.append(PendingAction(
-                        type=parsed["action"],
-                        vendor_id=vendor["id"],
-                        vendor_name=vendor["name"],
-                        proposed_updates=parsed.get("proposed_updates"),
-                        display_fields=parsed.get("display_fields"),
-                    ))
-                elif parsed.get("status") == "ambiguous":
-                    field_args = {k: v for k, v in fn_args.items() if k != "identifier" and v is not None}
-                    disambiguation = Disambiguation(
-                        candidates=parsed.get("candidates", []),
-                        original_args=field_args if field_args else None,
-                    )
-
-            continue
-
-        reply = choice.message.content or ""
-        all_msgs = []
-        for m in req.messages:
-            entry: dict = {"role": m.role, "content": m.content}
-            if m.tool_calls:
-                entry["tool_calls"] = m.tool_calls
-            if m.tool_call_id:
-                entry["tool_call_id"] = m.tool_call_id
-            all_msgs.append(entry)
-        all_msgs.extend(tool_messages_this_turn)
-        all_msgs.append({"role": "assistant", "content": reply})
-        if caller_user_id:
-            try:
-                pg_client.upsert_chat_session(session_id, caller_user_id, app_context, all_msgs)
-            except Exception:
-                logger.exception("Failed to persist chat session %s", session_id)
-        return ChatResponse(reply=reply, tool_calls_executed=tool_calls_executed, pending_actions=pending_actions, disambiguation=disambiguation, downloads=downloads, tables=tables, session_id=session_id, tool_messages=tool_messages_this_turn)
-
-    fallback_reply = "I hit the maximum number of tool-call rounds. Please try again."
-    all_msgs = []
+    all_msgs: list[dict] = []
     for m in req.messages:
-        entry = {"role": m.role, "content": m.content}
+        entry: dict = {"role": m.role, "content": m.content}
         if m.tool_calls:
             entry["tool_calls"] = m.tool_calls
         if m.tool_call_id:
             entry["tool_call_id"] = m.tool_call_id
         all_msgs.append(entry)
-    all_msgs.extend(tool_messages_this_turn)
-    all_msgs.append({"role": "assistant", "content": fallback_reply})
+    all_msgs.extend(result.tool_messages)
+    all_msgs.append({"role": "assistant", "content": result.reply})
     if caller_user_id:
         try:
             pg_client.upsert_chat_session(session_id, caller_user_id, app_context, all_msgs)
         except Exception:
             logger.exception("Failed to persist chat session %s", session_id)
+
     return ChatResponse(
-        reply=fallback_reply,
-        tool_calls_executed=tool_calls_executed,
-        pending_actions=pending_actions,
-        disambiguation=disambiguation,
-        downloads=downloads,
-        tables=tables,
+        reply=result.reply,
+        tool_calls_executed=result.tool_calls_executed,
+        pending_actions=result.pending_actions,
+        disambiguation=result.disambiguation,
+        downloads=result.downloads,
+        tables=result.tables,
         session_id=session_id,
-        tool_messages=tool_messages_this_turn,
+        tool_messages=result.tool_messages,
     )
 
 

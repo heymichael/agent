@@ -28,6 +28,10 @@ Class → scenario mapping:
 import os
 import requests
 
+import pytest
+
+pytestmark = pytest.mark.vendor_management
+
 BASE = "http://127.0.0.1:8080"
 
 SCOPED_USER_EMAIL = "michael.d.mader@gmail.com"
@@ -58,9 +62,10 @@ def _insert_test_vendors():
             conn.execute(
                 """INSERT INTO vendors
                        (name, source_system, source_system_id, department_id,
-                        created_at, modified_at)
-                   VALUES (%s, 'testing', %s, %s, NOW(), NOW())
-                   ON CONFLICT (source_system, source_system_id) DO NOTHING""",
+                        is_contractor, created_at, modified_at)
+                   VALUES (%s, 'testing', %s, %s, false, NOW(), NOW())
+                   ON CONFLICT (source_system, source_system_id)
+                   DO UPDATE SET is_contractor = false""",
                 (name, ssid, dept_id),
             )
         conn.commit()

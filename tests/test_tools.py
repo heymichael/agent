@@ -12,6 +12,8 @@ from decimal import Decimal
 
 import pytest
 
+pytestmark = [pytest.mark.expense_analytics, pytest.mark.vendor_management]
+
 from mcp_server.tools import (
     handle_vendor_lookup,
     handle_vendor_count,

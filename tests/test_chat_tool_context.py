@@ -10,6 +10,9 @@ from unittest.mock import patch, MagicMock, call
 
 import json
 import pytest
+
+pytestmark = [pytest.mark.expense_analytics, pytest.mark.vendor_management]
+
 from fastapi.testclient import TestClient
 
 from service.app import app, get_verified_user
@@ -79,7 +82,7 @@ class TestToolMessagesReturned:
     @patch.object(pg_client, "upsert_chat_session")
     @patch.object(pg_client, "get_user_id_by_email", return_value="uid-1")
     @patch("service.app.get_openai_client")
-    @patch("service.app.TOOL_HANDLERS", {"vendor_count": lambda args, caller_email: TOOL_RESULT})
+    @patch("service.app.VENDOR_TOOL_HANDLERS", {"vendor_count": lambda args, caller_email: TOOL_RESULT})
     def test_response_includes_tool_messages(self, mock_get_client, mock_uid, mock_upsert):
         mock_get_client.return_value = _mock_openai_tool_then_text(
             "vendor_count", {"filters": {}}, "call_abc", "There are 14 vendors.",
@@ -215,7 +218,7 @@ class TestSessionPersistenceWithToolMessages:
     @patch.object(pg_client, "upsert_chat_session")
     @patch.object(pg_client, "get_user_id_by_email", return_value="uid-1")
     @patch("service.app.get_openai_client")
-    @patch("service.app.TOOL_HANDLERS", {"vendor_count": lambda args, caller_email: TOOL_RESULT})
+    @patch("service.app.VENDOR_TOOL_HANDLERS", {"vendor_count": lambda args, caller_email: TOOL_RESULT})
     def test_persisted_messages_include_tool_history(self, mock_get_client, mock_uid, mock_upsert):
         mock_get_client.return_value = _mock_openai_tool_then_text(
             "vendor_count", {"filters": {}}, "call_xyz", "14 vendors total.",
@@ -305,7 +308,7 @@ class TestTablePayloadPopping:
     @patch.object(pg_client, "upsert_chat_session")
     @patch.object(pg_client, "get_user_id_by_email", return_value="uid-1")
     @patch("service.app.get_openai_client")
-    @patch("service.app.TOOL_HANDLERS", {"spend_by_vendor": lambda args, caller_email: TOOL_RESULT_WITH_TABLE})
+    @patch("service.app.VENDOR_TOOL_HANDLERS", {"spend_by_vendor": lambda args, caller_email: TOOL_RESULT_WITH_TABLE})
     def test_tables_field_populated(self, mock_get_client, mock_uid, mock_upsert):
         """ChatResponse.tables should contain the popped table payload."""
         mock_get_client.return_value = _mock_openai_tool_then_text(
@@ -330,7 +333,7 @@ class TestTablePayloadPopping:
     @patch.object(pg_client, "upsert_chat_session")
     @patch.object(pg_client, "get_user_id_by_email", return_value="uid-1")
     @patch("service.app.get_openai_client")
-    @patch("service.app.TOOL_HANDLERS", {"spend_by_vendor": lambda args, caller_email: TOOL_RESULT_WITH_TABLE})
+    @patch("service.app.VENDOR_TOOL_HANDLERS", {"spend_by_vendor": lambda args, caller_email: TOOL_RESULT_WITH_TABLE})
     def test_table_stripped_from_tool_result_sent_to_llm(self, mock_get_client, mock_uid, mock_upsert):
         """The table field should be removed from the tool result before the LLM sees it."""
         mock_get_client.return_value = _mock_openai_tool_then_text(
@@ -353,7 +356,7 @@ class TestTablePayloadPopping:
     @patch.object(pg_client, "upsert_chat_session")
     @patch.object(pg_client, "get_user_id_by_email", return_value="uid-1")
     @patch("service.app.get_openai_client")
-    @patch("service.app.TOOL_HANDLERS", {"vendor_count": lambda args, caller_email: TOOL_RESULT})
+    @patch("service.app.VENDOR_TOOL_HANDLERS", {"vendor_count": lambda args, caller_email: TOOL_RESULT})
     def test_tables_empty_when_no_table_in_result(self, mock_get_client, mock_uid, mock_upsert):
         """When a tool result has no table field, tables should be empty."""
         mock_get_client.return_value = _mock_openai_tool_then_text(

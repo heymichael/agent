@@ -1288,3 +1288,57 @@ TOOL_HANDLERS = {
     "generate_vendor_edit_csv": execute_generate_vendor_edit_csv,
     "process_vendor_csv": execute_process_vendor_csv,
 }
+
+
+# ---------------------------------------------------------------------------
+# Domain-specific tool subsets
+# ---------------------------------------------------------------------------
+
+_EXPENSE_TOOL_NAMES = {
+    "spend_total", "spend_by_vendor", "spend_by_dimension",
+    "top_vendors", "spend_detail", "spend_detail_dimensions",
+}
+
+_VENDOR_TOOL_NAMES = {
+    "vendor_lookup", "vendor_count", "vendor_list",
+    "add_vendor", "modify_vendor",
+    "generate_vendor_edit_csv", "process_vendor_csv",
+}
+
+ASK_EXPENSE_AGENT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "ask_expense_agent",
+        "description": (
+            "Delegate a spend or cost question to the expense analytics "
+            "agent. Use when the user asks about spend, costs, expenses, "
+            "or analytics."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The user's spend-related question, passed verbatim.",
+                },
+            },
+            "required": ["question"],
+        },
+    },
+}
+
+EXPENSE_TOOL_DEFINITIONS = [
+    t for t in TOOL_DEFINITIONS if t["function"]["name"] in _EXPENSE_TOOL_NAMES
+]
+
+VENDOR_TOOL_DEFINITIONS = [
+    t for t in TOOL_DEFINITIONS if t["function"]["name"] in _VENDOR_TOOL_NAMES
+] + [ASK_EXPENSE_AGENT_TOOL]
+
+EXPENSE_TOOL_HANDLERS = {
+    k: v for k, v in TOOL_HANDLERS.items() if k in _EXPENSE_TOOL_NAMES
+}
+
+VENDOR_TOOL_HANDLERS = {
+    k: v for k, v in TOOL_HANDLERS.items() if k in _VENDOR_TOOL_NAMES
+}

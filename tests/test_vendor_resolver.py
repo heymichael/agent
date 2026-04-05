@@ -9,6 +9,8 @@ from contextlib import contextmanager
 
 import pytest
 
+pytestmark = [pytest.mark.expense_analytics, pytest.mark.vendor_management]
+
 from service.pg_client import (
     _normalise,
     _is_uuid,

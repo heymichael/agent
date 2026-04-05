@@ -9,6 +9,8 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+pytestmark = pytest.mark.vendor_management
+
 from service import pg_client
 from service.tools import (
     _check_write_auth,
