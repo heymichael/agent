@@ -20,12 +20,20 @@ from service.pg_client import get_pool
 
 APPS = [
     {
+        "slug": "expenses",
+        "label": "Expenses",
+        "path": "/expenses/",
+        "type": "app",
+        "granting_roles": ["user", "admin"],
+        "sort_order": 1,
+    },
+    {
         "slug": "card",
         "label": "Card",
         "path": "/card/",
         "type": "app",
         "granting_roles": ["haderach_user"],
-        "sort_order": 1,
+        "sort_order": 2,
     },
     {
         "slug": "stocks",
@@ -33,7 +41,7 @@ APPS = [
         "path": "/stocks/",
         "type": "app",
         "granting_roles": ["user", "admin"],
-        "sort_order": 2,
+        "sort_order": 3,
     },
     {
         "slug": "vendors",
@@ -41,7 +49,7 @@ APPS = [
         "path": "/vendors/",
         "type": "app",
         "granting_roles": ["user", "admin"],
-        "sort_order": 3,
+        "sort_order": 4,
     },
     {
         "slug": "system_administration",
