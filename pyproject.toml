@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+markers = [
+    "expense_analytics: tests for the expense analytics domain (spend tools, period parsing)",
+    "vendor_management: tests for the vendor management domain (CRUD tools, CSV, write auth, delegation)",
+]
