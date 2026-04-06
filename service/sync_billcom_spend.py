@@ -33,6 +33,13 @@ logger = logging.getLogger(__name__)
 
 JOB_NAME = "billcom-spend-sync"
 
+# Bills arrive in their local currency; convert to USD before storing.
+# Only non-USD currencies we've seen need an entry here.
+_TO_USD: dict[str, float] = {
+    "INR": 1 / 100,
+}
+_DEFAULT_CURRENCY = "USD"
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -92,7 +99,15 @@ def _aggregate_bills(bills: list[dict]) -> dict[tuple[str, str], dict]:
             continue
 
         month = invoice_date[:7]  # "YYYY-MM"
-        amount = float(bill.get("amount", 0) or 0)
+        raw_amount = float(bill.get("amount", 0) or 0)
+        currency = (bill.get("currency") or _DEFAULT_CURRENCY).upper()
+        fx = _TO_USD.get(currency, 1.0)
+        amount = round(raw_amount * fx, 2)
+        if fx != 1.0:
+            logger.debug(
+                "Converted %.2f %s → %.2f USD (bill %s)",
+                raw_amount, currency, amount, bill.get("id", "?"),
+            )
 
         key = (vendor_id, month)
         buckets[key]["totalAmount"] = round(buckets[key]["totalAmount"] + amount, 2)
