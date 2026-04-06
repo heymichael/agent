@@ -1,25 +1,10 @@
 ---
-description: Remind user to branch before any file write on main
+description: PR-based workflow — never commit directly to main
 alwaysApply: true
 ---
 
-# Branch safety reminder
+# Branch Safety
 
-Before the **first file write or edit** in a conversation — regardless of whether a formal plan was discussed — check the current git branch.
+Canonical rule lives in `haderach-platform/.cursor/rules/branch-safety-reminder.mdc`. Read that file for the full policy.
 
-- Trigger point: before the very first Write, StrReplace, or Shell command that modifies files. This includes small changes like updating a task file or adding a single line.
-- If current branch is `main` (or `master`), **stop and ask** before proceeding.
-- Keep the reminder non-blocking: user can explicitly choose to continue on `main`.
-- Ask once per conversation, then proceed with the user's choice without repeating.
-
-This applies to **all repos in the workspace**, including cross-repo writes (e.g., editing a task file in `haderach-platform` from another repo's Cursor window).
-
-## Suggested reminder
-
-"Before I make this change: you're currently on `main` in `<repo>`. Want to create/switch to a feature branch first?"
-
-## Example branch check
-
-```sh
-git branch --show-current
-```
+**Short version:** Never commit or push directly to main. Always create a feature branch, push with `-u`, open a PR, and merge via `gh pr merge`.
