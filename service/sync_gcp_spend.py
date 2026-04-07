@@ -42,6 +42,10 @@ GCP_SOURCE_SYSTEM = "gcp-billing"
 GCP_SOURCE_SYSTEM_ID = "gcp-billing"
 GCP_VENDOR_NAME = "Google Cloud"
 
+# BigQuery billing history starts mid-January 2026, producing misleadingly
+# low partial-month totals. Exclude this month so users never see it.
+_GCP_EXCLUDED_MONTHS = {date(2026, 1, 1)}
+
 BILLING_TABLE = "arcade-ai-prod.arcade_gcp_billing_export.gcp_billing_export_resource_v1_*"
 
 _BILLING_QUERY_TEMPLATE = """
@@ -106,6 +110,8 @@ def _fetch_monthly_costs(months: int | None = None) -> list[dict]:
     for row in rows:
         parts = row.month.split("-")
         month_date = date(int(parts[0]), int(parts[1]), 1)
+        if month_date in _GCP_EXCLUDED_MONTHS:
+            continue
         results.append({
             "date": month_date,
             "category": row.category,
