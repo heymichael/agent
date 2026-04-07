@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "vendor-analytics": {
+      "command": "/Users/michaelmader_1/haderach_org/haderach_site/agent/.venv/bin/python",
+      "args": ["-m", "mcp_server"],
+      "cwd": "/Users/michaelmader_1/haderach_org/haderach_site/agent"
+    }
+  }
+}
