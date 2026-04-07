@@ -5,30 +5,22 @@ alwaysApply: true
 
 # Task Management
 
-All tasks are managed centrally in the **haderach-tasks** repo at `../haderach-tasks/` using [taskmd](https://github.com/driangle/taskmd). This app repo does not have its own tasks directory.
+All tasks are managed centrally in the **haderach-tasks** repo at `../haderach-tasks/tasks/`. This app repo does not have its own tasks directory.
 
 ## Creating a task from this repo
 
-Write the task file to `../haderach-tasks/` with `group: agent` and `phase: agent` in the frontmatter. Follow the taskmd format and conventions defined in `haderach-tasks/.cursor/rules/todo-conventions.mdc`.
+Write the task file to the appropriate `../haderach-tasks/tasks/` subdirectory (`features/`, `improvements/`, `chores/`, `docs/`) with `group: agent` and `phase: agent` in the frontmatter. Follow the conventions defined in `haderach-tasks/.cursor/rules/todo-conventions.mdc`.
 
-Use plain integer IDs with no leading zeros (e.g., `"7"` not `"007"`). Check existing files in both `../haderach-tasks/` and `../haderach-tasks/bugs/` to determine the next available ID (tasks and bugs share one ID space).
+Use plain integer IDs with no leading zeros (e.g., `"7"` not `"007"`). Read `../haderach-tasks/tasks/NEXT_ID` to get the next available ID, then increment the value in that file after creating the task.
 
 If the task is ambiguous about which app it belongs to (e.g., cross-cutting infra work), prompt the user to specify the `group` value (`card`, `stocks`, `home`, `vendors`, `admin`, `agent`, or `platform`).
 
 ## Filing a bug from this repo
 
-Write the bug file to `../haderach-tasks/bugs/` with `group: agent` and `phase: agent`. Follow the format in `haderach-tasks/.cursor/rules/bug-conventions.mdc`. Bugs use the same ID space as tasks.
+Write the bug file to `../haderach-tasks/tasks/bugs/` with `group: agent` and `phase: agent`. Follow the format in `haderach-tasks/.cursor/rules/bug-conventions.mdc`. Bugs use the same ID space as tasks.
 
 ## Reading tasks
 
-When the user references a task by number (e.g., "task 29"), look it up in `../haderach-tasks/` by matching the `id` field or filename prefix (e.g., `29-*.md`). All tasks across all apps live there — the referenced task may belong to any group, not just `agent`.
+When the user references a task by number (e.g., "task 29"), look it up in `../haderach-tasks/tasks/` by matching the `id` field or filename prefix (e.g., `29-*.md`). All tasks across all apps live there — the referenced task may belong to any group, not just `agent`.
 
-To see tasks for this app, read files in `../haderach-tasks/` where the `group` frontmatter field is `agent`. Only read tasks where `status` is `pending` or `in-progress` unless specifically asked about others.
-
-## Task dashboard
-
-To start the taskmd web dashboard, run from the tasks repo:
-
-```sh
-cd ../haderach-tasks && taskmd web start --dir . --open --port 4173
-```
+To see tasks for this app, read files in `../haderach-tasks/tasks/` where the `group` frontmatter field is `agent`. Only read tasks where `status` is `pending` or `in-progress` unless specifically asked about others.

@@ -1263,3 +1263,197 @@ def insert_site_feedback(
                 feedback_text,
             ),
         )
+
+
+# ---------------------------------------------------------------------------
+# Feedback review queries (MCP feedback server)
+# ---------------------------------------------------------------------------
+
+
+def list_agent_feedback(
+    *,
+    uncollected_only: bool = True,
+    limit: int = 20,
+    since: str | None = None,
+) -> list[dict]:
+    """List recent agent feedback with user email resolved."""
+    pool = get_pool()
+    clauses: list[str] = []
+    params: list = []
+    if uncollected_only:
+        clauses.append("af.collected = false")
+    if since:
+        clauses.append("af.created_at >= %s::timestamptz")
+        params.append(since)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit)
+    with pool.connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT af.id, af.created_at, af.signal, af.comment,
+                   af.chat_session_id, af.message_seq, af.collected,
+                   u.email AS user_email
+            FROM agent_feedback af
+            LEFT JOIN users u ON u.id = af.user_id
+            {where}
+            ORDER BY af.created_at DESC
+            LIMIT %s
+            """,
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_site_feedback_entries(
+    *,
+    uncollected_only: bool = True,
+    limit: int = 20,
+    since: str | None = None,
+    app_id: str | None = None,
+) -> list[dict]:
+    """List recent site feedback with user email resolved."""
+    pool = get_pool()
+    clauses: list[str] = []
+    params: list = []
+    if uncollected_only:
+        clauses.append("sf.collected = false")
+    if since:
+        clauses.append("sf.created_at >= %s::timestamptz")
+        params.append(since)
+    if app_id:
+        clauses.append("sf.app_id = %s")
+        params.append(app_id)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit)
+    with pool.connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT sf.id, sf.created_at, sf.app_id, sf.feedback_text,
+                   sf.open_panes, sf.collected,
+                   u.email AS user_email
+            FROM site_feedback sf
+            LEFT JOIN users u ON u.id = sf.user_id
+            {where}
+            ORDER BY sf.created_at DESC
+            LIMIT %s
+            """,
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_agent_feedback_by_id(feedback_id: str) -> dict | None:
+    """Single agent feedback row with user email."""
+    pool = get_pool()
+    with pool.connection() as conn:
+        row = conn.execute(
+            """
+            SELECT af.id, af.created_at, af.signal, af.comment,
+                   af.chat_session_id, af.message_seq, af.collected,
+                   u.email AS user_email
+            FROM agent_feedback af
+            LEFT JOIN users u ON u.id = af.user_id
+            WHERE af.id = %s
+            """,
+            (feedback_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_site_feedback_by_id(feedback_id: str) -> dict | None:
+    """Single site feedback row with user email."""
+    pool = get_pool()
+    with pool.connection() as conn:
+        row = conn.execute(
+            """
+            SELECT sf.id, sf.created_at, sf.app_id, sf.feedback_text,
+                   sf.open_panes, sf.collected,
+                   u.email AS user_email
+            FROM site_feedback sf
+            LEFT JOIN users u ON u.id = sf.user_id
+            WHERE sf.id = %s
+            """,
+            (feedback_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_chat_session_detail(session_id: str) -> dict | None:
+    """Chat session with user email resolved (for MCP feedback server)."""
+    pool = get_pool()
+    with pool.connection() as conn:
+        row = conn.execute(
+            """
+            SELECT cs.id, cs.created_at, cs.modified_at, cs.app_context,
+                   cs.messages, u.email AS user_email
+            FROM chat_sessions cs
+            LEFT JOIN users u ON u.id = cs.user_id
+            WHERE cs.id = %s
+            """,
+            (session_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_chat_sessions_summary(
+    *,
+    limit: int = 20,
+    since: str | None = None,
+    app_context: str | None = None,
+    user_email: str | None = None,
+) -> list[dict]:
+    """List recent chat sessions with message count and user email."""
+    pool = get_pool()
+    clauses: list[str] = []
+    params: list = []
+    if since:
+        clauses.append("cs.created_at >= %s::timestamptz")
+        params.append(since)
+    if app_context:
+        clauses.append("cs.app_context = %s")
+        params.append(app_context)
+    if user_email:
+        clauses.append("u.email = %s")
+        params.append(user_email.strip().lower())
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit)
+    with pool.connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT cs.id, cs.created_at, cs.app_context,
+                   u.email AS user_email,
+                   jsonb_array_length(cs.messages) AS message_count
+            FROM chat_sessions cs
+            LEFT JOIN users u ON u.id = cs.user_id
+            {where}
+            ORDER BY cs.created_at DESC
+            LIMIT %s
+            """,
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_uncollected_feedback() -> dict:
+    """Counts of uncollected agent and site feedback."""
+    pool = get_pool()
+    with pool.connection() as conn:
+        agent = conn.execute(
+            "SELECT count(*) AS cnt FROM agent_feedback WHERE collected = false"
+        ).fetchone()["cnt"]
+        site = conn.execute(
+            "SELECT count(*) AS cnt FROM site_feedback WHERE collected = false"
+        ).fetchone()["cnt"]
+    return {"agent": agent, "site": site}
+
+
+def mark_feedback_collected(feedback_type: str, ids: list[str]) -> int:
+    """Set collected=true on the given feedback IDs. Returns rows updated."""
+    table = "agent_feedback" if feedback_type == "agent" else "site_feedback"
+    pool = get_pool()
+    with pool.connection() as conn:
+        cur = conn.execute(
+            f"UPDATE {table} SET collected = true WHERE id = ANY(%s) AND collected = false",
+            (ids,),
+        )
+        return cur.rowcount
