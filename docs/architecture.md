@@ -406,7 +406,7 @@ levels without restarting the server. The header is ignored in production
 | `GET` | `/health` | None | Health check |
 | `GET` | `/branding` | None | Logo SVG and lockup flag for the app chrome |
 | `GET` | `/qbo/auth` | `admin` | Initiate QuickBooks OAuth2 flow (redirects to Intuit) |
-| `GET` | `/qbo/callback` | None | QuickBooks OAuth2 callback — exchanges code for tokens |
+| `GET` | `/qbo/callback` | None | QuickBooks OAuth2 callback — exchanges code for tokens and renders a human-friendly success/error page |
 | `GET` | `/spend` | Required | Monthly spend by vendor. `vendor_ids` optional — omit to return all accessible vendors |
 | `GET` | `/vendors` | Required | List all vendors with full field set |
 | `DELETE` | `/vendors/{vendor_id}` | Required | Delete a vendor (blocked for synced vendors) |

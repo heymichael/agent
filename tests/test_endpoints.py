@@ -115,6 +115,52 @@ class TestGetCurrentUser:
         assert resp.status_code == 401
 
 
+# ── GET /qbo/callback ─────────────────────────────────────────────────────
+
+class TestQboCallback:
+
+    @patch("service.app.exchange_code_for_tokens")
+    def test_success_renders_html_with_token(self, mock_exchange):
+        mock_exchange.return_value = {
+            "refresh_token": "refresh-token-123",
+            "expires_in": 3600,
+            "x_refresh_token_expires_in": 8640000,
+        }
+        client = TestClient(app)
+
+        resp = client.get("/qbo/callback", params={"code": "abc", "realmId": "12345"})
+
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+        assert "QuickBooks connected" in resp.text
+        assert "refresh-token-123" in resp.text
+        assert "12345" in resp.text
+        assert 'href="/integrations/quickbooks/connect"' in resp.text
+        assert "Return to Haderach" in resp.text
+
+    def test_missing_code_renders_error_html(self):
+        client = TestClient(app)
+
+        resp = client.get("/qbo/callback")
+
+        assert resp.status_code == 400
+        assert "text/html" in resp.headers["content-type"]
+        assert "QuickBooks connection failed" in resp.text
+        assert "Missing authorization code" in resp.text
+        assert "Try connecting again" in resp.text
+
+    def test_intuit_error_renders_error_html(self):
+        client = TestClient(app)
+
+        resp = client.get("/qbo/callback", params={"error": "access_denied"})
+
+        assert resp.status_code == 400
+        assert "text/html" in resp.headers["content-type"]
+        assert "QuickBooks connection failed" in resp.text
+        assert "access_denied" in resp.text
+        assert "Try connecting again" in resp.text
+
+
 # ── GET /vendors ─────────────────────────────────────────────────────────
 
 class TestListVendors:
