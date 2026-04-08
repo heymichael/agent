@@ -178,6 +178,8 @@ protocol overhead). It can also be run as a standalone MCP server via
 | `service/sync_tracker.py` | Step-level execution tracking for sync jobs (writes to `sync_job_log` / `sync_job_step`) |
 | `service/sync_aws_spend.py` | Nightly AWS Cost Explorer → detail rows + summary rollup (with step logging) |
 | `service/sync_gcp_spend.py` | Nightly GCP BigQuery billing export → detail rows + summary rollup (with step logging) |
+| `service/qbo_auth.py` | QuickBooks Online OAuth2 helpers — authorization flow, token exchange, token refresh |
+| `service/sync_qbo_spend.py` | Nightly QBO bills → vendor_spend_detail + vendor_monthly_spend (with step logging) |
 | `mcp_server/tools.py` | Intent-aligned analytics tool handlers — SQL queries for all aggregation |
 | `mcp_server/resolver.py` | Filter validation (`resolve_filter`, `validate_filters`), field-to-SQL column mapping |
 | `mcp_server/period_parser.py` | Deterministic period string parser |
@@ -376,6 +378,7 @@ Adding vendors (`add_vendor`) and generating edit CSVs
   - `VENDOR_BILL_CREDENTIALS` (Bill.com v3 API: userName, password, orgId, devKey)
   - `VENDOR_AWS_BILLING_CREDENTIALS` (AWS CE: access_key_id, secret_access_key, region)
   - `VENDOR_GCP_BILLING_CREDENTIALS` (GCP BigQuery: service account JSON key with BigQuery read access)
+  - `VENDOR_QBO_CREDENTIALS` (QuickBooks Online: client_id, client_secret, realm_id, refresh_token)
 - **Model**: configurable via `OPENAI_MODEL` env var (default: `gpt-4o-mini`)
 
 ## Authentication
@@ -402,6 +405,8 @@ levels without restarting the server. The header is ignored in production
 | `POST` | `/chat` | Required | Chat with the agent (tool-calling loop) |
 | `GET` | `/health` | None | Health check |
 | `GET` | `/branding` | None | Logo SVG and lockup flag for the app chrome |
+| `GET` | `/qbo/auth` | `admin` | Initiate QuickBooks OAuth2 flow (redirects to Intuit) |
+| `GET` | `/qbo/callback` | None | QuickBooks OAuth2 callback — exchanges code for tokens |
 | `GET` | `/spend` | Required | Monthly spend by vendor. `vendor_ids` optional — omit to return all accessible vendors |
 | `GET` | `/vendors` | Required | List all vendors with full field set |
 | `DELETE` | `/vendors/{vendor_id}` | Required | Delete a vendor (blocked for synced vendors) |
