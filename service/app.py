@@ -23,6 +23,7 @@ from .tools import (
 )
 from . import pg_client
 from .auth import get_verified_user
+from .qbo_auth import get_authorization_url, exchange_code_for_tokens
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -338,6 +339,58 @@ def get_branding_config():
     if not row:
         return {"logoSvg": None, "lockupSvg": None, "lockupMode": "none"}
     return row
+
+
+# ---------------------------------------------------------------------------
+# QuickBooks OAuth2
+# ---------------------------------------------------------------------------
+
+
+@app.get("/qbo/auth")
+def qbo_auth_start(caller: dict = Depends(get_verified_user)):
+    """Redirect the user to Intuit's authorization page."""
+    require_admin(caller)
+    from starlette.responses import RedirectResponse
+
+    redirect_uri = str(app.url_path_for("qbo_callback"))
+    base = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
+    absolute_redirect = f"{base}{redirect_uri}"
+    url = get_authorization_url(redirect_uri=absolute_redirect)
+    return RedirectResponse(url)
+
+
+@app.get("/qbo/callback")
+def qbo_callback(code: str = "", realmId: str = "", state: str = "", error: str = ""):
+    """Handle the OAuth2 callback from Intuit. Exchanges the code for tokens."""
+    if error:
+        raise HTTPException(status_code=400, detail=f"OAuth error from Intuit: {error}")
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing authorization code")
+
+    redirect_uri = str(app.url_path_for("qbo_callback"))
+    base = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
+    absolute_redirect = f"{base}{redirect_uri}"
+
+    token_data = exchange_code_for_tokens(code=code, redirect_uri=absolute_redirect)
+    refresh_token = token_data.get("refresh_token", "")
+    expires_in = token_data.get("expires_in")
+    refresh_expires_in = token_data.get("x_refresh_token_expires_in")
+
+    logger.info(
+        "QBO OAuth complete — realmId=%s, access expires in %ss, refresh expires in %ss",
+        realmId, expires_in, refresh_expires_in,
+    )
+
+    return {
+        "ok": True,
+        "realm_id": realmId,
+        "refresh_token": refresh_token,
+        "message": (
+            "Copy the refresh_token into your VENDOR_QBO_CREDENTIALS secret "
+            "(and update realm_id if it changed). "
+            "This page will not show the token again."
+        ),
+    }
 
 
 @app.delete("/vendors/{vendor_id}")
