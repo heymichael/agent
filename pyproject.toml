@@ -2,4 +2,5 @@
 markers = [
     "expense_analytics: tests for the expense analytics domain (spend tools, period parsing)",
     "vendor_management: tests for the vendor management domain (CRUD tools, CSV, write auth, delegation)",
+    "llm_live: live LLM tests that call the real OpenAI API (slow, costs money, needs OPENAI_API_KEY)",
 ]

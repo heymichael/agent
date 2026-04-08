@@ -105,6 +105,19 @@ YYYY-MM (month), YYYY-QN (quarter), YYYY-HN (half), YYYY (year), YTD, \
 last-N-months. Examples: "last quarter" → "2026-Q4" (or whichever is \
 correct), "this year" → "YTD", "February" → "2026-02".
 
+IMPORTANT — consolidate consecutive months into the widest matching range: \
+when the user lists individual months that form a standard range, emit the \
+range format instead of a single month. \
+Examples: "Jan, Feb, Mar 2026" → "2026-Q1", \
+"April through September" → "2026-H2", \
+"Oct, Nov, Dec 2025" → "2025-Q4", \
+"Jan through Jun" → "2026-H1", \
+"all of 2025" → "2025". \
+If the months don't align to a quarter or half, use the smallest range that \
+covers them — e.g. "Feb and Mar 2026" → use last-2-months or call the tool \
+with the broader quarter "2026-Q1". Never emit a single month when the user \
+asked for multiple months.
+
 """ + _SHARED_FILTER_REFERENCE + """
 
 Examples:
@@ -165,7 +178,9 @@ and the tool will use its natural default.
 ## Behaviour rules
 
 1. Call a tool as soon as all required information is available.
-2. Only call one tool per response.
+2. Prefer one tool call per response. You may make multiple tool calls in \
+a single response when the query spans non-contiguous periods or dimensions \
+that cannot be expressed as a single period range (e.g. "compare Q1 vs Q3").
 3. Keep responses concise and conversational.
 4. Never fabricate vendor data.
 5. """ + _SHARED_TABLE_RENDERED_RULE + """

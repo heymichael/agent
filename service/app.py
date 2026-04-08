@@ -264,8 +264,13 @@ def run_agent_loop(
                     downloads = [d for d in downloads if d.filename != csv_filename]
                     downloads.append(Download(filename=csv_filename, content=csv_content))
 
+                tables_list = parsed.pop("tables", None)
                 table_payload = parsed.pop("table", None)
-                if table_payload:
+                if tables_list:
+                    for tp in tables_list:
+                        tables.append(TablePayload(**tp))
+                    parsed["_table_rendered"] = True
+                elif table_payload:
                     tables.append(TablePayload(**table_payload))
                     parsed["_table_rendered"] = True
 
@@ -653,14 +658,19 @@ def _execute_ask_expense_agent(args: dict, caller_email: str = "") -> str:
         "reply": inner_result.reply,
     }
     if inner_result.tables:
-        t = inner_result.tables[0]
-        response["table"] = {
-            "metric": t.metric,
-            "columns": t.columns,
-            "rows": t.rows,
-            "filename": t.filename,
-            "filters": t.filters,
-        }
+        serialized = [
+            {
+                "metric": t.metric,
+                "columns": t.columns,
+                "rows": t.rows,
+                "filename": t.filename,
+                "filters": t.filters,
+            }
+            for t in inner_result.tables
+        ]
+        response["table"] = serialized[0]
+        if len(serialized) > 1:
+            response["tables"] = serialized
     return json.dumps(response)
 
 
