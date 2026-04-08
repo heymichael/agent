@@ -1,6 +1,7 @@
 """FastAPI agent service — chat endpoint with OpenAI tool-calling."""
 
 import contextvars
+import html
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ from datetime import date
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv(interpolate=False)
@@ -361,17 +363,159 @@ def qbo_auth_start(caller: dict = Depends(get_verified_user)):
 
 @app.get("/qbo/callback")
 def qbo_callback(code: str = "", realmId: str = "", state: str = "", error: str = ""):
-    """Handle the OAuth2 callback from Intuit. Exchanges the code for tokens."""
+    """Handle the OAuth2 callback from Intuit and render a friendly result page."""
+
+    def _render_result_page(
+        *,
+        title: str,
+        message: str,
+        status_code: int,
+        refresh_token: str = "",
+        realm_id: str = "",
+        cta_href: str = "/integrations/quickbooks/connect",
+        cta_label: str = "Return to Haderach",
+    ) -> HTMLResponse:
+        safe_title = html.escape(title)
+        safe_message = html.escape(message)
+        safe_realm_id = html.escape(realm_id)
+        safe_refresh = html.escape(refresh_token)
+        safe_cta_href = html.escape(cta_href)
+        safe_cta_label = html.escape(cta_label)
+        token_section = (
+            "<p><strong>Refresh token (copy once):</strong></p>"
+            f"<textarea readonly>{safe_refresh}</textarea>"
+            "<p class=\"muted\">"
+            "Save this in Secret Manager under VENDOR_QBO_CREDENTIALS "
+            "as refresh_token. QuickBooks may rotate this token."
+            "</p>"
+        ) if safe_refresh else ""
+        realm_section = (
+            f"<p><strong>realm_id:</strong> <code>{safe_realm_id}</code></p>"
+            if safe_realm_id else ""
+        )
+        body = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{safe_title}</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: #0b0d10;
+      color: #f5f7fa;
+    }}
+    .wrap {{
+      max-width: 720px;
+      margin: 8vh auto;
+      padding: 0 16px;
+    }}
+    .card {{
+      background: #141922;
+      border: 1px solid #2a3140;
+      border-radius: 12px;
+      padding: 20px;
+    }}
+    h1 {{
+      margin: 0 0 12px;
+      font-size: 1.5rem;
+    }}
+    p {{
+      margin: 10px 0;
+      line-height: 1.45;
+    }}
+    textarea {{
+      width: 100%;
+      min-height: 130px;
+      box-sizing: border-box;
+      border-radius: 8px;
+      border: 1px solid #3a4559;
+      background: #0f141d;
+      color: #f5f7fa;
+      padding: 10px;
+      font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }}
+    .muted {{
+      color: #aab2c2;
+      font-size: 0.95rem;
+    }}
+    code {{
+      font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #0f141d;
+      border: 1px solid #3a4559;
+      border-radius: 6px;
+      padding: 2px 6px;
+    }}
+    a {{
+      color: #8cc5ff;
+    }}
+    .actions {{
+      margin-top: 16px;
+    }}
+    .button {{
+      display: inline-block;
+      background: #8cc5ff;
+      color: #08111f;
+      text-decoration: none;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-weight: 600;
+    }}
+    .button:hover {{
+      background: #a6d4ff;
+    }}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <h1>{safe_title}</h1>
+      <p>{safe_message}</p>
+      {realm_section}
+      {token_section}
+      <p class="muted">
+        You can close this tab, or continue in Haderach.
+      </p>
+      <div class="actions">
+        <a class="button" href="{safe_cta_href}">{safe_cta_label}</a>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
+"""
+        return HTMLResponse(content=body, status_code=status_code)
+
     if error:
-        raise HTTPException(status_code=400, detail=f"OAuth error from Intuit: {error}")
+        return _render_result_page(
+            title="QuickBooks connection failed",
+            message=f"Intuit returned an OAuth error: {error}",
+            status_code=400,
+            cta_label="Try connecting again",
+        )
     if not code:
-        raise HTTPException(status_code=400, detail="Missing authorization code")
+        return _render_result_page(
+            title="QuickBooks connection failed",
+            message="Missing authorization code in callback URL.",
+            status_code=400,
+            cta_label="Try connecting again",
+        )
 
     redirect_uri = str(app.url_path_for("qbo_callback"))
     base = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
     absolute_redirect = f"{base}{redirect_uri}"
 
-    token_data = exchange_code_for_tokens(code=code, redirect_uri=absolute_redirect)
+    try:
+        token_data = exchange_code_for_tokens(code=code, redirect_uri=absolute_redirect)
+    except Exception as exc:
+        logger.exception("QBO OAuth token exchange failed")
+        return _render_result_page(
+            title="QuickBooks connection failed",
+            message=f"Token exchange failed: {exc}",
+            status_code=502,
+            cta_label="Try connecting again",
+        )
     refresh_token = token_data.get("refresh_token", "")
     expires_in = token_data.get("expires_in")
     refresh_expires_in = token_data.get("x_refresh_token_expires_in")
@@ -381,16 +525,16 @@ def qbo_callback(code: str = "", realmId: str = "", state: str = "", error: str 
         realmId, expires_in, refresh_expires_in,
     )
 
-    return {
-        "ok": True,
-        "realm_id": realmId,
-        "refresh_token": refresh_token,
-        "message": (
-            "Copy the refresh_token into your VENDOR_QBO_CREDENTIALS secret "
-            "(and update realm_id if it changed). "
-            "This page will not show the token again."
+    return _render_result_page(
+        title="QuickBooks connected",
+        message=(
+            "OAuth completed successfully. Copy the refresh token below and "
+            "save it in VENDOR_QBO_CREDENTIALS (and update realm_id if needed)."
         ),
-    }
+        status_code=200,
+        refresh_token=refresh_token,
+        realm_id=realmId,
+    )
 
 
 @app.delete("/vendors/{vendor_id}")
