@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -24,13 +25,40 @@ from .tools import (
     VENDOR_TOOL_DEFINITIONS, VENDOR_TOOL_HANDLERS,
 )
 from . import pg_client
-from .auth import get_verified_user
+from .auth import get_verified_user, warm_firebase_public_keys
 from .qbo_auth import get_authorization_url, exchange_code_for_tokens
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Haderach Agent Service", root_path="/agent/api")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    try:
+        pg_client.warm_connection_pool()
+        logger.info("Postgres pool warmed")
+    except Exception:
+        logger.exception("Failed to warm Postgres pool at startup")
+
+    try:
+        get_openai_client()
+        logger.info("OpenAI client initialized")
+    except Exception:
+        logger.exception("Failed to initialize OpenAI client at startup")
+
+    try:
+        warm_firebase_public_keys()
+        logger.info("Firebase public keys warmed")
+    except Exception:
+        logger.exception("Failed to warm Firebase public keys at startup")
+
+    try:
+        yield
+    finally:
+        pg_client.close_pool()
+
+
+app = FastAPI(title="Haderach Agent Service", root_path="/agent/api", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
