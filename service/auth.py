@@ -2,6 +2,7 @@
 
 import logging
 import os
+from urllib.request import urlopen
 
 import firebase_admin
 from firebase_admin import auth as firebase_auth
@@ -10,9 +11,21 @@ from fastapi import HTTPException, Request
 logger = logging.getLogger(__name__)
 
 _DEV_AUTH_EMAIL = os.environ.get("DEV_AUTH_EMAIL")
+_FIREBASE_CERT_URL = (
+    "https://www.googleapis.com/robot/v1/metadata/x509/"
+    "securetoken@system.gserviceaccount.com"
+)
 
 if not _DEV_AUTH_EMAIL and not firebase_admin._apps:
     firebase_admin.initialize_app()
+
+
+def warm_firebase_public_keys(timeout: float = 5.0) -> None:
+    """Prime the network path Firebase token verification depends on."""
+    if _DEV_AUTH_EMAIL:
+        return
+    with urlopen(_FIREBASE_CERT_URL, timeout=timeout) as response:
+        response.read()
 
 
 def get_verified_user(request: Request) -> dict:

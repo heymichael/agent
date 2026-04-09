@@ -25,14 +25,27 @@ def get_pool() -> ConnectionPool:
         conninfo = os.environ["DATABASE_URL"]
         _pool = ConnectionPool(
             conninfo,
-            min_size=1,
+            min_size=2,
             max_size=10,
-            max_idle=300,
+            max_idle=900,
             reconnect_timeout=60,
             check=ConnectionPool.check_connection,
             kwargs={"row_factory": dict_row},
         )
     return _pool
+
+
+def warm_connection_pool() -> None:
+    """Block until the shared Postgres pool has established its warm connections."""
+    get_pool().wait()
+
+
+def close_pool() -> None:
+    """Close the shared Postgres pool during application shutdown."""
+    global _pool
+    if _pool is not None:
+        _pool.close()
+        _pool = None
 
 
 def _now() -> datetime:
@@ -574,56 +587,24 @@ def _user_summary(row: dict, roles: list[str] | None = None,
     }
 
 
-def _load_user_roles(conn, user_id: str) -> list[str]:
-    rows = conn.execute(
-        "SELECT r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = %s",
-        (user_id,),
-    ).fetchall()
-    return [r["name"] for r in rows]
+_USER_CONTEXT_SQL = "SELECT * FROM user_context WHERE email = %s"
 
 
-def _load_user_allowed_departments(conn, user_id: str) -> list[str]:
-    rows = conn.execute(
-        "SELECT d.name FROM user_allowed_departments uad JOIN departments d ON d.id = uad.department_id WHERE uad.user_id = %s",
-        (user_id,),
-    ).fetchall()
-    return [r["name"] for r in rows]
+def _get_user_context_row(conn, email: str) -> dict | None:
+    return conn.execute(_USER_CONTEXT_SQL, (email,)).fetchone()
 
 
-def _load_user_allowed_vendors(conn, user_id: str) -> list[str]:
-    rows = conn.execute(
-        "SELECT vendor_id FROM user_allowed_vendors WHERE user_id = %s",
-        (user_id,),
-    ).fetchall()
-    return [str(r["vendor_id"]) for r in rows]
-
-
-def _load_user_denied_vendors(conn, user_id: str) -> list[str]:
-    rows = conn.execute(
-        "SELECT vendor_id FROM user_denied_vendors WHERE user_id = %s",
-        (user_id,),
-    ).fetchall()
-    return [str(r["vendor_id"]) for r in rows]
-
-
-def _get_full_user(conn, user_id: str, row: dict) -> dict:
-    """Build full user summary with all relationship data."""
-    roles = _load_user_roles(conn, user_id)
-    allowed_depts = _load_user_allowed_departments(conn, user_id)
-    allowed_vendors = _load_user_allowed_vendors(conn, user_id)
-    denied_vendors = _load_user_denied_vendors(conn, user_id)
-    user = _user_summary(row, roles, allowed_depts, allowed_vendors, denied_vendors)
-
-    if allowed_vendors:
-        resolved = []
-        for vid in allowed_vendors:
-            v = get_vendor(vid)
-            resolved.append({"id": vid, "name": v["name"] if v else vid})
-        user["allowedVendors"] = resolved
-    else:
-        user["allowedVendors"] = []
-
-    return user
+def _context_row_to_user(row: dict) -> dict:
+    return {
+        **_user_summary(
+            row,
+            list(row.get("role_names") or []),
+            list(row.get("allowed_departments") or []),
+            list(row.get("allowed_vendor_ids") or []),
+            list(row.get("denied_vendor_ids") or []),
+        ),
+        "allowedVendors": row.get("allowed_vendors") or [],
+    }
 
 
 def list_users(roles: list[str] | None = None) -> list[dict]:
@@ -631,43 +612,28 @@ def list_users(roles: list[str] | None = None) -> list[dict]:
     pool = get_pool()
     with pool.connection() as conn:
         if not roles:
-            rows = conn.execute("SELECT * FROM users ORDER BY email").fetchall()
+            rows = conn.execute("SELECT * FROM user_context ORDER BY email").fetchall()
         else:
             rows = conn.execute(
-                """SELECT DISTINCT u.* FROM users u
-                   JOIN user_roles ur ON ur.user_id = u.id
-                   JOIN roles r ON r.id = ur.role_id
-                   WHERE r.name = ANY(%s)
-                   ORDER BY u.email""",
+                "SELECT * FROM user_context WHERE role_names && %s ORDER BY email",
                 (roles,),
             ).fetchall()
-
-        results = []
-        for row in rows:
-            user_id = str(row["id"])
-            user_roles = _load_user_roles(conn, user_id)
-            allowed_depts = _load_user_allowed_departments(conn, user_id)
-            allowed_vendors = _load_user_allowed_vendors(conn, user_id)
-            denied_vendors = _load_user_denied_vendors(conn, user_id)
-            results.append(_user_summary(row, user_roles, allowed_depts, allowed_vendors, denied_vendors))
-        return results
+        return [_context_row_to_user(row) for row in rows]
 
 
 def get_user(email: str) -> dict | None:
     """Fetch a single user by email."""
     pool = get_pool()
-    normalized = email.strip().lower()
+    normalized = email.strip()
     with pool.connection() as conn:
-        row = conn.execute("SELECT * FROM users WHERE email = %s", (normalized,)).fetchone()
-        if not row:
-            return None
-        return _get_full_user(conn, str(row["id"]), row)
+        row = _get_user_context_row(conn, normalized)
+    return _context_row_to_user(row) if row else None
 
 
 def create_user(email: str, first_name: str, last_name: str, roles: list[str]) -> dict:
     """Create a new user with roles. Raises ValueError if user already exists."""
     pool = get_pool()
-    normalized = email.strip().lower()
+    normalized = email.strip()
     with pool.connection() as conn:
         existing = conn.execute("SELECT id FROM users WHERE email = %s", (normalized,)).fetchone()
         if existing:
@@ -688,8 +654,8 @@ def create_user(email: str, first_name: str, last_name: str, roles: list[str]) -
                     (user_id, role_name),
                 )
 
-        user_roles = _load_user_roles(conn, user_id)
-        return _user_summary(row, user_roles)
+        created = _get_user_context_row(conn, normalized)
+        return _context_row_to_user(created)
 
 
 def update_user(
@@ -703,7 +669,7 @@ def update_user(
 ) -> dict:
     """Update a user's fields. Only non-None arguments are changed."""
     pool = get_pool()
-    normalized = email.strip().lower()
+    normalized = email.strip()
     with pool.connection() as conn:
         row = conn.execute("SELECT * FROM users WHERE email = %s", (normalized,)).fetchone()
         if not row:
@@ -758,14 +724,14 @@ def update_user(
                     (user_id, vid),
                 )
 
-        updated_row = conn.execute("SELECT * FROM users WHERE id = %s", (user_id,)).fetchone()
-        return _get_full_user(conn, user_id, updated_row)
+        updated = _get_user_context_row(conn, normalized)
+        return _context_row_to_user(updated)
 
 
 def delete_user(email: str) -> bool:
     """Delete a user. Returns True if deleted."""
     pool = get_pool()
-    normalized = email.strip().lower()
+    normalized = email.strip()
     with pool.connection() as conn:
         cur = conn.execute("DELETE FROM users WHERE email = %s RETURNING id", (normalized,))
         return cur.fetchone() is not None
@@ -778,18 +744,17 @@ def get_user_access_context(email: str) -> dict | None:
     denied_vendor_ids}.
     """
     pool = get_pool()
-    normalized = email.strip().lower()
+    normalized = email.strip()
     with pool.connection() as conn:
-        row = conn.execute("SELECT * FROM users WHERE email = %s", (normalized,)).fetchone()
+        row = _get_user_context_row(conn, normalized)
         if not row:
             return None
-        user_id = str(row["id"])
         return {
-            "user_id": user_id,
-            "roles": _load_user_roles(conn, user_id),
-            "allowed_departments": _load_user_allowed_departments(conn, user_id),
-            "allowed_vendor_ids": _load_user_allowed_vendors(conn, user_id),
-            "denied_vendor_ids": _load_user_denied_vendors(conn, user_id),
+            "user_id": str(row["id"]),
+            "roles": list(row.get("role_names") or []),
+            "allowed_departments": list(row.get("allowed_departments") or []),
+            "allowed_vendor_ids": list(row.get("allowed_vendor_ids") or []),
+            "denied_vendor_ids": list(row.get("denied_vendor_ids") or []),
         }
 
 
@@ -1180,7 +1145,7 @@ def get_user_id_by_email(email: str) -> str | None:
     pool = get_pool()
     with pool.connection() as conn:
         row = conn.execute(
-            "SELECT id FROM users WHERE email = %s", (email.strip().lower(),)
+            "SELECT id FROM users WHERE email = %s", (email.strip(),)
         ).fetchone()
     return str(row["id"]) if row else None
 
@@ -1414,7 +1379,7 @@ def list_chat_sessions_summary(
         params.append(app_context)
     if user_email:
         clauses.append("u.email = %s")
-        params.append(user_email.strip().lower())
+        params.append(user_email.strip())
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     params.append(limit)
     with pool.connection() as conn:

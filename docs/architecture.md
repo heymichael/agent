@@ -372,6 +372,9 @@ Adding vendors (`add_vendor`) and generating edit CSVs
 - **Cloud Run** (`agent-api`, us-central1)
 - **Cloud SQL** (`haderach-main`, Postgres 15, us-central1)
 - **Image**: `us-central1-docker.pkg.dev/haderach-ai/haderach-apps/agent-api`
+- **Startup warmup**: FastAPI lifespan pre-warms the Postgres pool, initializes the
+  OpenAI client, and hits the Firebase public-cert endpoint at boot so the first
+  authenticated request after idle is not forced to pay all setup costs at once
 - **Secrets** (from Secret Manager):
   - `OPENAI_API_KEY`
   - `DATABASE_URL` (auto-managed by Terraform)
@@ -389,6 +392,9 @@ verifies the token via Firebase Admin SDK and extracts the caller's email. Reque
 without a valid token are rejected with HTTP 401.
 
 The `/health` endpoint is unauthenticated.
+
+The Postgres pool is configured with `min_size=2` and `max_idle=900` to keep warm
+connections available longer between bursts of traffic.
 
 ### Dev-mode identity override
 
