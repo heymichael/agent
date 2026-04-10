@@ -119,6 +119,13 @@ class TestGetCurrentUser:
 
 class TestQboCallback:
 
+    STATE = "test-csrf-state-token"
+
+    def _client_with_state(self):
+        client = TestClient(app)
+        client.cookies.set("qbo_oauth_state", self.STATE)
+        return client
+
     @patch("service.app.exchange_code_for_tokens")
     def test_success_renders_html_with_token(self, mock_exchange):
         mock_exchange.return_value = {
@@ -126,9 +133,11 @@ class TestQboCallback:
             "expires_in": 3600,
             "x_refresh_token_expires_in": 8640000,
         }
-        client = TestClient(app)
+        client = self._client_with_state()
 
-        resp = client.get("/qbo/callback", params={"code": "abc", "realmId": "12345"})
+        resp = client.get("/qbo/callback", params={
+            "code": "abc", "realmId": "12345", "state": self.STATE,
+        })
 
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
@@ -159,6 +168,37 @@ class TestQboCallback:
         assert "QuickBooks connection failed" in resp.text
         assert "access_denied" in resp.text
         assert "Try connecting again" in resp.text
+
+    def test_csrf_mismatch_returns_403(self):
+        client = self._client_with_state()
+
+        resp = client.get("/qbo/callback", params={
+            "code": "abc", "realmId": "12345", "state": "wrong-state",
+        })
+
+        assert resp.status_code == 403
+        assert "CSRF validation failed" in resp.text
+        assert "Try connecting again" in resp.text
+
+    def test_csrf_missing_cookie_returns_403(self):
+        client = TestClient(app)
+
+        resp = client.get("/qbo/callback", params={
+            "code": "abc", "realmId": "12345", "state": "some-state",
+        })
+
+        assert resp.status_code == 403
+        assert "CSRF validation failed" in resp.text
+
+    def test_csrf_missing_state_param_returns_403(self):
+        client = self._client_with_state()
+
+        resp = client.get("/qbo/callback", params={
+            "code": "abc", "realmId": "12345",
+        })
+
+        assert resp.status_code == 403
+        assert "CSRF validation failed" in resp.text
 
 
 # ── GET /vendors ─────────────────────────────────────────────────────────
@@ -635,3 +675,115 @@ class TestListContractorAccess:
         resp = client.get("/vendors/v_alpha/access")
 
         assert resp.status_code == 403
+
+
+# ── QBO auth error handling ──────────────────────────────────────────────
+
+class TestQboAuthErrors:
+
+    @patch("service.qbo_auth.requests.post")
+    @patch("service.qbo_auth._load_creds")
+    def test_refresh_invalid_grant_raises_qbo_auth_error(self, mock_creds, mock_post):
+        from service.qbo_auth import refresh_access_token, QBOAuthError
+
+        mock_creds.return_value = {
+            "client_id": "id", "client_secret": "secret", "refresh_token": "old-token",
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 400
+        mock_resp.json.return_value = {
+            "error": "invalid_grant",
+            "error_description": "Token expired",
+        }
+        mock_resp.text = '{"error":"invalid_grant"}'
+        mock_post.return_value = mock_resp
+
+        with pytest.raises(QBOAuthError) as exc_info:
+            refresh_access_token()
+
+        assert exc_info.value.error_code == "invalid_grant"
+        assert "Re-authorize" in str(exc_info.value)
+
+    @patch("service.qbo_auth.requests.post")
+    @patch("service.qbo_auth._load_creds")
+    def test_refresh_unknown_error_raises_qbo_auth_error(self, mock_creds, mock_post):
+        from service.qbo_auth import refresh_access_token, QBOAuthError
+
+        mock_creds.return_value = {
+            "client_id": "id", "client_secret": "secret", "refresh_token": "old-token",
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.json.return_value = {"error": "server_error"}
+        mock_resp.text = '{"error":"server_error"}'
+        mock_post.return_value = mock_resp
+
+        with pytest.raises(QBOAuthError) as exc_info:
+            refresh_access_token()
+
+        assert exc_info.value.error_code == "server_error"
+        assert "500" in str(exc_info.value)
+
+    def test_missing_refresh_token_raises_qbo_auth_error(self):
+        from service.qbo_auth import refresh_access_token, QBOAuthError
+
+        with patch("service.qbo_auth._load_creds", return_value={"client_id": "id", "client_secret": "s"}):
+            with pytest.raises(QBOAuthError) as exc_info:
+                refresh_access_token()
+
+        assert exc_info.value.error_code == "missing_refresh_token"
+
+    @patch("service.qbo_auth.requests.post")
+    @patch("service.qbo_auth._load_creds")
+    def test_exchange_invalid_grant_raises_qbo_auth_error(self, mock_creds, mock_post):
+        from service.qbo_auth import exchange_code_for_tokens, QBOAuthError
+
+        mock_creds.return_value = {"client_id": "id", "client_secret": "secret"}
+        mock_resp = MagicMock()
+        mock_resp.status_code = 400
+        mock_resp.json.return_value = {
+            "error": "invalid_grant",
+            "error_description": "Code expired",
+        }
+        mock_resp.text = '{"error":"invalid_grant"}'
+        mock_post.return_value = mock_resp
+
+        with pytest.raises(QBOAuthError) as exc_info:
+            exchange_code_for_tokens("bad-code", "http://localhost/cb")
+
+        assert exc_info.value.error_code == "invalid_grant"
+
+
+# ── QBO discovery document ───────────────────────────────────────────────
+
+class TestQboDiscovery:
+
+    def setup_method(self):
+        import service.qbo_auth as mod
+        self._mod = mod
+        mod._discovery_cache.clear()
+
+    @patch("service.qbo_auth.requests.get")
+    def test_discovery_fetches_and_caches(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "authorization_endpoint": "https://auth.example.com/oauth2",
+            "token_endpoint": "https://token.example.com/bearer",
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        assert self._mod._get_auth_url() == "https://auth.example.com/oauth2"
+        assert self._mod._get_token_url() == "https://token.example.com/bearer"
+
+        # Second call should use cache, not fetch again
+        self._mod._get_auth_url()
+        assert mock_get.call_count == 1
+
+    @patch("service.qbo_auth.requests.get")
+    def test_discovery_falls_back_on_error(self, mock_get):
+        mock_get.side_effect = Exception("network error")
+
+        assert self._mod._get_auth_url() == self._mod._FALLBACK_AUTH_URL
+        assert self._mod._get_token_url() == self._mod._FALLBACK_TOKEN_URL
