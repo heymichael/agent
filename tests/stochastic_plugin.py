@@ -58,12 +58,30 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="P",
         help="Minimum pass rate (0.0–1.0) to accept a test (default: 0.9).",
     )
+    group.addoption(
+        "--run-name",
+        default=None,
+        metavar="NAME",
+        help="Human-readable label for this test run (e.g. 'vendor-baseline').",
+    )
 
 
 # ── Per-session accumulator ─────────────────────────────────────────────
 
 
 _stochastic_results: list[dict] = []
+_run_name: str | None = None
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    global _run_name
+    _run_name = session.config.getoption("run_name", default=None)
+
+
+def pytest_json_modifyreport(json_report: dict) -> None:
+    """Inject run_name into the top-level json-report dict."""
+    if _run_name:
+        json_report["run_name"] = _run_name
 
 
 # ── Protocol override ───────────────────────────────────────────────────
@@ -135,6 +153,8 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None):
     }
     _stochastic_results.append({"nodeid": item.nodeid, **stochastic_meta})
 
+    item.user_properties.append(("stochastic", stochastic_meta))
+
     for report in last_reports:
         if report.when == "call":
             report.user_properties.append(("stochastic", stochastic_meta))
@@ -148,6 +168,8 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None):
                     f"({pass_rate:.0%}), need {required_consecutive} consecutive "
                     f"or {pass_floor:.0%} floor"
                 )
+        if report.when == "teardown":
+            report.user_properties.append(("stochastic", stochastic_meta))
         item.ihook.pytest_runtest_logreport(report=report)
 
     return True  # we handled the protocol

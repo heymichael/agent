@@ -24,21 +24,8 @@ scenarios("../features/write_access_control.feature")
 
 
 @when(
-    parsers.parse(
-        'the scoped user uploads a CSV changing purpose for "{vendor}"'
-    ),
-    target_fixture="context",
-)
-def scoped_csv_single(acl_vendor_ids, vendor):
-    vid = acl_vendor_ids[vendor]
-    csv = make_csv(["id", "purpose"], [[vid, "Updated purpose"]])
-    result = chat_with_csv(csv, prompt="Process this vendor CSV", headers=SCOPED_HEADERS)
-    return {"result": result}
-
-
-@when(
-    parsers.parse(
-        'the scoped user uploads a CSV changing purpose for "{vendor_a}" and "{vendor_b}"'
+    parsers.re(
+        r'the scoped user uploads a CSV changing purpose for "(?P<vendor_a>[^"]+)" and "(?P<vendor_b>[^"]+)"'
     ),
     target_fixture="context",
 )
@@ -50,5 +37,18 @@ def scoped_csv_mixed(acl_vendor_ids, vendor_a, vendor_b):
             [acl_vendor_ids[vendor_b], "Should be blocked"],
         ],
     )
+    result = chat_with_csv(csv, prompt="Process this vendor CSV", headers=SCOPED_HEADERS)
+    return {"result": result}
+
+
+@when(
+    parsers.re(
+        r'the scoped user uploads a CSV changing purpose for "(?P<vendor>[^"]+)"$'
+    ),
+    target_fixture="context",
+)
+def scoped_csv_single(acl_vendor_ids, vendor):
+    vid = acl_vendor_ids[vendor]
+    csv = make_csv(["id", "purpose"], [[vid, "Updated purpose"]])
     result = chat_with_csv(csv, prompt="Process this vendor CSV", headers=SCOPED_HEADERS)
     return {"result": result}

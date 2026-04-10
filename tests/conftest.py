@@ -72,14 +72,18 @@ def _reset_cost_tracker():
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
-    """Inject per-test cost metadata into json-report."""
+    """Inject per-test cost metadata into json-report.
+
+    Writes to both report.user_properties (for stochastic plugin to read
+    per-iteration cost) and item.user_properties (so pytest-json-report
+    captures it on the teardown report).
+    """
     outcome = yield
     report = outcome.get_result()
     if report.when == "call" and _current_test_usage:
         cost_data = _sum_test_cost()
-        if not hasattr(report, "user_properties"):
-            report.user_properties = []
         report.user_properties.append(("cost", cost_data))
+        item.user_properties.append(("cost", cost_data))
 
 
 def _get_db_pool():

@@ -9,6 +9,8 @@ over stdio transport for consumption by Cursor or any MCP-compatible client.
 
 from __future__ import annotations
 
+import asyncio
+
 from mcp.server.fastmcp import FastMCP
 
 from .tools import (
@@ -59,10 +61,13 @@ async def scenario_coverage(
     module: str | None = None,
     capability: str | None = None,
     tool: str | None = None,
+    run: str | None = None,
+    app: str = "agent",
 ) -> dict:
-    """Show pass/fail/cost status for BDD scenarios by joining feature files against the latest test report.
+    """Show pass/fail/cost status for BDD scenarios by joining feature files against a test report.
 
-    Requires a .report.json from a prior test run (pytest --json-report).
+    Uses the latest local report by default. Pass ``run`` to load a
+    historical run from GCS first (overwrites .report.json).
 
     Args:
         agent: Filter by agent.
@@ -70,18 +75,41 @@ async def scenario_coverage(
         module: Filter by module.
         capability: Filter by capability.
         tool: Filter by tool.
+        run: Historical run to fetch (filename, stem, or substring from
+             test_history). Omit to use the latest local report.
+        app: Application name for GCS lookup (default "agent").
     """
+    if run:
+        return await asyncio.to_thread(
+            handle_scenario_coverage, agent, domain, module, capability, tool, run, app,
+        )
     return handle_scenario_coverage(agent, domain, module, capability, tool)
 
 
 @mcp.tool()
-async def test_summary() -> dict:
-    """Aggregate summary from the latest test report.
+async def test_summary(
+    group_by: str = "tool",
+    run: str | None = None,
+    app: str = "agent",
+) -> dict:
+    """Grouped stochastic test summary from a test report.
 
-    Returns total/passed/failed/skipped counts, duration, cost breakdown,
-    and number of defined BDD scenarios.
+    Groups tests by the chosen tag dimension and returns per-group rows
+    with pass rates, cost, and duration, plus a TOTAL row.
+
+    Uses the latest local report by default. Pass ``run`` to load a
+    historical run from GCS first (overwrites .report.json).
+
+    Args:
+        group_by: Tag dimension to group by. One of: "tool", "domain",
+                  "module", "capability", "agent" (default "tool").
+        run: Historical run to fetch (filename, stem, or substring from
+             test_history). Omit to use the latest local report.
+        app: Application name for GCS lookup (default "agent").
     """
-    return handle_test_summary()
+    if run:
+        return await asyncio.to_thread(handle_test_summary, group_by, run, app)
+    return handle_test_summary(group_by)
 
 
 @mcp.tool()
@@ -136,6 +164,7 @@ async def run_scenarios(
     tool: str | None = None,
     stochastic: bool = False,
     runs: int | None = None,
+    run_name: str | None = None,
 ) -> dict:
     """Run BDD test scenarios matching the given filters.
 
@@ -151,14 +180,19 @@ async def run_scenarios(
         tool: Filter by tool.
         stochastic: Enable stochastic mode (re-run @llm_live tests).
         runs: Number of stochastic runs (default 10).
+        run_name: Human-readable label for this run (e.g. "vendor-baseline").
     """
-    return handle_run_scenarios(agent, domain, module, capability, tool, stochastic, runs)
+    return await asyncio.to_thread(
+        handle_run_scenarios,
+        agent, domain, module, capability, tool, stochastic, runs, run_name,
+    )
 
 
 @mcp.tool()
 async def run_regression(
     domain: str | None = None,
     agent: str | None = None,
+    run_name: str | None = None,
 ) -> dict:
     """Run a full stochastic regression for a domain or agent.
 
@@ -167,8 +201,9 @@ async def run_regression(
     Args:
         domain: Filter by domain (e.g. "vendors").
         agent: Filter by agent (e.g. "vendor_management").
+        run_name: Human-readable label for this run (e.g. "vendor-baseline").
     """
-    return handle_run_regression(domain, agent)
+    return await asyncio.to_thread(handle_run_regression, domain, agent, run_name)
 
 
 @mcp.tool()
@@ -181,7 +216,7 @@ async def publish_results(app: str = "agent") -> dict:
     Args:
         app: Application name for the GCS path (default "agent").
     """
-    return handle_publish_results(app)
+    return await asyncio.to_thread(handle_publish_results, app)
 
 
 def main() -> None:
