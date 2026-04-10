@@ -70,8 +70,10 @@ def _qbo_query(realm_id: str, access_token: str, entity: str,
     """Execute a paginated QBO query and return all results."""
     base = _get_base_url()
     all_results: list[dict] = []
+    page = 0
 
     while True:
+        page += 1
         query = f"SELECT * FROM {entity}"
         if where:
             query += f" WHERE {where}"
@@ -83,6 +85,9 @@ def _qbo_query(realm_id: str, access_token: str, entity: str,
             params={"query": query},
             timeout=60,
         )
+        intuit_tid = resp.headers.get("intuit_tid", "")
+        logger.info("QBO query %s page=%d intuit_tid=%s status=%d",
+                     entity, page, intuit_tid, resp.status_code)
         resp.raise_for_status()
         data = resp.json()
 

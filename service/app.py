@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -385,12 +385,25 @@ def qbo_auth_start(caller: dict = Depends(get_verified_user)):
     redirect_uri = str(app.url_path_for("qbo_callback"))
     base = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
     absolute_redirect = f"{base}{redirect_uri}"
-    url = get_authorization_url(redirect_uri=absolute_redirect)
-    return RedirectResponse(url)
+    url, state = get_authorization_url(redirect_uri=absolute_redirect)
+    response = RedirectResponse(url)
+    is_https = base.startswith("https")
+    response.set_cookie(
+        "qbo_oauth_state", state,
+        max_age=600, httponly=True, samesite="lax",
+        secure=is_https,
+    )
+    return response
 
 
 @app.get("/qbo/callback")
-def qbo_callback(code: str = "", realmId: str = "", state: str = "", error: str = ""):
+def qbo_callback(
+    request: Request,
+    code: str = "",
+    realmId: str = "",
+    state: str = "",
+    error: str = "",
+):
     """Handle the OAuth2 callback from Intuit and render a friendly result page."""
 
     def _render_result_page(
@@ -515,20 +528,34 @@ def qbo_callback(code: str = "", realmId: str = "", state: str = "", error: str 
 """
         return HTMLResponse(content=body, status_code=status_code)
 
+    def _clear_state_cookie(resp: HTMLResponse) -> HTMLResponse:
+        resp.delete_cookie("qbo_oauth_state")
+        return resp
+
     if error:
-        return _render_result_page(
+        return _clear_state_cookie(_render_result_page(
             title="QuickBooks connection failed",
             message=f"Intuit returned an OAuth error: {error}",
             status_code=400,
             cta_label="Try connecting again",
-        )
+        ))
     if not code:
-        return _render_result_page(
+        return _clear_state_cookie(_render_result_page(
             title="QuickBooks connection failed",
             message="Missing authorization code in callback URL.",
             status_code=400,
             cta_label="Try connecting again",
-        )
+        ))
+
+    expected_state = request.cookies.get("qbo_oauth_state", "")
+    if not expected_state or not state or expected_state != state:
+        return _clear_state_cookie(_render_result_page(
+            title="QuickBooks connection failed",
+            message="CSRF validation failed — the state parameter does not match. "
+                    "Please start the connection flow again.",
+            status_code=403,
+            cta_label="Try connecting again",
+        ))
 
     redirect_uri = str(app.url_path_for("qbo_callback"))
     base = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
@@ -538,12 +565,12 @@ def qbo_callback(code: str = "", realmId: str = "", state: str = "", error: str 
         token_data = exchange_code_for_tokens(code=code, redirect_uri=absolute_redirect)
     except Exception as exc:
         logger.exception("QBO OAuth token exchange failed")
-        return _render_result_page(
+        return _clear_state_cookie(_render_result_page(
             title="QuickBooks connection failed",
             message=f"Token exchange failed: {exc}",
             status_code=502,
             cta_label="Try connecting again",
-        )
+        ))
     refresh_token = token_data.get("refresh_token", "")
     expires_in = token_data.get("expires_in")
     refresh_expires_in = token_data.get("x_refresh_token_expires_in")
@@ -553,7 +580,7 @@ def qbo_callback(code: str = "", realmId: str = "", state: str = "", error: str 
         realmId, expires_in, refresh_expires_in,
     )
 
-    return _render_result_page(
+    return _clear_state_cookie(_render_result_page(
         title="QuickBooks connected",
         message=(
             "OAuth completed successfully. Copy the refresh token below and "
@@ -562,7 +589,7 @@ def qbo_callback(code: str = "", realmId: str = "", state: str = "", error: str 
         status_code=200,
         refresh_token=refresh_token,
         realm_id=realmId,
-    )
+    ))
 
 
 @app.delete("/vendors/{vendor_id}")
