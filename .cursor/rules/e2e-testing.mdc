@@ -1,32 +1,71 @@
 ---
-description: How to start infrastructure and run e2e tests against the live agent
-globs: tests/test_csv_e2e.py,tests/test_write_auth_e2e.py,tests/test_tabular_e2e.py
+description: How to write and run BDD e2e tests and unit tests for the agent
+globs: tests/features/**,tests/step_defs/**,tests/test_*.py
 alwaysApply: false
 ---
 
-# Running e2e tests
+# Agent test suite
 
-E2e tests hit the live `/chat` endpoint through the full LLM pipeline. They require two services running locally.
+## Test structure
 
-## Test file map
+```
+tests/
+├── features/               # Gherkin .feature files (BDD e2e tests)
+│   ├── csv_bulk_edit.feature
+│   ├── multi_turn.feature
+│   ├── multi_vendor_sequential.feature
+│   ├── single_vendor_modify.feature
+│   ├── spend_queries.feature
+│   ├── vendor_list.feature
+│   └── write_access_control.feature
+├── step_defs/              # Step definition implementations
+│   ├── conftest.py         # Shared Given/When/Then steps (reusable across features)
+│   ├── test_csv_bulk_edit.py
+│   ├── test_multi_turn.py
+│   ├── test_multi_vendor_sequential.py
+│   ├── test_single_vendor_modify.py
+│   ├── test_spend_queries.py
+│   ├── test_vendor_list.py
+│   └── test_write_access_control.py
+├── conftest.py             # Fixtures: test_vendor_ids, acl_vendor_ids, chat(), scoped_chat(), cost tracking
+├── stochastic_plugin.py    # Pytest plugin for stochastic @llm_live re-runs
+├── test_csv_bulk.py        # Unit: CSV parsing, validation, resolution (no LLM)
+├── test_tools.py           # Unit: tool definitions, filters, payloads
+├── test_endpoints.py       # Unit: FastAPI endpoint contracts
+├── test_write_auth.py      # Unit: write ACL logic
+├── test_resolve.py         # Unit: vendor name resolution
+├── test_resolver.py        # Unit: filter resolver
+├── test_period_parser.py   # Unit: period/date parsing
+├── test_vendor_resolver.py # Unit: vendor identifier resolution
+├── test_chat_tool_context.py    # Unit: tool message context
+└── test_sub_agent_delegation.py # Unit: expense agent delegation
+```
 
-Four e2e test files cover the write pipeline and the analytics read path. Each targets a different layer:
+## Tagging convention (6 dimensions)
 
-| File | Layer | Runs as | What it tests |
-|------|-------|---------|---------------|
-| `test_csv_e2e.py` | Input validation | Admin | Bad columns, invalid UUIDs, edge cases, read-only queries |
-| `test_csv_e2e.py` | Business logic | Admin | CSV confirm flow, single-vendor edits (auth gate is bypassed) |
-| `test_write_auth_e2e.py` | Authorization | Scoped user | Allowed/denied edits, mixed CSV rejection |
-| `test_write_auth.py` | Authorization | Mocked (unit) | Same auth logic, no network — fast and deterministic |
-| `test_tabular_e2e.py` | Tabular data contract | Admin | Table payload presence, metric param intent, prose contract, execute_python removal |
+Every `.feature` file MUST carry tags from all applicable dimensions on its `Feature:` line. Scenarios inherit feature-level tags and may add scenario-specific overrides.
 
-The **input validation** layer fails requests before the auth check runs — outcome is the same regardless of caller identity. The **business logic** layer is reached only after auth passes (admin bypass). The **authorization** layer is the only one whose outcome depends on who the caller is. The **tabular data contract** layer verifies the full pipeline from LLM tool selection through structured table payloads on ChatResponse.
+| Dimension | Prefix | Purpose | Examples |
+|-----------|--------|---------|----------|
+| **Agent** | `@agent_` | Which agent handles the request | `@agent_vendor_management`, `@agent_expense_analytics` |
+| **Domain** | `@domain_` | Business domain | `@domain_vendors`, `@domain_expense_analytics` |
+| **Module** | `@module_` | Functional module | `@module_data_management`, `@module_analytics`, `@module_acl`, `@module_list`, `@module_multi_turn` |
+| **Capability** | `@capability_` | Specific user-facing capability | `@capability_csv_bulk_edit`, `@capability_vendor_modify`, `@capability_spend_detail`, etc. |
+| **Tool** | `@tool_` | Agent tool function called | `@tool_process_vendor_csv`, `@tool_modify_vendor`, `@tool_get_spend_detail` |
+| **LLM live** | `@llm_live` | Hits the real OpenAI API | Always present on BDD e2e features |
 
-`test_write_auth_e2e.py` uses the `X-Test-Email` header (defined in `service/auth.py`) to override `DEV_AUTH_EMAIL` and authenticate as a scoped user. This only works when `DEV_AUTH_EMAIL` is set (dev mode) — production uses real Firebase tokens and ignores the header.
+### Example Gherkin header
+
+```gherkin
+@agent_vendor_management @domain_vendors @module_data_management @capability_csv_bulk_edit @tool_process_vendor_csv @llm_live
+Feature: CSV Bulk Edit
+  The CSV bulk-edit pipeline accepts a CSV attachment via /chat, processes
+  it through the agent, and returns a confirmation dialog or validation error.
+```
 
 ## Pre-flight: check what's already running
 
-Before starting anything, check existing terminals for running processes:
+Before starting anything, check for the Cloud SQL proxy and agent server:
 
 ```sh
 lsof -ti:5433 2>/dev/null && echo "proxy up" || echo "proxy down"
@@ -42,14 +81,9 @@ cloud-sql-proxy haderach-ai:us-central1:haderach-main --port 5433 \
   --credentials-file=agent-local-dev-sa-key.json
 ```
 
-If the proxy shows as "up" but connections fail, the process may be stale. Kill it (`kill $(lsof -ti:5433)`) and restart. After starting, confirm the log shows `The proxy has started successfully and is ready for new connections!`.
-
 ## 2. Verify database connectivity
 
-After the proxy is up, test a direct connection before starting the agent. This catches stale proxies, credential issues, and network problems early:
-
 ```sh
-cd /path/to/agent
 .venv/bin/python -c "
 from dotenv import load_dotenv; load_dotenv('.env', interpolate=False)
 import os, psycopg
@@ -60,20 +94,11 @@ print('DB connection OK')
 "
 ```
 
-If this fails, do not proceed — the agent server and tests will both fail with `PoolTimeout` errors. Common fixes: restart the proxy, check the credentials file, verify Cloud SQL instance is running.
-
 ## 3. Agent server (port 8080)
 
-The `.env` file has all credentials (`OPENAI_API_KEY`, `DATABASE_URL`, `DEV_AUTH_EMAIL`). The app loads them via `load_dotenv()` at import time. **Do not manually export secrets from gcloud** — it's error-prone due to shell escaping and unnecessary.
-
 ```sh
-cd /path/to/agent
 .venv/bin/uvicorn service.app:app --reload --port 8080
 ```
-
-Always use `--reload` so code changes are picked up automatically.
-
-If the proxy was restarted while the agent was running, the agent's connection pool will be broken. Kill the agent (`kill $(lsof -ti:8080)`) and restart it so it creates a fresh pool against the new proxy.
 
 ## 4. Verify before running tests
 
@@ -83,21 +108,73 @@ curl -s http://127.0.0.1:8080/health   # should return {"status":"ok"}
 
 ## 5. Run tests
 
+### Unit tests (no server needed)
+
 ```sh
-# Admin e2e suite (~4 min) — input validation + business logic
-.venv/bin/python -m pytest tests/test_csv_e2e.py -v -s
-
-# Scoped-user e2e suite (~1 min) — authorization gate
-.venv/bin/python -m pytest tests/test_write_auth_e2e.py -v -s
-
-# Tabular data contract suite (~2 min) — table payloads, metric, prose
-.venv/bin/python -m pytest tests/test_tabular_e2e.py -v -s
-
-# Unit tests for write auth — no server needed
-.venv/bin/python -m pytest tests/test_write_auth.py -v -s
-
-# Specific class
-.venv/bin/python -m pytest tests/test_csv_e2e.py::TestCountThenList -v -s
+.venv/bin/python -m pytest tests/test_csv_bulk.py tests/test_tools.py tests/test_write_auth.py tests/test_endpoints.py tests/test_resolve.py tests/test_resolver.py tests/test_period_parser.py tests/test_vendor_resolver.py tests/test_chat_tool_context.py tests/test_sub_agent_delegation.py -v
 ```
 
-Tests use `requests` with 30–60s timeouts. No `--timeout` pytest plugin is installed.
+### BDD e2e tests (needs proxy + agent)
+
+```sh
+# All BDD scenarios
+.venv/bin/python -m pytest tests/step_defs/ -v -s
+
+# Filter by marker
+.venv/bin/python -m pytest tests/step_defs/ -m "capability_csv_bulk_edit" -v -s
+.venv/bin/python -m pytest tests/step_defs/ -m "module_acl" -v -s
+.venv/bin/python -m pytest tests/step_defs/ -m "agent_vendor_management and module_analytics" -v -s
+
+# Single feature file
+.venv/bin/python -m pytest tests/step_defs/test_single_vendor_modify.py -v -s
+```
+
+### Stochastic mode (re-runs @llm_live tests)
+
+```sh
+# Default: 10 runs, pass = 4 consecutive OR 90% floor
+.venv/bin/python -m pytest tests/step_defs/ --stochastic -v -s
+
+# Custom thresholds
+.venv/bin/python -m pytest tests/step_defs/ --stochastic --stochastic-runs 20 --stochastic-consecutive 5 --stochastic-floor 0.85 -v -s
+```
+
+### JSON report (includes cost tracking)
+
+```sh
+.venv/bin/python -m pytest tests/step_defs/ --json-report --json-report-file=.report.json -v -s
+```
+
+## Stochastic pass criteria
+
+When `--stochastic` is active, each `@llm_live` test runs up to `--stochastic-runs` times (default 10). A test passes if **either** criterion is met:
+
+1. **Consecutive passes**: 4 consecutive passes (configurable via `--stochastic-consecutive`)
+2. **Pass rate floor**: overall pass rate >= 90% (configurable via `--stochastic-floor`)
+
+Non-`@llm_live` tests are unaffected. The JSON report includes stochastic metadata (`runs`, `passed_count`, `pass_rate`, `consecutive_passes`) and aggregated cost per test.
+
+## Cost tracking
+
+Every `/chat` call in BDD tests automatically accumulates token usage. After each test, `service/costs.py` calculates the USD cost based on model pricing. Costs are injected into the JSON report as `user_properties` and are visible in `scenario_coverage` and `test_summary` MCP tools.
+
+## MCP test server
+
+The `haderach-test-status` MCP server (configured in `.cursor/mcp.json`) provides query and execution tools:
+
+| Tool | Purpose |
+|------|---------|
+| `list_scenarios` | List BDD scenarios, filterable by any tag dimension |
+| `scenario_coverage` | Join scenarios with latest results (pass/fail/cost) |
+| `test_summary` | Aggregate stats from the latest report |
+| `list_unit_tests` | List unit tests via `pytest --collect-only` |
+| `run_scenarios` | Execute BDD scenarios with tag filters |
+| `run_regression` | Shorthand for `run_scenarios` with stochastic mode |
+
+## Writing new tests
+
+1. Create a `.feature` file in `tests/features/` with all 6 tag dimensions on the Feature line
+2. Create a matching step definition file in `tests/step_defs/`
+3. Reuse shared steps from `tests/step_defs/conftest.py` (`Given test vendors exist`, `When the user says`, `Then the agent calls`, etc.)
+4. Add any new pytest markers to `pyproject.toml` under `[tool.pytest.ini_options]`
+5. Every test method docstring should explain **what invariant the test protects**, not what it does

@@ -161,7 +161,10 @@ def _patch_all(pool=None):
 # ── vendor_lookup ────────────────────────────────────────────────────────
 
 class TestVendorLookup:
+    """Vendor lookup must resolve names, aliases, and missing inputs correctly."""
+
     def test_by_name(self):
+        """A vendor's canonical name must resolve to its vendor ID."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_vendor_lookup({"vendor": "Acme Corp"})
@@ -169,6 +172,7 @@ class TestVendorLookup:
             assert result["vendor_id"] == "v_acme"
 
     def test_by_alias(self):
+        """A vendor alias must resolve to the same vendor ID as the canonical name."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_vendor_lookup({"vendor": "Acme"})
@@ -176,6 +180,7 @@ class TestVendorLookup:
             assert result["vendor_id"] == "v_acme"
 
     def test_not_found(self):
+        """Lookups for non-existent vendors must return not_found, not raise."""
         pool = _build_mock_pool({
             "WHERE id::text": None,
             "FROM vendors ORDER BY": [],
@@ -186,12 +191,14 @@ class TestVendorLookup:
             assert result["status"] == "not_found"
 
     def test_empty_vendor(self):
+        """An empty-string vendor must be treated as not found, not cause an error."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_vendor_lookup({"vendor": ""})
             assert result["status"] == "not_found"
 
     def test_missing_vendor_param(self):
+        """Omitting the vendor parameter entirely must return not_found gracefully."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_vendor_lookup({})
@@ -201,7 +208,10 @@ class TestVendorLookup:
 # ── vendor_count ─────────────────────────────────────────────────────────
 
 class TestVendorCount:
+    """Vendor count must return accurate totals and reject invalid filters."""
+
     def test_total_count(self):
+        """An unfiltered count must return the total number of vendors in the database."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_vendor_count({})
@@ -209,12 +219,14 @@ class TestVendorCount:
             assert result["data"]["count"] == 3
 
     def test_invalid_filter(self):
+        """Filter values outside the allowed enum must be rejected before querying."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_vendor_count({"filters": {"paymentMethod": "Bitcoin"}})
             assert result["status"] == "invalid_filter"
 
     def test_with_group_by(self):
+        """Grouped counts must return per-group totals keyed by the group value."""
         pool = _build_mock_pool({
             "COALESCE(": [
                 {"grp": "Engineering", "cnt": 2},
@@ -233,7 +245,10 @@ class TestVendorCount:
 # ── spend_total ──────────────────────────────────────────────────────────
 
 class TestSpendTotal:
+    """Spend total must aggregate correctly and enforce period validation."""
+
     def test_all_time(self):
+        """All-time spend must sum every bill regardless of date range."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_spend_total({})
@@ -242,6 +257,7 @@ class TestSpendTotal:
             assert result["data"]["vendorCount"] == 3
 
     def test_invalid_period(self):
+        """Unparseable period strings must be rejected with an invalid_filter status."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_spend_total({"period": "garbage"})
@@ -249,6 +265,7 @@ class TestSpendTotal:
             assert result["field"] == "period"
 
     def test_with_caller_context_finance_admin(self):
+        """Finance admin caller context must not alter the spend total result."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_spend_total({}, caller_context={"is_finance_admin": True})
@@ -259,7 +276,10 @@ class TestSpendTotal:
 # ── spend_by_vendor ──────────────────────────────────────────────────────
 
 class TestSpendByVendor:
+    """Spend-by-vendor must break down spend per vendor and handle missing vendors."""
+
     def test_single_vendor(self):
+        """Single-vendor queries must return that vendor's total and monthly breakdown."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_spend_by_vendor({"vendor": "Acme Corp"})
@@ -269,6 +289,7 @@ class TestSpendByVendor:
             assert len(result["data"]["months"]) == 2
 
     def test_vendor_not_found(self):
+        """Querying spend for a non-existent vendor must return not_found, not crash."""
         pool = _build_mock_pool({
             "WHERE id::text": None,
             "FROM vendors ORDER BY": [],
@@ -279,6 +300,7 @@ class TestSpendByVendor:
             assert result["status"] == "not_found"
 
     def test_all_vendors(self):
+        """Omitting the vendor parameter must return an aggregate across all vendors."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_spend_by_vendor({})
@@ -289,7 +311,10 @@ class TestSpendByVendor:
 # ── spend_by_dimension ───────────────────────────────────────────────────
 
 class TestSpendByDimension:
+    """Spend-by-dimension must group totals by the requested dimension and require one."""
+
     def test_by_payment_method(self):
+        """Grouping by paymentMethod must produce per-method spend totals."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_spend_by_dimension({"dimension": "paymentMethod"})
@@ -301,6 +326,7 @@ class TestSpendByDimension:
             assert groups["Check"]["totalAmount"] == 13000.00
 
     def test_missing_dimension(self):
+        """Omitting the dimension parameter must be rejected as an invalid filter."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_spend_by_dimension({})
@@ -310,7 +336,10 @@ class TestSpendByDimension:
 # ── top_vendors ──────────────────────────────────────────────────────────
 
 class TestTopVendors:
+    """Top-vendors must rank by amount descending and enforce period validation."""
+
     def test_default_top_10(self):
+        """Default top-vendors request must return all vendors ranked by spend."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_top_vendors({})
@@ -320,6 +349,7 @@ class TestTopVendors:
             assert vendors[0]["vendor_name"] == "Acme Corp"
 
     def test_ranked_by_amount_descending(self):
+        """Vendors must always be sorted by spend in descending order."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_top_vendors({})
@@ -328,6 +358,7 @@ class TestTopVendors:
             assert amounts == sorted(amounts, reverse=True)
 
     def test_invalid_period(self):
+        """Invalid period strings must be rejected before reaching the database."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_top_vendors({"period": "not-a-period"})
@@ -361,6 +392,8 @@ def _make_vendor_row(i: int) -> dict:
 
 
 class TestVendorList:
+    """Vendor list must paginate JSON but always deliver a complete CSV attachment."""
+
     def test_csv_contains_all_vendors_when_truncated(self):
         """CSV must include every matching vendor, not just the limited page."""
         total = 60
@@ -427,6 +460,8 @@ from mcp_server.resolver import validate_filters, resolve_filter
 
 
 class TestOwnerFilter:
+    """Owner and secondary-owner filters must resolve human names to user IDs."""
+
     def test_owner_resolves_by_name(self):
         """Owner filter should resolve a person's name to user IDs."""
         user_names = [{"val": "Michael Mader"}, {"val": "Suman C"}]
@@ -514,6 +549,8 @@ class TestOwnerFilter:
 # ── New filter fields ──────────────────────────────────────────────────
 
 class TestNewFilters:
+    """Extended filter fields must validate types, resolve against the DB, and reject unknowns."""
+
     def test_auto_renew_boolean_filter(self):
         """autoRenew filter should accept boolean values."""
         with patch("mcp_server.resolver.get_pool"):
@@ -561,6 +598,8 @@ class TestNewFilters:
 # ── Null sentinel filters ─────────────────────────────────────────────
 
 class TestNullSentinelFilters:
+    """'*' and 'none' sentinels must map to IS NOT NULL / IS NULL without DB lookup."""
+
     def test_star_resolver_accepts(self):
         """'*' sentinel should pass validation on any field without DB lookup."""
         result = resolve_filter("owner", "*")
@@ -647,6 +686,7 @@ class TestTablePayloadPresence:
     """Verify that tabular handlers include a well-formed table field."""
 
     def test_spend_by_vendor_single_has_table(self):
+        """Single-vendor spend must include a Month/Spend table with one row per month."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_spend_by_vendor({"vendor": "Acme Corp"})
@@ -655,6 +695,7 @@ class TestTablePayloadPresence:
         assert len(result["table"]["rows"]) == len(result["data"]["months"])
 
     def test_spend_by_vendor_all_has_table(self):
+        """All-vendor spend must include a Vendor/Spend table with one row per vendor."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_spend_by_vendor({})
@@ -663,6 +704,7 @@ class TestTablePayloadPresence:
         assert len(result["table"]["rows"]) == result["data"]["totalVendors"]
 
     def test_spend_by_dimension_has_table(self):
+        """Dimension breakdown must include a table with one row per group."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_spend_by_dimension({"dimension": "paymentMethod"})
@@ -671,6 +713,7 @@ class TestTablePayloadPresence:
         assert len(result["table"]["rows"]) == len(result["data"]["groups"])
 
     def test_top_vendors_has_table(self):
+        """Top-vendors must include a Vendor/Spend table matching the vendor count."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_top_vendors({})
@@ -679,6 +722,7 @@ class TestTablePayloadPresence:
         assert len(result["table"]["rows"]) == len(result["data"]["vendors"])
 
     def test_vendor_count_grouped_has_table(self):
+        """Grouped vendor counts must produce a table with one row per group."""
         pool = _build_mock_pool({
             "COALESCE(": [
                 {"grp": "Engineering", "cnt": 2},
@@ -694,6 +738,7 @@ class TestTablePayloadPresence:
         assert len(result["table"]["rows"]) == 2
 
     def test_vendor_count_ungrouped_has_no_table(self):
+        """Scalar counts must not carry a table payload — only grouped results do."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_vendor_count({})
@@ -730,6 +775,7 @@ class TestMetricParameter:
     """Verify the metric parameter selects the correct data field."""
 
     def test_spend_by_vendor_single_metric_billcount(self):
+        """billCount metric must switch table values to integer bill counts, not dollar amounts."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_spend_by_vendor({"vendor": "Acme Corp", "metric": "billCount"})
@@ -740,6 +786,7 @@ class TestMetricParameter:
             assert isinstance(row[1], int)
 
     def test_spend_by_vendor_all_metric_billcount(self):
+        """All-vendor view with billCount metric must label the column Bill Count."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_spend_by_vendor({"metric": "billCount"})
@@ -748,6 +795,7 @@ class TestMetricParameter:
         assert table["columns"] == ["Vendor", "Bill Count"]
 
     def test_spend_by_dimension_metric_vendor_count(self):
+        """vendorCount metric on dimension breakdown must relabel columns accordingly."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_spend_by_dimension({"dimension": "paymentMethod", "metric": "vendorCount"})
@@ -756,6 +804,7 @@ class TestMetricParameter:
         assert table["columns"] == ["Payment Method", "Vendor Count"]
 
     def test_top_vendors_metric_billcount(self):
+        """Top-vendors with billCount metric must use Bill Count as the metric label."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_top_vendors({"metric": "billCount"})
@@ -763,12 +812,14 @@ class TestMetricParameter:
         assert table["metric"] == "Bill Count"
 
     def test_default_metric_is_spend(self):
+        """Omitting the metric parameter must default to Spend."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_top_vendors({})
         assert result["table"]["metric"] == "Spend"
 
     def test_unknown_metric_falls_back_to_spend(self):
+        """Unrecognized metric values must fall back to Spend, not error."""
         p1, p2, p3, p4 = _patch_all()
         with p1, p2, p3, p4:
             result = handle_top_vendors({"metric": "unknown"})
@@ -781,11 +832,13 @@ class TestExecutePythonRemoved:
     """Verify execute_python is no longer exposed to the LLM."""
 
     def test_not_in_tool_definitions(self):
+        """execute_python must never appear in the LLM-visible tool definitions."""
         from service.tools import TOOL_DEFINITIONS
         names = [t["function"]["name"] for t in TOOL_DEFINITIONS]
         assert "execute_python" not in names
 
     def test_not_in_tool_handlers(self):
+        """execute_python must not be registered in the handler dispatch map."""
         from service.tools import TOOL_HANDLERS
         assert "execute_python" not in TOOL_HANDLERS
 
@@ -809,6 +862,7 @@ class TestSpendDetailPivotTable:
         })
 
     def test_grouped_pivot_categories_as_rows_months_as_columns(self):
+        """Grouped detail must pivot categories into rows and months into columns."""
         detail_rows = [
             {"dimension_value": "BigQuery", "month": "2026-01", "amount": Decimal("5000.00")},
             {"dimension_value": "BigQuery", "month": "2026-02", "amount": Decimal("4600.00")},
@@ -829,6 +883,7 @@ class TestSpendDetailPivotTable:
         assert bq_row == ["BigQuery", 5000.0, 4600.0]
 
     def test_grouped_single_month_uses_amount_column(self):
+        """A single-month pivot must use a plain Amount column, not a month header."""
         detail_rows = [
             {"dimension_value": "BigQuery", "month": "2026-01", "amount": Decimal("5000.00")},
             {"dimension_value": "Compute Engine", "month": "2026-01", "amount": Decimal("1200.00")},
@@ -843,6 +898,7 @@ class TestSpendDetailPivotTable:
         assert len(table["rows"]) == 2
 
     def test_grouped_sorts_by_total_descending(self):
+        """Pivot rows must be sorted by total spend descending, highest category first."""
         detail_rows = [
             {"dimension_value": "Small", "month": "2026-01", "amount": Decimal("100.00")},
             {"dimension_value": "Large", "month": "2026-01", "amount": Decimal("9000.00")},
@@ -857,6 +913,7 @@ class TestSpendDetailPivotTable:
         assert labels == ["Large", "Medium", "Small"]
 
     def test_ungrouped_uses_month_amount_columns(self):
+        """Ungrouped detail must use Month/Amount columns with one row per month."""
         detail_rows = [
             {"month": "2026-01", "amount": Decimal("5000.00")},
             {"month": "2026-02", "amount": Decimal("4600.00")},
@@ -872,6 +929,7 @@ class TestSpendDetailPivotTable:
         assert table["rows"][0] == ["2026-01", 5000.0]
 
     def test_2d_crosstab_category_by_project(self):
+        """Two-dimension crosstab must use primary as rows and secondary as columns."""
         detail_rows = [
             {"dimension_value": "BigQuery", "secondary_value": "arcade-ai-prod", "amount": Decimal("9000.00")},
             {"dimension_value": "BigQuery", "secondary_value": "arcade-ai-staging", "amount": Decimal("500.00")},
@@ -902,6 +960,7 @@ class TestSpendDetailPivotTable:
         assert bq_row[staging_idx] == 500.0
 
     def test_2d_crosstab_sorts_by_total(self):
+        """Crosstab rows must be sorted by total spend descending across all columns."""
         detail_rows = [
             {"dimension_value": "Small", "secondary_value": "p1", "amount": Decimal("100.00")},
             {"dimension_value": "Large", "secondary_value": "p1", "amount": Decimal("9000.00")},
@@ -920,6 +979,7 @@ class TestSpendDetailPivotTable:
         assert labels == ["Large", "Small"]
 
     def test_2d_crosstab_fills_missing_cells_with_zero(self):
+        """Missing cells in a crosstab must be filled with zero, not null or omitted."""
         detail_rows = [
             {"dimension_value": "BigQuery", "secondary_value": "prod", "amount": Decimal("5000.00")},
             {"dimension_value": "Compute Engine", "secondary_value": "staging", "amount": Decimal("300.00")},

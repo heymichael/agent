@@ -58,38 +58,47 @@ class _MockPool:
 # ── resolve_filter: enum fields ──────────────────────────────────────────
 
 class TestResolveFilterEnum:
+    """Static enum filter values must resolve correctly or reject with valid alternatives."""
+
     def test_exact_match(self):
+        """An exact enum value must resolve to 'ok' without modification."""
         result = resolve_filter("paymentMethod", "ACH")
         assert result["status"] == "ok"
         assert result["value"] == "ACH"
 
     def test_case_insensitive(self):
+        """Enum lookup must be case-insensitive and return the canonical casing."""
         result = resolve_filter("paymentMethod", "ach")
         assert result["status"] == "ok"
         assert result["value"] == "ACH"
 
     def test_invalid_value(self):
+        """An unrecognised enum value must be rejected with the full list of valid options."""
         result = resolve_filter("paymentMethod", "Bitcoin")
         assert result["status"] == "invalid_filter"
         assert "Bitcoin" == result["provided"]
         assert "ACH" in result["valid_values"]
 
     def test_boolean_field_true(self):
+        """Boolean True must pass through boolean-typed filter fields unchanged."""
         result = resolve_filter("track1099", True)
         assert result["status"] == "ok"
         assert result["value"] is True
 
     def test_boolean_field_false(self):
+        """Boolean False must pass through boolean-typed filter fields unchanged."""
         result = resolve_filter("track1099", False)
         assert result["status"] == "ok"
         assert result["value"] is False
 
     def test_unknown_field(self):
+        """An unknown filter field name must be rejected with a descriptive message."""
         result = resolve_filter("nonexistent", "value")
         assert result["status"] == "invalid_filter"
         assert "Unknown filter field" in result.get("message", "")
 
     def test_all_enum_fields_have_values(self):
+        """Every declared enum field must have at least two valid values and resolve them all."""
         for field, values in ENUM_FIELDS.items():
             assert len(values) >= 2, f"{field} should have at least 2 valid values"
             for v in values:
@@ -100,9 +109,11 @@ class TestResolveFilterEnum:
 # ── resolve_filter: dynamic fields ───────────────────────────────────────
 
 class TestResolveFilterDynamic:
+    """Database-backed filter fields must resolve against live distinct values."""
 
     @patch("mcp_server.resolver.get_pool")
     def test_exact_dynamic_match(self, mock_get_pool):
+        """A value present in the database must resolve as 'ok'."""
         mock_get_pool.return_value = _MockPool({
             "DISTINCT": [{"val": "Engineering"}, {"val": "Marketing"}],
         })
@@ -112,6 +123,7 @@ class TestResolveFilterDynamic:
 
     @patch("mcp_server.resolver.get_pool")
     def test_case_insensitive_dynamic(self, mock_get_pool):
+        """Dynamic field lookup must be case-insensitive, returning canonical DB casing."""
         mock_get_pool.return_value = _MockPool({
             "DISTINCT": [{"val": "Marketing"}],
         })
@@ -121,6 +133,7 @@ class TestResolveFilterDynamic:
 
     @patch("mcp_server.resolver.get_pool")
     def test_invalid_dynamic_value(self, mock_get_pool):
+        """A value absent from the database must be rejected with available alternatives."""
         mock_get_pool.return_value = _MockPool({
             "DISTINCT": [{"val": "Engineering"}, {"val": "Marketing"}],
         })
@@ -134,18 +147,24 @@ class TestResolveFilterDynamic:
 # ── validate_filters ─────────────────────────────────────────────────────
 
 class TestValidateFilters:
+    """Batch filter validation must short-circuit on the first invalid field and canonicalise values in-place."""
+
     def test_none_filters(self):
+        """None filters must be treated as no-op, returning None."""
         assert validate_filters(None) is None
 
     def test_empty_filters(self):
+        """An empty filter dict must be treated as no-op, returning None."""
         assert validate_filters({}) is None
 
     def test_valid_enum_filter(self):
+        """A dict of all-valid filters must return None (no error)."""
         filters = {"paymentMethod": "ACH", "track1099": True}
         result = validate_filters(filters)
         assert result is None
 
     def test_invalid_stops_on_first(self):
+        """Validation must stop and report on the first invalid field it encounters."""
         filters = {"paymentMethod": "Bitcoin", "track1099": True}
         result = validate_filters(filters)
         assert result is not None
@@ -153,6 +172,7 @@ class TestValidateFilters:
         assert result["field"] == "paymentMethod"
 
     def test_canonicalises_values(self):
+        """Valid filter values must be rewritten in-place to their canonical casing."""
         filters = {"paymentMethod": "ach"}
         validate_filters(filters)
         assert filters["paymentMethod"] == "ACH"

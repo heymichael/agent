@@ -12,6 +12,11 @@
         "from dotenv import load_dotenv; load_dotenv(interpolate=False); from mcp_server.feedback_server import main; main()"
       ],
       "cwd": "/Users/michaelmader_1/haderach_org/haderach_site/agent"
+    },
+    "test-status": {
+      "command": "/Users/michaelmader_1/haderach_org/haderach_site/agent/.venv/bin/python",
+      "args": ["-m", "mcp_test_server"],
+      "cwd": "/Users/michaelmader_1/haderach_org/haderach_site/agent"
     }
   }
 }

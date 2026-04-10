@@ -3,6 +3,7 @@
 
 # GCP service account keys
 *-sa-key.json
+*-publisher-key.json
 
 __pycache__/
 *.pyc
