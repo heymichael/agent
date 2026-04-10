@@ -63,32 +63,44 @@ class _MockPool:
 # ── _normalise ───────────────────────────────────────────────────────────
 
 class TestNormalise:
+    """Vendor name normalisation must produce stable, deterministic keys for matching."""
+
     def test_lowercase(self):
+        """Mixed-case vendor names must normalise to lowercase for case-insensitive matching."""
         assert _normalise("ACME Corp") == "acme corp"
 
     def test_strips_punctuation(self):
+        """Punctuation must be stripped so 'Acme, Inc.' matches 'Acme Inc'."""
         assert _normalise("Acme, Inc.") == "acme inc"
 
     def test_collapses_whitespace(self):
+        """Extra whitespace must collapse to single spaces for consistent keys."""
         assert _normalise("  foo   bar  ") == "foo bar"
 
     def test_empty_string(self):
+        """An empty string must normalise to empty, not raise or return whitespace."""
         assert _normalise("") == ""
 
     def test_special_chars(self):
+        """Apostrophes, ampersands, and suffixes must be stripped for fuzzy-safe keys."""
         assert _normalise("O'Brien & Associates, LLC") == "obrien associates llc"
 
 
 # ── _is_uuid ─────────────────────────────────────────────────────────────
 
 class TestIsUuid:
+    """UUID detection must correctly gate the UUID-lookup code path."""
+
     def test_valid_uuid(self):
+        """A well-formed UUID-4 string must be recognised as a UUID."""
         assert _is_uuid("550e8400-e29b-41d4-a716-446655440000") is True
 
     def test_invalid_uuid(self):
+        """A plain name string must never be treated as a UUID."""
         assert _is_uuid("Maya Glenn") is False
 
     def test_empty(self):
+        """An empty string must not be treated as a valid UUID."""
         assert _is_uuid("") is False
 
 
@@ -183,17 +195,21 @@ def _make_pool(*, name_match=None, uuid_match=None, similar_results=None, all_ve
 
 
 class TestResolveVendorByIdentifier:
+    """The vendor resolver must return the correct match type across exact, alias, fuzzy, and disambiguation paths."""
 
     @patch("service.pg_client.get_pool")
     def test_empty_identifier(self, mock_pool):
+        """An empty identifier must return None without querying the database."""
         assert resolve_vendor_by_identifier("") is None
 
     @patch("service.pg_client.get_pool")
     def test_whitespace_only(self, mock_pool):
+        """Whitespace-only input must be treated as empty and return None."""
         assert resolve_vendor_by_identifier("   ") is None
 
     @patch("service.pg_client.get_pool")
     def test_exact_uuid(self, mock_pool):
+        """A valid UUID must resolve via direct ID lookup and return an exact match."""
         mock_pool.return_value = _make_pool(uuid_match=_VENDOR_ACME)
         result = resolve_vendor_by_identifier(_VENDOR_ACME["id"])
         assert result is not None
@@ -202,6 +218,7 @@ class TestResolveVendorByIdentifier:
 
     @patch("service.pg_client.get_pool")
     def test_exact_name(self, mock_pool):
+        """An exact vendor name must resolve without falling through to fuzzy matching."""
         mock_pool.return_value = _make_pool(name_match=_VENDOR_ACME)
         result = resolve_vendor_by_identifier("Acme Corp")
         assert result is not None
@@ -210,6 +227,7 @@ class TestResolveVendorByIdentifier:
 
     @patch("service.pg_client.get_pool")
     def test_alias_match(self, mock_pool):
+        """A known alias must resolve to its parent vendor as an exact match."""
         mock_pool.return_value = _make_pool(
             all_vendors=_ALL_VENDORS_LIGHT,
         )
@@ -220,6 +238,7 @@ class TestResolveVendorByIdentifier:
 
     @patch("service.pg_client.get_pool")
     def test_normalised_match(self, mock_pool):
+        """A normalised form of a vendor name must match even without original punctuation."""
         mock_pool.return_value = _make_pool(
             all_vendors=_ALL_VENDORS_LIGHT,
         )
@@ -230,6 +249,7 @@ class TestResolveVendorByIdentifier:
 
     @patch("service.pg_client.get_pool")
     def test_fuzzy_close_match(self, mock_pool):
+        """A near-miss typo must resolve via fuzzy matching with 'close' confidence."""
         mock_pool.return_value = _make_pool(
             similar_results=[(_VENDOR_ACME, 0.65)],
             all_vendors=_ALL_VENDORS_LIGHT,
@@ -241,6 +261,7 @@ class TestResolveVendorByIdentifier:
 
     @patch("service.pg_client.get_pool")
     def test_fuzzy_weak_match(self, mock_pool):
+        """A weak similarity must still surface a candidate rather than returning None."""
         mock_pool.return_value = _make_pool(
             similar_results=[(_VENDOR_ACME, 0.30)],
             all_vendors=_ALL_VENDORS_LIGHT,
@@ -252,6 +273,7 @@ class TestResolveVendorByIdentifier:
 
     @patch("service.pg_client.get_pool")
     def test_not_found(self, mock_pool):
+        """A completely unknown identifier must return None, not a false-positive match."""
         mock_pool.return_value = _make_pool(
             similar_results=[],
             all_vendors=_ALL_VENDORS_LIGHT,

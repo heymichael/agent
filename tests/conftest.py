@@ -7,6 +7,8 @@ import pytest
 import requests
 from dotenv import load_dotenv
 
+pytest_plugins = ["tests.stochastic_plugin"]
+
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", interpolate=False)
 
 from service.costs import calculate_cost  # noqa: E402 (after dotenv load)

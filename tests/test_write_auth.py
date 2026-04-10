@@ -54,20 +54,24 @@ def _mock_access(user_ctx, effective_ids):
 # ── _check_write_auth ────────────────────────────────────────────────────
 
 class TestCheckWriteAuth:
+    """Only finance admins and users whose effective scope includes the target vendor may write."""
 
     def test_finance_admin_allowed(self):
+        """finance_admin role must grant write access to any vendor without scope checks."""
         p1, p2 = _mock_access(FINANCE_ADMIN_CTX, [])
         with p1, p2:
             result = _check_write_auth("admin@co.com", "v-alpha", "Alpha Corp")
         assert result is None
 
     def test_scoped_user_allowed_vendor(self):
+        """Scoped users must be permitted to write to vendors within their effective scope."""
         p1, p2 = _mock_access(SCOPED_USER_CTX, ["v-alpha"])
         with p1, p2:
             result = _check_write_auth("user@co.com", "v-alpha", "Alpha Corp")
         assert result is None
 
     def test_scoped_user_denied_vendor(self):
+        """Scoped users must be denied write access to vendors outside their effective scope."""
         p1, p2 = _mock_access(SCOPED_USER_CTX, ["v-alpha"])
         with p1, p2:
             result = _check_write_auth("user@co.com", "v-beta", "Beta Inc")
@@ -77,12 +81,14 @@ class TestCheckWriteAuth:
         assert "Beta Inc" in data["message"]
 
     def test_no_email_denied(self):
+        """Requests with no caller email must be rejected unconditionally."""
         result = _check_write_auth("", "v-alpha")
         assert result is not None
         data = json.loads(result)
         assert data["status"] == "not_authorized"
 
     def test_unknown_user_denied(self):
+        """Users with no access context in the database must be rejected."""
         with patch.object(pg_client, "get_user_access_context", return_value=None):
             result = _check_write_auth("nobody@co.com", "v-alpha")
         assert result is not None
@@ -90,6 +96,7 @@ class TestCheckWriteAuth:
         assert data["status"] == "not_authorized"
 
     def test_falls_back_to_vendor_id_in_message(self):
+        """Denial messages must include the vendor ID when no vendor name is supplied."""
         p1, p2 = _mock_access(SCOPED_USER_CTX, [])
         with p1, p2:
             result = _check_write_auth("user@co.com", "v-beta")
@@ -100,11 +107,13 @@ class TestCheckWriteAuth:
 # ── execute_modify_vendor ACL gate ───────────────────────────────────────
 
 class TestModifyVendorAuth:
+    """Vendor-edit endpoint must enforce write ACL before opening an edit session."""
 
     def _mock_resolve(self, vendor):
         return pg_client.VendorMatch(vendor=vendor, match="exact")
 
     def test_authorized_user_gets_open_edit(self):
+        """Authorized users must receive an open_edit action for in-scope vendors."""
         p1, p2 = _mock_access(SCOPED_USER_CTX, ["v-alpha"])
         with (
             patch.object(pg_client, "resolve_vendor_by_identifier", return_value=self._mock_resolve(VENDOR_ALPHA)),
@@ -114,6 +123,7 @@ class TestModifyVendorAuth:
         assert result.get("action") == "open_edit"
 
     def test_unauthorized_user_gets_not_authorized(self):
+        """Scoped users must be denied edits to out-of-scope vendors with the vendor named in the message."""
         p1, p2 = _mock_access(SCOPED_USER_CTX, ["v-alpha"])
         with (
             patch.object(pg_client, "resolve_vendor_by_identifier", return_value=self._mock_resolve(VENDOR_BETA)),
@@ -124,6 +134,7 @@ class TestModifyVendorAuth:
         assert "Beta Inc" in result["message"]
 
     def test_finance_admin_bypasses_check(self):
+        """finance_admin must bypass per-vendor ACL and receive open_edit for any vendor."""
         p1, p2 = _mock_access(FINANCE_ADMIN_CTX, [])
         with (
             patch.object(pg_client, "resolve_vendor_by_identifier", return_value=self._mock_resolve(VENDOR_BETA)),
@@ -143,6 +154,7 @@ class TestModifyVendorAuth:
 # ── execute_process_vendor_csv ACL gate ──────────────────────────────────
 
 class TestProcessVendorCsvAuth:
+    """CSV batch endpoint must enforce per-vendor write ACL on every row before confirming."""
 
     def _mock_csv_result(self, vendor_ids_and_names):
         """Build a mock process_csv_upload result with updates."""
@@ -165,6 +177,7 @@ class TestProcessVendorCsvAuth:
         )
 
     def test_authorized_user_gets_confirm_batch(self):
+        """A batch affecting only in-scope vendors must be accepted for confirmation."""
         csv_result = self._mock_csv_result([("v-alpha", "Alpha Corp")])
         p_att, p_csv, p1, p2 = self._patches(csv_result, SCOPED_USER_CTX, ["v-alpha"])
         with p_att, p_csv, p1, p2:
@@ -173,6 +186,7 @@ class TestProcessVendorCsvAuth:
         assert result["action"] == "confirm_csv_batch"
 
     def test_unauthorized_vendors_rejected(self):
+        """A batch containing any out-of-scope vendor must be fully rejected with the denied vendor named."""
         csv_result = self._mock_csv_result([("v-alpha", "Alpha Corp"), ("v-beta", "Beta Inc")])
         p_att, p_csv, p1, p2 = self._patches(csv_result, SCOPED_USER_CTX, ["v-alpha"])
         with p_att, p_csv, p1, p2:
@@ -182,6 +196,7 @@ class TestProcessVendorCsvAuth:
         assert result["denied_vendors"] == ["Beta Inc"]
 
     def test_finance_admin_bypasses_check(self):
+        """finance_admin must bypass per-vendor ACL for CSV batches."""
         csv_result = self._mock_csv_result([("v-alpha", "Alpha Corp"), ("v-beta", "Beta Inc")])
         p_att, p_csv, p1, p2 = self._patches(csv_result, FINANCE_ADMIN_CTX, [])
         with p_att, p_csv, p1, p2:
@@ -189,6 +204,7 @@ class TestProcessVendorCsvAuth:
         assert result["ok"] is True
 
     def test_no_access_user_fully_denied(self):
+        """Users with no access context must be fully rejected for any CSV batch."""
         csv_result = self._mock_csv_result([("v-alpha", "Alpha Corp")])
         p_att, p_csv, p1, p2 = self._patches(csv_result, None, [])
         with p_att, p_csv, p1, p2:

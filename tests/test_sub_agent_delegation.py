@@ -140,6 +140,7 @@ class TestRunAgentLoopBasic:
     """Sanity: run_agent_loop works for a simple text-only exchange."""
 
     def test_text_reply(self):
+        """A text-only exchange must produce an AgentResult with empty tool/table accumulators."""
         client = _mock_openai_text("Hello from the agent.")
         result = run_agent_loop(
             openai_client=client,

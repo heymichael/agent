@@ -84,6 +84,7 @@ class TestToolMessagesReturned:
     @patch("service.app.get_openai_client")
     @patch("service.app.VENDOR_TOOL_HANDLERS", {"vendor_count": lambda args, caller_email: TOOL_RESULT})
     def test_response_includes_tool_messages(self, mock_get_client, mock_uid, mock_upsert):
+        """Tool call and tool result messages must appear in the response's tool_messages array."""
         mock_get_client.return_value = _mock_openai_tool_then_text(
             "vendor_count", {"filters": {}}, "call_abc", "There are 14 vendors.",
         )
@@ -220,6 +221,7 @@ class TestSessionPersistenceWithToolMessages:
     @patch("service.app.get_openai_client")
     @patch("service.app.VENDOR_TOOL_HANDLERS", {"vendor_count": lambda args, caller_email: TOOL_RESULT})
     def test_persisted_messages_include_tool_history(self, mock_get_client, mock_uid, mock_upsert):
+        """Tool call and tool result entries must be persisted in the session alongside user and assistant messages."""
         mock_get_client.return_value = _mock_openai_tool_then_text(
             "vendor_count", {"filters": {}}, "call_xyz", "14 vendors total.",
         )
