@@ -112,6 +112,23 @@ def _nodeid_to_scenario(nodeid: str) -> str:
     return parts[-1] if len(parts) > 1 else nodeid
 
 
+def _iter_user_props(props: list) -> list[tuple[str, dict]]:
+    """Normalise user_properties from json-report.
+
+    pytest-json-report stores properties as single-key dicts
+    (``[{"cost": {...}}, ...]``), but in-memory pytest reports use
+    tuples (``[("cost", {...}), ...]``).  This helper yields
+    ``(key, value)`` pairs regardless of format.
+    """
+    result = []
+    for prop in props:
+        if isinstance(prop, dict):
+            result.extend(prop.items())
+        elif isinstance(prop, (list, tuple)) and len(prop) == 2:
+            result.append((prop[0], prop[1]))
+    return result
+
+
 # ── Query tool handlers ─────────────────────────────────────────────────
 
 
@@ -146,8 +163,18 @@ def handle_scenario_coverage(
     module: str | None = None,
     capability: str | None = None,
     tool: str | None = None,
+    run: str | None = None,
+    app: str = "agent",
 ) -> dict:
-    """Join BDD scenarios against the latest json-report to show pass/fail/cost."""
+    """Join BDD scenarios against a json-report to show pass/fail/cost.
+
+    When ``run`` is provided, fetches that historical run from GCS first.
+    """
+    if run:
+        err = _fetch_run(run, app)
+        if err:
+            return {"error": err}
+
     scenarios = _parse_features()
     filtered = [
         s for s in scenarios
@@ -182,7 +209,7 @@ def handle_scenario_coverage(
         if match:
             outcome = match.get("outcome", "unknown")
             cost = 0.0
-            for prop_key, prop_val in match.get("user_properties", []):
+            for prop_key, prop_val in _iter_user_props(match.get("user_properties", [])):
                 if prop_key == "cost" and isinstance(prop_val, dict):
                     cost = prop_val.get("cost_usd") or 0.0
             total_cost += cost
@@ -192,12 +219,17 @@ def handle_scenario_coverage(
             else:
                 failed += 1
 
-            results.append({
+            entry: dict = {
                 "scenario": s["name"],
                 "feature": s["feature"],
                 "outcome": outcome,
                 "cost_usd": round(cost, 6),
-            })
+            }
+            if outcome != "passed":
+                crash_msg = match.get("call", {}).get("crash", {}).get("message", "")
+                if crash_msg:
+                    entry["error"] = crash_msg
+            results.append(entry)
         else:
             not_run += 1
             results.append({
@@ -217,8 +249,66 @@ def handle_scenario_coverage(
     }
 
 
-def handle_test_summary() -> dict:
-    """Aggregate test results from the latest json-report."""
+_VALID_GROUP_BY = {"tool", "domain", "module", "capability", "agent"}
+
+
+def _extract_test_meta(test: dict) -> dict:
+    """Pull stochastic, cost, and duration metadata from a single test entry."""
+    stochastic = None
+    cost_usd = 0.0
+    for key, val in _iter_user_props(test.get("user_properties", [])):
+        if key == "stochastic" and isinstance(val, dict):
+            stochastic = val
+        elif key == "cost" and isinstance(val, dict):
+            cost_usd = val.get("cost_usd") or 0.0
+
+    call = test.get("call") or {}
+    duration = call.get("duration", 0.0)
+
+    if stochastic:
+        runs = stochastic.get("runs", 1)
+        passed = stochastic.get("passed", 0)
+        pass_rate = stochastic.get("pass_rate", 0.0)
+        stochastic_passed = stochastic.get("stochastic_passed", False)
+        is_100 = stochastic_passed and pass_rate == 1.0
+        is_partial = stochastic_passed and pass_rate < 1.0
+        total_cost = stochastic.get("cost_usd", 0.0) or cost_usd
+    else:
+        outcome = test.get("outcome", "failed")
+        runs = 1
+        passed = 1 if outcome == "passed" else 0
+        pass_rate = 1.0 if outcome == "passed" else 0.0
+        is_100 = outcome == "passed"
+        is_partial = False
+        total_cost = cost_usd
+
+    return {
+        "runs": runs,
+        "passed": passed,
+        "pass_rate": pass_rate,
+        "is_100": is_100,
+        "is_partial": is_partial,
+        "duration_s": duration,
+        "cost_usd": total_cost,
+    }
+
+
+def handle_test_summary(group_by: str = "tool", run: str | None = None, app: str = "agent") -> dict:
+    """Grouped stochastic test summary from a json-report.
+
+    Groups tests by the chosen tag dimension and returns per-group stats
+    plus a totals row computed from deduplicated tests.
+
+    When ``run`` is provided, fetches that historical run from GCS first.
+    """
+    if group_by not in _VALID_GROUP_BY:
+        return {"error": f"Invalid group_by '{group_by}'. Must be one of: {sorted(_VALID_GROUP_BY)}"}
+
+    if run:
+        err = _fetch_run(run, app)
+        if err:
+            return {"error": err}
+
     report = _read_report()
     if not report:
         return {
@@ -226,32 +316,49 @@ def handle_test_summary() -> dict:
             "note": "No .report.json found. Run tests with --json-report first.",
         }
 
-    summary = report.get("summary", {})
     tests = report.get("tests", [])
+    prefix = f"{group_by}_"
 
-    total_cost = 0.0
-    stochastic_cost = 0.0
+    groups: dict[str, list[dict]] = {}
+    all_metas: list[dict] = []
+
     for t in tests:
-        for key, val in t.get("user_properties", []):
-            if key == "cost" and isinstance(val, dict):
-                total_cost += val.get("cost_usd") or 0
-            if key == "stochastic" and isinstance(val, dict):
-                stochastic_cost += val.get("cost_usd") or 0
+        meta = _extract_test_meta(t)
+        all_metas.append(meta)
 
-    scenarios = _parse_features()
+        keywords = t.get("keywords", [])
+        matched = [kw[len(prefix):] for kw in keywords if kw.startswith(prefix)]
+        for group_name in matched:
+            groups.setdefault(group_name, []).append(meta)
+
+    def _aggregate(metas: list[dict]) -> dict:
+        total_runs = sum(m["runs"] for m in metas)
+        total_passed = sum(m["passed"] for m in metas)
+        return {
+            "tests_run": len(metas),
+            "passed_100pct": sum(1 for m in metas if m["is_100"]),
+            "passed_partial": sum(1 for m in metas if m["is_partial"]),
+            "pass_rate": round(total_passed / total_runs, 3) if total_runs else 0.0,
+            "duration_s": round(sum(m["duration_s"] for m in metas), 2),
+            "cost_usd": round(sum(m["cost_usd"] for m in metas), 4),
+        }
+
+    rows = []
+    for name in sorted(groups):
+        row = _aggregate(groups[name])
+        row["group"] = name
+        rows.append(row)
+
+    totals = _aggregate(all_metas)
+    totals["group"] = "TOTAL"
+    rows.append(totals)
 
     return {
         "report_available": True,
-        "total_tests": summary.get("total", 0),
-        "passed": summary.get("passed", 0),
-        "failed": summary.get("failed", 0),
-        "errors": summary.get("error", 0),
-        "skipped": summary.get("skipped", 0),
-        "duration_seconds": round(report.get("duration", 0), 2),
-        "total_cost_usd": round(total_cost, 4),
-        "stochastic_cost_usd": round(stochastic_cost, 4),
-        "bdd_scenarios_defined": len(scenarios),
+        "run_name": report.get("run_name"),
+        "group_by": group_by,
         "created": report.get("created"),
+        "rows": rows,
     }
 
 
@@ -299,6 +406,18 @@ def handle_list_unit_tests(
     }
 
 
+def _parse_run_entry(filename: str) -> dict:
+    """Parse a GCS blob filename into a structured run entry.
+
+    Filenames are ``{timestamp}.json`` or ``{timestamp}--{run_name}.json``.
+    """
+    stem = filename.replace(".json", "")
+    if "--" in stem:
+        ts, name = stem.split("--", 1)
+        return {"timestamp": ts, "run_name": name}
+    return {"timestamp": stem, "run_name": None}
+
+
 def handle_test_history(app: str = "agent", limit: int = 10) -> dict:
     """Fetch historical test results from GCS."""
     client, err = _gcs_client()
@@ -308,19 +427,21 @@ def handle_test_history(app: str = "agent", limit: int = 10) -> dict:
     prefix = f"test-results/{app}/"
     blobs = list(client.bucket(GCS_BUCKET).list_blobs(prefix=prefix))
 
-    runs = sorted(
-        [b.name.split("/")[-1].replace(".json", "") for b in blobs
+    filenames = sorted(
+        [b.name.split("/")[-1] for b in blobs
          if b.name.endswith(".json") and "latest.json" not in b.name],
         reverse=True,
     )[:limit]
 
-    if not runs:
+    if not filenames:
         return {
             "available": True,
             "app": app,
             "runs": [],
             "note": "No historical results found. Publish results first.",
         }
+
+    runs = [_parse_run_entry(f) for f in filenames]
 
     return {
         "available": True,
@@ -371,6 +492,7 @@ def handle_run_scenarios(
     tool: str | None = None,
     stochastic: bool = False,
     runs: int | None = None,
+    run_name: str | None = None,
 ) -> dict:
     """Run BDD scenarios matching the given filters and return structured results."""
     cmd = [
@@ -388,6 +510,9 @@ def handle_run_scenarios(
         cmd.append("--stochastic")
         if runs:
             cmd.extend(["--stochastic-runs", str(runs)])
+
+    if run_name:
+        cmd.extend(["--run-name", run_name])
 
     try:
         proc = subprocess.run(
@@ -409,6 +534,8 @@ def handle_run_scenarios(
             "error": "No json-report generated",
         }
 
+    publish_result = handle_publish_results()
+
     summary = report.get("summary", {})
     tests = report.get("tests", [])
 
@@ -417,7 +544,7 @@ def handle_run_scenarios(
     for t in tests:
         cost = 0.0
         stochastic_data = None
-        for key, val in t.get("user_properties", []):
+        for key, val in _iter_user_props(t.get("user_properties", [])):
             if key == "cost" and isinstance(val, dict):
                 cost = val.get("cost_usd") or 0
             if key == "stochastic" and isinstance(val, dict):
@@ -433,7 +560,7 @@ def handle_run_scenarios(
             total_cost += stochastic_data.get("cost_usd", 0)
         results.append(entry)
 
-    return {
+    result = {
         "exit_code": proc.returncode,
         "total": summary.get("total", 0),
         "passed": summary.get("passed", 0),
@@ -442,17 +569,24 @@ def handle_run_scenarios(
         "total_cost_usd": round(total_cost, 4),
         "tests": results,
     }
+    if publish_result.get("published"):
+        result["published"] = publish_result.get("paths", [])
+    else:
+        result["publish_error"] = publish_result.get("error", "unknown")
+    return result
 
 
 def handle_run_regression(
     domain: str | None = None,
     agent: str | None = None,
+    run_name: str | None = None,
 ) -> dict:
     """Run a full stochastic regression for a domain or agent."""
     return handle_run_scenarios(
         agent=agent,
         domain=domain,
         stochastic=True,
+        run_name=run_name,
     )
 
 
@@ -466,6 +600,39 @@ def _gcs_client():
         return None, "SA key not found at test-results-publisher-key.json"
     creds = service_account.Credentials.from_service_account_file(str(sa_key))
     return gcs.Client(credentials=creds, project=creds.project_id), None
+
+
+def _fetch_run(run: str, app: str = "agent") -> str | None:
+    """Download a historical run from GCS into .report.json.
+
+    ``run`` can be a full filename (``2026-04-10T14:30:00Z--name.json``),
+    a stem without ``.json``, or a substring that uniquely matches a blob.
+    Returns an error string on failure, None on success.
+    """
+    client, err = _gcs_client()
+    if err:
+        return err
+
+    prefix = f"test-results/{app}/"
+    blobs = [
+        b for b in client.bucket(GCS_BUCKET).list_blobs(prefix=prefix)
+        if b.name.endswith(".json") and "latest.json" not in b.name
+    ]
+
+    needle = run if run.endswith(".json") else run + ".json"
+    exact = [b for b in blobs if b.name.endswith(f"/{needle}")]
+    if not exact:
+        exact = [b for b in blobs if run in b.name]
+
+    if len(exact) == 0:
+        return f"No run matching '{run}' found in GCS."
+    if len(exact) > 1:
+        names = [b.name.split("/")[-1] for b in exact[:5]]
+        return f"Ambiguous — {len(exact)} runs match '{run}': {names}"
+
+    data = exact[0].download_as_text()
+    REPORT_PATH.write_text(data)
+    return None
 
 
 def handle_publish_results(app: str = "agent") -> dict:
@@ -482,7 +649,11 @@ def handle_publish_results(app: str = "agent") -> dict:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     prefix = f"test-results/{app}"
 
-    ts_blob = bucket.blob(f"{prefix}/{ts}.json")
+    report = _read_report()
+    run_name = report.get("run_name") if report else None
+    ts_stem = f"{ts}--{run_name}" if run_name else ts
+
+    ts_blob = bucket.blob(f"{prefix}/{ts_stem}.json")
     ts_blob.upload_from_string(data, content_type="application/json")
 
     latest_blob = bucket.blob(f"{prefix}/latest.json")
@@ -491,6 +662,7 @@ def handle_publish_results(app: str = "agent") -> dict:
     return {
         "published": True,
         "app": app,
+        "run_name": run_name,
         "timestamp": ts,
-        "paths": [f"gs://{GCS_BUCKET}/{prefix}/{ts}.json", f"gs://{GCS_BUCKET}/{prefix}/latest.json"],
+        "paths": [f"gs://{GCS_BUCKET}/{prefix}/{ts_stem}.json", f"gs://{GCS_BUCKET}/{prefix}/latest.json"],
     }

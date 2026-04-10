@@ -23,9 +23,9 @@ scenarios("../features/csv_bulk_edit.feature")
 
 
 @when(
-    parsers.parse(
-        'the user uploads a CSV changing department to "{value}" '
-        'for "{vendor_a}" and "{vendor_b}"'
+    parsers.re(
+        r'the user uploads a CSV changing department to "(?P<value>[^"]+)" '
+        r'for "(?P<vendor_a>[^"]+)" and "(?P<vendor_b>[^"]+)"'
     ),
     target_fixture="context",
 )
@@ -55,8 +55,8 @@ def upload_multi_field_csv(test_vendor_ids, vendor):
 
 
 @when(
-    parsers.parse(
-        'the user uploads a CSV changing purpose for "{vendor_a}" and "{vendor_b}"'
+    parsers.re(
+        r'the user uploads a CSV changing purpose for "(?P<vendor_a>[^"]+)" and "(?P<vendor_b>[^"]+)"'
     ),
     target_fixture="context",
 )
@@ -72,8 +72,8 @@ def upload_purpose_csv_2(test_vendor_ids, vendor_a, vendor_b):
 
 
 @when(
-    parsers.parse(
-        'the user uploads a CSV changing department to "{value}" for "{vendor}"'
+    parsers.re(
+        r'the user uploads a CSV changing department to "(?P<value>[^"]+)" for "(?P<vendor>[^"]+)"$'
     ),
     target_fixture="context",
 )
@@ -205,9 +205,9 @@ def upload_csv_headers_only(headers):
 
 
 @when(
-    parsers.parse(
-        'the user uploads a CSV with unchanged Engineering departments '
-        'for "{vendor_a}" and "{vendor_b}"'
+    parsers.re(
+        r'the user uploads a CSV with unchanged Engineering departments '
+        r'for "(?P<vendor_a>[^"]+)" and "(?P<vendor_b>[^"]+)"'
     ),
     target_fixture="context",
 )
