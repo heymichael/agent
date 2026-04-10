@@ -1,0 +1,10 @@
+---
+description: IAM and service account governance — human approval gate
+alwaysApply: true
+---
+
+# IAM Governance
+
+Canonical rule lives in `haderach-platform/.cursor/rules/iam-governance.mdc`. Read that file for the full policy.
+
+**Short version:** Never create, modify, or delete a service account, IAM binding, or permission grant without explicit approval from the user. This includes Terraform resources, `gcloud` CLI commands, workflow auth steps, and `.env` credential references. When a task needs SA/IAM changes, stop and present the proposal first.
