@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", interpolate=False)
 
+from service.costs import calculate_cost  # noqa: E402 (after dotenv load)
+
 BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_HEADERS = {"Content-Type": "application/json"}
 
@@ -31,6 +33,51 @@ _ACL_VENDOR_SPECS = [
     ("ACL Test Vendor Allowed",  "acl-test-allowed",  PRODUCT_DEPT_ID),
     ("ACL Test Vendor Denied",   "acl-test-denied",   ENGINEERING_DEPT_ID),
 ]
+
+# ── Per-test cost tracking ───────────────────────────────────────────────
+
+_current_test_usage: list[dict] = []
+
+
+def _track_usage(result: dict) -> None:
+    """Extract the usage dict from a /chat response and accumulate it."""
+    usage = result.get("usage")
+    if usage:
+        _current_test_usage.append(usage)
+
+
+def _sum_test_cost() -> dict:
+    """Aggregate all tracked usage into a single cost summary."""
+    totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    model = None
+    for u in _current_test_usage:
+        totals["prompt_tokens"] += u.get("prompt_tokens", 0)
+        totals["completion_tokens"] += u.get("completion_tokens", 0)
+        totals["total_tokens"] += u.get("total_tokens", 0)
+        model = model or u.get("model")
+    cost = None
+    if model:
+        cost = calculate_cost(model, totals["prompt_tokens"], totals["completion_tokens"])
+    return {**totals, "model": model, "cost_usd": cost, "api_calls": len(_current_test_usage)}
+
+
+@pytest.fixture(autouse=True)
+def _reset_cost_tracker():
+    """Clear usage accumulator before each test."""
+    _current_test_usage.clear()
+    yield
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Inject per-test cost metadata into json-report."""
+    outcome = yield
+    report = outcome.get_result()
+    if report.when == "call" and _current_test_usage:
+        cost_data = _sum_test_cost()
+        if not hasattr(report, "user_properties"):
+            report.user_properties = []
+        report.user_properties.append(("cost", cost_data))
 
 
 def _get_db_pool():
@@ -133,7 +180,9 @@ def chat(prompt: str, *, headers=None, attachments=None):
         timeout=60,
     )
     resp.raise_for_status()
-    return resp.json()
+    result = resp.json()
+    _track_usage(result)
+    return result
 
 
 def scoped_chat(prompt: str, *, attachments=None):
@@ -161,7 +210,9 @@ def chat_with_csv(csv_content: str, filename: str = "test.csv", prompt: str = ""
         timeout=30,
     )
     resp.raise_for_status()
-    return resp.json()
+    result = resp.json()
+    _track_usage(result)
+    return result
 
 
 def chat_multi_turn(messages: list[dict], *, headers=None):
@@ -177,7 +228,9 @@ def chat_multi_turn(messages: list[dict], *, headers=None):
         timeout=60,
     )
     resp.raise_for_status()
-    return resp.json()
+    result = resp.json()
+    _track_usage(result)
+    return result
 
 
 def make_csv(headers: list[str], rows: list[list[str]]) -> str:

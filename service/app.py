@@ -217,6 +217,7 @@ class ChatResponse(BaseModel):
     tables: list[TablePayload] = []
     session_id: str | None = None
     tool_messages: list[dict] = []
+    usage: dict | None = None
 
 
 @dataclass
@@ -229,6 +230,7 @@ class AgentResult:
     downloads: list[Download] = field(default_factory=list)
     tables: list[TablePayload] = field(default_factory=list)
     tool_messages: list[dict] = field(default_factory=list)
+    token_usage: dict | None = None
 
 
 def run_agent_loop(
@@ -255,6 +257,12 @@ def run_agent_loop(
     downloads: list[Download] = []
     tables: list[TablePayload] = []
     tool_messages: list[dict] = []
+    token_usage: dict = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "model": MODEL,
+    }
 
     for _ in range(max_rounds):
         try:
@@ -266,7 +274,15 @@ def run_agent_loop(
             )
         except Exception:
             logger.exception("OpenAI API error in agent loop")
-            return AgentResult(reply="Sorry, I encountered an error contacting the AI service.")
+            return AgentResult(
+                reply="Sorry, I encountered an error contacting the AI service.",
+                token_usage=token_usage,
+            )
+
+        if response.usage:
+            token_usage["prompt_tokens"] += response.usage.prompt_tokens
+            token_usage["completion_tokens"] += response.usage.completion_tokens
+            token_usage["total_tokens"] += response.usage.total_tokens
 
         choice = response.choices[0]
 
@@ -345,6 +361,7 @@ def run_agent_loop(
             downloads=downloads,
             tables=tables,
             tool_messages=tool_messages,
+            token_usage=token_usage,
         )
 
     return AgentResult(
@@ -355,6 +372,7 @@ def run_agent_loop(
         downloads=downloads,
         tables=tables,
         tool_messages=tool_messages,
+        token_usage=token_usage,
     )
 
 
@@ -909,6 +927,8 @@ def _execute_ask_expense_agent(args: dict, caller_email: str = "") -> str:
         "status": "ok",
         "reply": inner_result.reply,
     }
+    if inner_result.token_usage:
+        response["token_usage"] = inner_result.token_usage
     if inner_result.tables:
         serialized = [
             {
@@ -1015,6 +1035,7 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
         tables=result.tables,
         session_id=session_id,
         tool_messages=result.tool_messages,
+        usage=result.token_usage,
     )
 
 
