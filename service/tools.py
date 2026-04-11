@@ -11,9 +11,13 @@ delete_vendor is disabled — deletion must go through a system admin.
 import csv
 import io
 import json
+import logging
+from dataclasses import dataclass, field
 from datetime import date as date_type
 
 from . import pg_client
+
+logger = logging.getLogger(__name__)
 from .sandbox import execute_python
 from mcp_server.tools import (
     handle_vendor_lookup,
@@ -509,6 +513,91 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {},
+            },
+        },
+    },
+    # -- Table view control tools --
+    {
+        "type": "function",
+        "function": {
+            "name": "set_view_columns",
+            "description": (
+                "Change which columns are visible in a data table. "
+                "Provide specific column keys, use column group names "
+                "from the prompt, or set reset=true to restore defaults."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table": {
+                        "type": "string",
+                        "description": "Table identifier (e.g. 'vendors').",
+                    },
+                    "columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Column keys to display.",
+                    },
+                    "reset": {
+                        "type": "boolean",
+                        "description": "If true, restore the default column set.",
+                    },
+                },
+                "required": ["table"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_table_filters",
+            "description": (
+                "Apply row filters to a data table. Each filter targets "
+                "a column with a set of allowed values. Only categorical "
+                "and boolean columns support filtering. Set clear=true "
+                "to remove all filters."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table": {
+                        "type": "string",
+                        "description": "Table identifier (e.g. 'vendors').",
+                    },
+                    "filters": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "column": {
+                                    "type": "string",
+                                    "description": "Column key to filter on.",
+                                },
+                                "values": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Allowed values for this column.",
+                                },
+                            },
+                            "required": ["column", "values"],
+                        },
+                        "description": "Filters to apply.",
+                    },
+                    "combine": {
+                        "type": "string",
+                        "enum": ["and", "or"],
+                        "description": (
+                            "How to combine filters across columns. "
+                            "Use 'and' when ALL conditions must match; "
+                            "use 'or' when ANY condition should match."
+                        ),
+                    },
+                    "clear": {
+                        "type": "boolean",
+                        "description": "If true, remove all active filters.",
+                    },
+                },
+                "required": ["table"],
             },
         },
     },
@@ -1273,6 +1362,244 @@ def execute_process_vendor_csv(args: dict, caller_email: str = "") -> str:
     return json.dumps(result)
 
 
+# ---------------------------------------------------------------------------
+# Table view config — schema-driven column metadata
+# ---------------------------------------------------------------------------
+
+_PG_TYPE_MAP: dict[str, str] = {
+    "text": "categorical",
+    "character varying": "categorical",
+    "boolean": "boolean",
+    "date": "date",
+    "timestamp without time zone": "date",
+    "timestamp with time zone": "date",
+    "integer": "numeric",
+    "bigint": "numeric",
+    "smallint": "numeric",
+    "numeric": "numeric",
+    "double precision": "numeric",
+    "real": "numeric",
+    "ARRAY": "text",
+    "jsonb": "text",
+    "json": "text",
+    "uuid": "text",
+}
+
+
+@dataclass(frozen=True)
+class ColumnConfig:
+    label: str
+    col_type: str  # categorical | boolean | date | numeric | text
+    db_name: str
+
+
+@dataclass
+class TableConfig:
+    columns: dict[str, ColumnConfig]
+    default_columns: list[str]
+    column_groups: dict[str, list[str]]
+    pinned: str
+
+    @property
+    def valid_columns(self) -> set[str]:
+        return set(self.columns.keys())
+
+    @property
+    def filterable_columns(self) -> set[str]:
+        return {k for k, v in self.columns.items()
+                if v.col_type in ("categorical", "boolean")
+                and k != self.pinned}
+
+    @classmethod
+    def from_table(
+        cls,
+        *,
+        db_table: str,
+        camel_map: dict[str, str],
+        default_columns: list[str],
+        column_groups: dict[str, list[str]],
+        pinned: str,
+    ) -> "TableConfig":
+        """Build config by introspecting Postgres metadata.
+
+        ``db_table`` can be a table or a view.
+        ``camel_map`` maps snake_case DB column names to camelCase API keys.
+        Columns without a ``COMMENT ON COLUMN`` are excluded as internal.
+        """
+        pool = pg_client.get_pool()
+        with pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.column_name, c.data_type,
+                       pgd.description AS comment
+                FROM   information_schema.columns c
+                LEFT JOIN pg_catalog.pg_description pgd
+                       ON pgd.objoid = %s::regclass
+                      AND pgd.objsubid = c.ordinal_position
+                WHERE  c.table_schema = 'public'
+                  AND  c.table_name   = %s
+                ORDER BY c.ordinal_position
+                """,
+                (db_table, db_table),
+            ).fetchall()
+
+        columns: dict[str, ColumnConfig] = {}
+        for row in rows:
+            comment = row.get("comment")
+            if not comment:
+                continue
+            db_name = row["column_name"]
+            api_key = camel_map.get(db_name, db_name)
+            col_type = _PG_TYPE_MAP.get(row["data_type"], "text")
+            columns[api_key] = ColumnConfig(
+                label=comment, col_type=col_type, db_name=db_name,
+            )
+
+        logger.info(
+            "TableConfig[%s]: %d columns, %d filterable",
+            db_table, len(columns),
+            sum(1 for v in columns.values()
+                if v.col_type in ("categorical", "boolean")),
+        )
+        return cls(
+            columns=columns,
+            default_columns=default_columns,
+            column_groups=column_groups,
+            pinned=pinned,
+        )
+
+
+TABLE_CONFIGS: dict[str, TableConfig] = {}
+
+
+# ---------------------------------------------------------------------------
+# Table view tool handlers
+# ---------------------------------------------------------------------------
+
+
+def execute_set_view_columns(args: dict, caller_email: str = "") -> str:
+    table_id = args.get("table", "")
+    config = TABLE_CONFIGS.get(table_id)
+    if not config:
+        return json.dumps({
+            "ok": False,
+            "error": f"Unknown table: '{table_id}'",
+            "valid_tables": sorted(TABLE_CONFIGS.keys()),
+        })
+
+    if args.get("reset"):
+        return json.dumps({
+            "action": "set_columns",
+            "table": table_id,
+            "view_columns": config.default_columns,
+        })
+
+    columns = args.get("columns", [])
+    if not columns:
+        return json.dumps({
+            "ok": False,
+            "error": "No columns specified. Provide a list of column keys or set reset=true.",
+        })
+
+    invalid = [c for c in columns if c not in config.valid_columns]
+    if invalid:
+        return json.dumps({
+            "ok": False,
+            "error": f"Invalid column keys: {invalid}",
+            "valid_columns": sorted(config.valid_columns),
+        })
+
+    seen: set[str] = set()
+    deduped = []
+    for c in columns:
+        if c not in seen:
+            seen.add(c)
+            deduped.append(c)
+
+    return json.dumps({
+        "action": "set_columns",
+        "table": table_id,
+        "view_columns": deduped,
+    })
+
+
+def execute_set_table_filters(args: dict, caller_email: str = "") -> str:
+    table_id = args.get("table", "")
+    config = TABLE_CONFIGS.get(table_id)
+    if not config:
+        return json.dumps({
+            "ok": False,
+            "error": f"Unknown table: '{table_id}'",
+            "valid_tables": sorted(TABLE_CONFIGS.keys()),
+        })
+
+    if args.get("clear"):
+        return json.dumps({
+            "action": "set_filters",
+            "table": table_id,
+            "table_filters": [],
+        })
+
+    filters = args.get("filters", [])
+    if not filters:
+        return json.dumps({
+            "ok": False,
+            "error": "No filters specified. Provide a list of filter objects or set clear=true.",
+        })
+
+    if args.get("combine") == "or":
+        return json.dumps({
+            "ok": False,
+            "error": (
+                "Table filters only support AND (all conditions must match). "
+                "OR filtering across columns is not available. "
+                "Suggest the user try a data query (e.g. vendor_list) instead."
+            ),
+        })
+
+    _WILDCARD_CHARS = set("*?%")
+
+    for f in filters:
+        col = f.get("column", "")
+        if col not in config.valid_columns:
+            return json.dumps({
+                "ok": False,
+                "error": f"Unknown column: '{col}'",
+                "valid_columns": sorted(config.valid_columns),
+            })
+        if col not in config.filterable_columns:
+            col_cfg = config.columns[col]
+            return json.dumps({
+                "ok": False,
+                "error": (
+                    f"Column '{col}' ({col_cfg.label}) is type "
+                    f"'{col_cfg.col_type}' and does not support set-based "
+                    f"filtering. Suggest the user use the search bar "
+                    f"above the table for text searches."
+                ),
+            })
+        for val in f.get("values", []):
+            if val in ("*", "none"):
+                continue
+            if _WILDCARD_CHARS & set(val):
+                return json.dumps({
+                    "ok": False,
+                    "error": (
+                        f"Filter values must be exact matches. "
+                        f"'{val}' looks like a pattern (prefix, wildcard, "
+                        f"or substring). Table filters do not support "
+                        f"pattern matching. Suggest the user use the "
+                        f"search bar above the table instead."
+                    ),
+                })
+
+    return json.dumps({
+        "action": "set_filters",
+        "table": table_id,
+        "table_filters": filters,
+    })
+
+
 TOOL_HANDLERS = {
     "vendor_lookup": execute_vendor_lookup,
     "vendor_count": execute_vendor_count,
@@ -1287,6 +1614,8 @@ TOOL_HANDLERS = {
     "modify_vendor": execute_modify_vendor,
     "generate_vendor_edit_csv": execute_generate_vendor_edit_csv,
     "process_vendor_csv": execute_process_vendor_csv,
+    "set_view_columns": execute_set_view_columns,
+    "set_table_filters": execute_set_table_filters,
 }
 
 
@@ -1303,6 +1632,7 @@ _VENDOR_TOOL_NAMES = {
     "vendor_lookup", "vendor_count", "vendor_list",
     "add_vendor", "modify_vendor",
     "generate_vendor_edit_csv", "process_vendor_csv",
+    "set_view_columns", "set_table_filters",
 }
 
 ASK_EXPENSE_AGENT_TOOL = {

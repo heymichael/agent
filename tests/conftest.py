@@ -221,6 +221,26 @@ def chat_with_csv(csv_content: str, filename: str = "test.csv", prompt: str = ""
     return result
 
 
+def chat_with_context(prompt: str, *, table_view: dict | None = None, headers=None):
+    """POST to /chat with optional tableView context."""
+    payload = {
+        "messages": [{"role": "user", "content": prompt}],
+        "context": {"app": "vendors"},
+    }
+    if table_view:
+        payload["context"]["tableView"] = table_view
+    resp = requests.post(
+        f"{BASE_URL}/chat",
+        json=payload,
+        headers=headers or DEFAULT_HEADERS,
+        timeout=60,
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    _track_usage(result)
+    return result
+
+
 def chat_multi_turn(messages: list[dict], *, headers=None):
     """POST to /chat with a full message history and return the parsed response."""
     payload = {

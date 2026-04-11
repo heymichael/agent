@@ -28,6 +28,8 @@ markers = [
     "capability_csv_generation: explicit CSV generation for named vendors",
     "capability_csv_threshold: vendor count threshold triggering CSV redirect",
     "capability_column_visibility: table column visibility control",
+    "capability_table_filters: table row filtering control",
+    "module_table_controls: table view control module (column visibility, row filters)",
     "capability_disambiguation: vendor disambiguation selection flow",
     "capability_mode_switch: switching between CSV and single-vendor flows",
     "capability_multi_turn_context: multi-turn tool history replay",
@@ -48,6 +50,8 @@ markers = [
     "tool_generate_vendor_edit_csv: tests exercising the generate_vendor_edit_csv tool",
     "tool_process_vendor_csv: tests exercising the process_vendor_csv tool",
     "tool_ask_expense_agent: tests exercising expense agent delegation",
+    "tool_set_view_columns: tests exercising the set_view_columns tool",
+    "tool_set_table_filters: tests exercising the set_table_filters tool",
 ]
 filterwarnings = [
     "ignore::pytest.PytestUnknownMarkWarning",
