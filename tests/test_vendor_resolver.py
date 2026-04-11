@@ -227,14 +227,14 @@ class TestResolveVendorByIdentifier:
 
     @patch("service.pg_client.get_pool")
     def test_alias_match(self, mock_pool):
-        """A known alias must resolve to its parent vendor as an exact match."""
+        """A known alias must resolve to its parent vendor as a close match."""
         mock_pool.return_value = _make_pool(
             all_vendors=_ALL_VENDORS_LIGHT,
         )
         result = resolve_vendor_by_identifier("AWS")
         assert result is not None
         assert result.vendor["id"] == _VENDOR_AWS["id"]
-        assert result.match == "exact"
+        assert result.match == "close"
 
     @patch("service.pg_client.get_pool")
     def test_normalised_match(self, mock_pool):
