@@ -157,98 +157,6 @@ def handle_list_scenarios(
     }
 
 
-def handle_scenario_coverage(
-    agent: str | None = None,
-    domain: str | None = None,
-    module: str | None = None,
-    capability: str | None = None,
-    tool: str | None = None,
-    run: str | None = None,
-    app: str = "agent",
-) -> dict:
-    """Join BDD scenarios against a json-report to show pass/fail/cost.
-
-    When ``run`` is provided, fetches that historical run from GCS first.
-    """
-    if run:
-        err = _fetch_run(run, app)
-        if err:
-            return {"error": err}
-
-    scenarios = _parse_features()
-    filtered = [
-        s for s in scenarios
-        if _matches_filters(s["tags"], agent, domain, module, capability, tool)
-    ]
-
-    report = _read_report()
-    if not report:
-        return {
-            "total_scenarios": len(filtered),
-            "report_available": False,
-            "note": "No .report.json found. Run tests with --json-report first.",
-        }
-
-    test_map: dict[str, dict] = {}
-    for t in report.get("tests", []):
-        name = _nodeid_to_scenario(t["nodeid"])
-        test_map[name] = t
-
-    results = []
-    passed = failed = not_run = 0
-    total_cost = 0.0
-
-    for s in filtered:
-        test_name = re.sub(r"[^\w]", "_", s["name"].lower()).strip("_")
-        match = None
-        for key, val in test_map.items():
-            if test_name in key.lower().replace("-", "_"):
-                match = val
-                break
-
-        if match:
-            outcome = match.get("outcome", "unknown")
-            cost = 0.0
-            for prop_key, prop_val in _iter_user_props(match.get("user_properties", [])):
-                if prop_key == "cost" and isinstance(prop_val, dict):
-                    cost = prop_val.get("cost_usd") or 0.0
-            total_cost += cost
-
-            if outcome == "passed":
-                passed += 1
-            else:
-                failed += 1
-
-            entry: dict = {
-                "scenario": s["name"],
-                "feature": s["feature"],
-                "outcome": outcome,
-                "cost_usd": round(cost, 6),
-            }
-            if outcome != "passed":
-                crash_msg = match.get("call", {}).get("crash", {}).get("message", "")
-                if crash_msg:
-                    entry["error"] = crash_msg
-            results.append(entry)
-        else:
-            not_run += 1
-            results.append({
-                "scenario": s["name"],
-                "feature": s["feature"],
-                "outcome": "not_run",
-                "cost_usd": 0,
-            })
-
-    return {
-        "total_scenarios": len(filtered),
-        "passed": passed,
-        "failed": failed,
-        "not_run": not_run,
-        "total_cost_usd": round(total_cost, 4),
-        "scenarios": results,
-    }
-
-
 _VALID_GROUP_BY = {"tool", "domain", "module", "capability", "agent"}
 
 
@@ -362,50 +270,6 @@ def handle_test_summary(group_by: str = "tool", run: str | None = None, app: str
     }
 
 
-def handle_list_unit_tests(
-    file: str | None = None,
-    search: str | None = None,
-) -> dict:
-    """List unit tests by running pytest --collect-only."""
-    cmd = [str(VENV_PYTHON), "-m", "pytest", "--collect-only", "-q"]
-
-    if file:
-        cmd.append(f"tests/{file}")
-    else:
-        cmd.append("tests/")
-        cmd.extend(["--ignore=tests/step_defs", "--ignore=tests/features"])
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=str(AGENT_ROOT),
-        )
-    except subprocess.TimeoutExpired:
-        return {"error": "Collection timed out after 30s"}
-
-    lines = proc.stdout.strip().splitlines()
-    tests = [l for l in lines if "::" in l and not l.startswith(("=", "-", " "))]
-
-    if search:
-        pattern = search.lower()
-        tests = [t for t in tests if pattern in t.lower()]
-
-    by_file: dict[str, list[str]] = {}
-    for t in tests:
-        parts = t.split("::", 1)
-        fname = parts[0]
-        tname = parts[1] if len(parts) > 1 else t
-        by_file.setdefault(fname, []).append(tname)
-
-    return {
-        "total": len(tests),
-        "files": {k: {"count": len(v), "tests": v} for k, v in by_file.items()},
-    }
-
-
 def _parse_run_entry(filename: str) -> dict:
     """Parse a GCS blob filename into a structured run entry.
 
@@ -416,6 +280,74 @@ def _parse_run_entry(filename: str) -> dict:
         ts, name = stem.split("--", 1)
         return {"timestamp": ts, "run_name": name}
     return {"timestamp": stem, "run_name": None}
+
+
+def _normalize_name(s: str) -> str:
+    """Collapse a scenario or test name to lowercase alpha-only for matching."""
+    return re.sub(r"[^a-z]", "", s.lower())
+
+
+def _build_prompt_map() -> dict[str, str]:
+    """Map normalized scenario names to their user prompt from feature files."""
+    prompts: dict[str, str] = {}
+    for fpath in sorted(FEATURES_DIR.glob("*.feature")):
+        current_scenario = ""
+        for line in fpath.read_text().splitlines():
+            stripped = line.strip()
+            if re.match(r"Scenario( Outline)?:", stripped):
+                name = re.sub(r"Scenario( Outline)?:\s*", "", stripped)
+                current_scenario = _normalize_name(name)
+            elif current_scenario and re.match(
+                r'When the user (says|uploads)', stripped,
+            ):
+                match = re.search(r'"(.+?)"', stripped)
+                if match and "<" not in match.group(1):
+                    prompts[current_scenario] = match.group(1)
+                    current_scenario = ""
+    return prompts
+
+
+def handle_failure_detail() -> dict:
+    """Return detailed info for every failed test in the latest local report."""
+    report = _read_report()
+    if not report:
+        return {
+            "report_available": False,
+            "note": "No .report.json found. Run tests with --json-report first.",
+        }
+
+    prompt_map = _build_prompt_map()
+    failures = []
+    for t in report.get("tests", []):
+        meta = _extract_test_meta(t)
+        if meta["is_100"] or meta["is_partial"]:
+            continue
+
+        test_name = _nodeid_to_scenario(t["nodeid"])
+        call = t.get("call") or {}
+        crash_msg = call.get("crash", {}).get("message", "")
+        if len(crash_msg) > 150:
+            crash_msg = crash_msg[:150] + "…"
+
+        normalized = _normalize_name(test_name)
+        prompt = None
+        for key, val in prompt_map.items():
+            if key in normalized or normalized in key:
+                prompt = val
+                break
+
+        failures.append({
+            "test": test_name,
+            "prompt": prompt,
+            "assertion": crash_msg,
+            "passed": meta["passed"],
+            "runs": meta["runs"],
+        })
+
+    return {
+        "total_failures": len(failures),
+        "failures": failures,
+    }
 
 
 def handle_test_history(app: str = "agent", limit: int = 10) -> dict:
@@ -448,14 +380,6 @@ def handle_test_history(app: str = "agent", limit: int = 10) -> dict:
         "app": app,
         "total_runs": len(runs),
         "runs": runs,
-    }
-
-
-def handle_list_playwright_tests() -> dict:
-    """List Playwright test results from GCS. (Deferred — GCS not yet provisioned.)"""
-    return {
-        "available": False,
-        "note": "Playwright GCS upload not yet configured (Phase 6).",
     }
 
 
@@ -519,11 +443,11 @@ def handle_run_scenarios(
             cmd,
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=7200,
             cwd=str(AGENT_ROOT),
         )
     except subprocess.TimeoutExpired:
-        return {"error": "Test run timed out after 600s"}
+        return {"error": "Test run timed out after 7200s"}
 
     report = _read_report()
     if not report:
@@ -574,20 +498,6 @@ def handle_run_scenarios(
     else:
         result["publish_error"] = publish_result.get("error", "unknown")
     return result
-
-
-def handle_run_regression(
-    domain: str | None = None,
-    agent: str | None = None,
-    run_name: str | None = None,
-) -> dict:
-    """Run a full stochastic regression for a domain or agent."""
-    return handle_run_scenarios(
-        agent=agent,
-        domain=domain,
-        stochastic=True,
-        run_name=run_name,
-    )
 
 
 def _gcs_client():

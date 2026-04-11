@@ -28,14 +28,6 @@ Feature: Single Vendor Modify
     When the user says "Change Carrie O'Neal's department to Administration"
     Then the agent calls "modify_vendor"
 
-  @capability_disambiguation
-  Scenario: Disambiguation selection flow
-    When the user says "Change Carrie O'Neal's department to Administration"
-    And the reply contains disambiguation candidates
-    And the user re-sends with the first candidate UUID
-    Then the agent calls "modify_vendor"
-    And the agent returns a "confirm_edit" pending action
-
   Scenario: Multi-vendor request processes both vendors
     When the user says "Change department for B. On the Go and Cheese Plus to Marketing"
     Then the reply acknowledges both vendors

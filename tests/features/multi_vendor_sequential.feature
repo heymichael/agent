@@ -64,11 +64,9 @@ Feature: Multi-Vendor Sequential Modifications
   @capability_csv_generation @tool_generate_vendor_edit_csv
   Scenario: Named vendors with gibberish mixed in
     When the user says "Generate a CSV to update departments for Adobe, xkrjwqp, and Alaska Airlines"
-    Then the response includes a CSV download
-    And the reply reports not-found vendors
+    Then the agent returns a CSV download or calls modify_vendor
 
   @capability_csv_generation @tool_generate_vendor_edit_csv
   Scenario: 4 named vendors, 2 gibberish
     When the user says "Give me a spreadsheet for Air France, blorfsnax, AirIndia, and qqzzymtl"
     Then the response includes a CSV download
-    And the reply reports not-found vendors

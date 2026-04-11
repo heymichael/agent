@@ -96,7 +96,11 @@ def assert_reply_uuid_error(context):
 @then("the reply mentions a not-found error")
 def assert_reply_not_found(context):
     reply = context["result"]["reply"].lower()
-    assert any(w in reply for w in ["not found", "exist", "not"]), (
+    assert any(w in reply for w in [
+        "not found", "couldn't find", "could not find", "couldn't",
+        "can't find", "cannot find", "no vendor", "doesn't exist",
+        "does not exist", "was not", "isn't", "not",
+    ]), (
         f"Expected not-found error in reply, got: {reply[:300]}"
     )
 

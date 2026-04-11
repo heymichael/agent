@@ -43,7 +43,7 @@ Feature: Spend Queries
 
   @capability_spend_detail
   Scenario: Vendor without detail data
-    When the user says "Break down Sidley Austin spending by service"
+    When the user says "Break down Acer American Corporation spending by service"
     Then the agent calls "ask_expense_agent"
     And the reply gracefully explains no data is available
 

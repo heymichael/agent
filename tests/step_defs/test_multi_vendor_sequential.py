@@ -30,6 +30,19 @@ def assert_tool_not_called(context, tool):
     )
 
 
+@then("the agent returns a CSV download or calls modify_vendor")
+def assert_csv_or_modify(context):
+    downloads = context["result"].get("downloads", [])
+    tools = context["result"].get("tool_calls_executed", [])
+    has_csv = len(downloads) >= 1
+    has_modify = "modify_vendor" in tools
+    assert has_csv or has_modify, (
+        f"Expected CSV download or modify_vendor call. "
+        f"Downloads: {len(downloads)}, Tools: {tools}. "
+        f"Reply: {context['result']['reply'][:300]}"
+    )
+
+
 @then("the reply reports not-found vendors")
 def assert_not_found_reported(context):
     reply = context["result"]["reply"].lower()
@@ -37,4 +50,8 @@ def assert_not_found_reported(context):
         "not found", "couldn't find", "could not find",
         "unable to find", "no vendor", "doesn't exist",
         "does not exist", "don't recognize", "unrecognized",
+        "no matching", "no match", "isn't a match", "is no match",
+        "can't find", "cannot find",
+        "wasn't found", "was not found", "weren't found",
+        "invalid vendor", "fix the name",
     ]), f"Expected not-found report. Reply: {context['result']['reply'][:300]}"

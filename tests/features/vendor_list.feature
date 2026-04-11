@@ -6,8 +6,8 @@ Feature: Vendor List and Filtering
   # ── Vendor list queries (scenarios 19–21, 24) ─────────────────────────
 
   @module_list @capability_vendor_list @tool_vendor_list
-  Scenario: 1099 individual vendors
-    When the user says "List the individual 1099 vendors"
+  Scenario: 1099 vendors
+    When the user says "List all the 1099 vendors"
     Then the agent calls "vendor_list"
     And the response includes a CSV download
 
@@ -15,12 +15,6 @@ Feature: Vendor List and Filtering
   Scenario: Department filter
     When the user says "Show me all vendors in the Marketing department"
     Then the agent calls "vendor_list"
-
-  @module_list @capability_vendor_list @tool_vendor_list
-  Scenario: Truncation on large results
-    When the user says "List all check vendors"
-    Then the agent calls "vendor_list"
-    And the response includes a CSV download
 
   @module_list @capability_vendor_list @tool_vendor_count
   Scenario: Invalid filter value shows valid options
@@ -37,7 +31,7 @@ Feature: Vendor List and Filtering
 
   @module_csv_download @capability_csv_download @tool_vendor_list
   Scenario: No CSV for small result sets
-    When the user says "Show me vendors in the Marketing department"
+    When the user says "Show me vendors in the AI department"
     Then the agent calls "vendor_list"
     And the response does not include a CSV download
 

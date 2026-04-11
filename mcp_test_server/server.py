@@ -15,13 +15,10 @@ from mcp.server.fastmcp import FastMCP
 
 from .tools import (
     handle_list_scenarios,
-    handle_scenario_coverage,
     handle_test_summary,
-    handle_list_unit_tests,
+    handle_failure_detail,
     handle_test_history,
-    handle_list_playwright_tests,
     handle_run_scenarios,
-    handle_run_regression,
     handle_publish_results,
 )
 
@@ -32,14 +29,14 @@ mcp = FastMCP("haderach-test-status")
 
 
 @mcp.tool()
-async def list_scenarios(
+async def list_e2e_tests(
     agent: str | None = None,
     domain: str | None = None,
     module: str | None = None,
     capability: str | None = None,
     tool: str | None = None,
 ) -> dict:
-    """List BDD test scenarios from .feature files, filtered by tag dimensions.
+    """List BDD end-to-end test scenarios from .feature files, filtered by tag dimensions.
 
     Returns scenarios grouped by feature with their capability tags.
     All filter parameters are optional — omit to list everything.
@@ -52,38 +49,6 @@ async def list_scenarios(
         tool: Filter by tool (e.g. "modify_vendor", "spend_by_vendor").
     """
     return handle_list_scenarios(agent, domain, module, capability, tool)
-
-
-@mcp.tool()
-async def scenario_coverage(
-    agent: str | None = None,
-    domain: str | None = None,
-    module: str | None = None,
-    capability: str | None = None,
-    tool: str | None = None,
-    run: str | None = None,
-    app: str = "agent",
-) -> dict:
-    """Show pass/fail/cost status for BDD scenarios by joining feature files against a test report.
-
-    Uses the latest local report by default. Pass ``run`` to load a
-    historical run from GCS first (overwrites .report.json).
-
-    Args:
-        agent: Filter by agent.
-        domain: Filter by domain.
-        module: Filter by module.
-        capability: Filter by capability.
-        tool: Filter by tool.
-        run: Historical run to fetch (filename, stem, or substring from
-             test_history). Omit to use the latest local report.
-        app: Application name for GCS lookup (default "agent").
-    """
-    if run:
-        return await asyncio.to_thread(
-            handle_scenario_coverage, agent, domain, module, capability, tool, run, app,
-        )
-    return handle_scenario_coverage(agent, domain, module, capability, tool)
 
 
 @mcp.tool()
@@ -113,17 +78,13 @@ async def test_summary(
 
 
 @mcp.tool()
-async def list_unit_tests(
-    file: str | None = None,
-    search: str | None = None,
-) -> dict:
-    """List unit tests (non-BDD) by collecting them with pytest.
+async def failure_detail() -> dict:
+    """Show detailed failure info for every failed test in the latest local report.
 
-    Args:
-        file: Specific test file to list (e.g. "test_tools.py"). Omit for all.
-        search: Case-insensitive substring to filter test names.
+    Returns the test name, assertion message, failure count over total runs,
+    pass rate, and cost for each failure.
     """
-    return handle_list_unit_tests(file, search)
+    return handle_failure_detail()
 
 
 @mcp.tool()
@@ -140,16 +101,6 @@ async def test_history(
         limit: Number of recent runs to return (default 10).
     """
     return handle_test_history(app, limit)
-
-
-@mcp.tool()
-async def list_playwright_tests(app: str = "card") -> dict:
-    """List Playwright end-to-end test results. (Requires GCS — not yet provisioned.)
-
-    Args:
-        app: Application name (default "card").
-    """
-    return handle_list_playwright_tests()
 
 
 # ── Execution tools ──────────────────────────────────────────────────────
@@ -186,24 +137,6 @@ async def run_scenarios(
         handle_run_scenarios,
         agent, domain, module, capability, tool, stochastic, runs, run_name,
     )
-
-
-@mcp.tool()
-async def run_regression(
-    domain: str | None = None,
-    agent: str | None = None,
-    run_name: str | None = None,
-) -> dict:
-    """Run a full stochastic regression for a domain or agent.
-
-    Shorthand for run_scenarios with stochastic=true and broad filters.
-
-    Args:
-        domain: Filter by domain (e.g. "vendors").
-        agent: Filter by agent (e.g. "vendor_management").
-        run_name: Human-readable label for this run (e.g. "vendor-baseline").
-    """
-    return await asyncio.to_thread(handle_run_regression, domain, agent, run_name)
 
 
 @mcp.tool()

@@ -483,4 +483,8 @@ only created by tool calls — you cannot produce one from memory or \
 conversation history. If the user asks to "see", "list", or "show" \
 vendors after a count, you MUST call vendor_list with the same filters. \
 Do not recite the count from memory.
+9. When you cannot fulfill part of a request — for example, a vendor \
+name doesn't match anything, or a filter returns no results for some \
+items — always tell the user which parts could not be processed and \
+why. Never silently skip or drop parts of what the user asked for.
 """

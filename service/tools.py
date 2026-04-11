@@ -1309,9 +1309,12 @@ def execute_generate_vendor_edit_csv(args: dict, caller_email: str = "") -> str:
                 return json.dumps({"ok": False, "error": f"Unknown owner: '{owner_filter}'"})
 
     vendor_names = args.get("vendor_names")
+    unmatched: list[str] = []
     if vendor_names:
         name_set = {n.lower() for n in vendor_names}
         vendors = [v for v in vendors if v.get("name", "").lower() in name_set]
+        matched = {v.get("name", "").lower() for v in vendors}
+        unmatched = [n for n in vendor_names if n.lower() not in matched]
 
     if not vendors:
         return json.dumps({"ok": False, "error": "No vendors match the given filters."})
@@ -1324,13 +1327,16 @@ def execute_generate_vendor_edit_csv(args: dict, caller_email: str = "") -> str:
         parts.append(owner_filter.lower().replace(" ", "-").split("@")[0])
     filename = "-".join(parts) + ".csv"
 
-    return json.dumps({
+    result = {
         "ok": True,
         "csv": csv_content,
         "csv_filename": filename,
         "row_count": len(vendors),
         "columns": profile.csv_headers,
-    })
+    }
+    if unmatched:
+        result["unmatched_vendors"] = unmatched
+    return json.dumps(result)
 
 
 def execute_process_vendor_csv(args: dict, caller_email: str = "") -> str:
