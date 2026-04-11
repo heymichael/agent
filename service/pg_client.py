@@ -330,7 +330,7 @@ def resolve_vendor_by_identifier(identifier: str) -> VendorMatch | None:
         ]
         if len(alias_matches) == 1:
             vendor = get_vendor(alias_matches[0]["id"])
-            match_type = "exact"
+            match_type = "close"
         elif len(alias_matches) > 1:
             vendor = get_vendor(alias_matches[0]["id"])
             match_type = "disambiguate"

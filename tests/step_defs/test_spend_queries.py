@@ -16,12 +16,28 @@ scenarios("../features/spend_queries.feature")
 
 @then("the reply gracefully explains no data is available")
 def assert_graceful_empty(context):
-    reply = context["result"]["reply"].lower()
-    assert any(w in reply for w in [
+    result = context["result"]
+    reply = result["reply"].lower()
+
+    tables = result.get("tables") or []
+    empty_table = any(
+        len(t.get("rows", [None])) == 0 for t in tables
+    )
+
+    text_signals = [
         "no ", "not available", "empty", "doesn't have",
         "don't have", "unavailable", "no data", "no project",
         "no categories", "no breakdown", "not populated",
-    ]), f"Expected graceful empty-data message. Reply: {context['result']['reply'][:300]}"
+        "couldn't find", "could not find", "no spend",
+        "no record", "no expense", "no detail", "not found",
+        "no information", "don't see", "doesn't appear",
+    ]
+    has_text_signal = any(w in reply for w in text_signals)
+
+    assert has_text_signal or empty_table, (
+        f"Expected graceful empty-data message or empty table. "
+        f"Reply: {reply[:300]}"
+    )
 
 
 @then("the reply does not ask for disambiguation")

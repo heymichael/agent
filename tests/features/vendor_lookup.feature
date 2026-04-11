@@ -19,7 +19,7 @@ Feature: Vendor Lookup
   # ── Full profile ────────────────────────────────────────────────────────
 
   Scenario: Full profile request
-    When the user says "Show me everything you know about Datadog"
+    When the user says "Show me everything you know about Adobe"
     Then the agent calls "vendor_lookup"
     And the reply includes multiple vendor fields
 

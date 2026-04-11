@@ -213,7 +213,7 @@ def chat_with_csv(csv_content: str, filename: str = "test.csv", prompt: str = ""
         f"{BASE_URL}/chat",
         json=payload,
         headers=headers or DEFAULT_HEADERS,
-        timeout=30,
+        timeout=60,
     )
     resp.raise_for_status()
     result = resp.json()

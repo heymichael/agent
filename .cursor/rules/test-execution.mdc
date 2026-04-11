@@ -1,0 +1,38 @@
+---
+description: How to run and inspect e2e tests — MCP for focused runs, shell for full suite
+alwaysApply: true
+---
+
+# Test execution
+
+## Focused runs (single capability, tool, or module)
+
+Use the `run_scenarios` MCP tool on the `haderach-test-status` server. Good for quick checks that complete in under a few minutes.
+
+Filter parameters: `agent`, `domain`, `module`, `capability`, `tool`. Supports `stochastic: true` and `runs` for re-run mode.
+
+## Full suite runs (no filters, or stochastic full regression)
+
+Do NOT use the MCP for full suite runs — they take 20-90 minutes and block the agent. Run pytest directly via shell instead.
+
+1. **Background the command** (`block_until_ms: 0`):
+
+```
+cd /Users/michaelmader_1/haderach_org/haderach_site/agent && .venv/bin/python -m pytest tests/step_defs/ --stochastic --json-report --json-report-file=.report.json -v
+```
+
+2. **Monitor** by reading the terminal file periodically or using `Await` with a pattern.
+
+3. **MANDATORY — Publish results after completion.** Call the `publish_results` MCP tool to upload to GCS. This step is non-optional. Every full suite run must end with a publish. Do not consider the run complete until results are published.
+
+```
+CallMcpTool: server=project-2-agent-test-status, toolName=publish_results, arguments={}
+```
+
+## Query tools (always via MCP)
+
+| Task | MCP tool |
+|------|----------|
+| Aggregate stats by tool | `test_summary` |
+| Detailed failure info (assertion, runs) | `failure_detail` |
+| List BDD e2e tests | `list_e2e_tests` |
