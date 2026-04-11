@@ -19,7 +19,7 @@ load_dotenv(interpolate=False)
 from pydantic import BaseModel
 from openai import OpenAI
 
-from .prompts import EXPENSE_ANALYTICS_PROMPT, VENDOR_MANAGEMENT_PROMPT
+from .prompts import EXPENSE_ANALYTICS_PROMPT, VENDOR_MANAGEMENT_PROMPT, build_table_prompt
 from .tools import (
     EXPENSE_TOOL_DEFINITIONS, EXPENSE_TOOL_HANDLERS,
     VENDOR_TOOL_DEFINITIONS, VENDOR_TOOL_HANDLERS,
@@ -51,6 +51,38 @@ async def lifespan(_app: FastAPI):
         logger.info("Firebase public keys warmed")
     except Exception:
         logger.exception("Failed to warm Firebase public keys at startup")
+
+    try:
+        from .tools import TableConfig, TABLE_CONFIGS
+        _snake_to_camel = {v: k for k, v in _VENDOR_FIELD_MAP.items()}
+        _snake_to_camel.update({
+            "source_system": "sourceSystem",
+            "source_system_id": "sourceSystemId",
+            "created_at": "createdAt",
+            "modified_at": "modifiedAt",
+            "synced_at": "lastSyncedAt",
+            "secondary_owner": "secondaryOwner",
+        })
+        TABLE_CONFIGS["vendors"] = TableConfig.from_table(
+            db_table="vendor_display_v",
+            camel_map=_snake_to_camel,
+            default_columns=["accountType", "department", "owner"],
+            column_groups={
+                "contract columns": [
+                    "contractStartDate", "contractEndDate",
+                    "contractLengthMonths", "autoRenew",
+                ],
+                "payment columns": ["paymentMethod", "billingFrequency"],
+                "ownership columns": ["owner", "secondaryOwner", "department"],
+                "sync columns": [
+                    "sourceSystem", "sourceSystemId", "lastSyncedAt",
+                ],
+            },
+            pinned="name",
+        )
+        logger.info("TABLE_CONFIGS populated (%d tables)", len(TABLE_CONFIGS))
+    except Exception:
+        logger.exception("Failed to populate TABLE_CONFIGS at startup")
 
     try:
         yield
@@ -187,6 +219,9 @@ class PendingAction(BaseModel):
     display_fields: list[dict] | None = None
     updates: list[dict] | None = None
     summary: dict | None = None
+    view_columns: list[str] | None = None
+    table_filters: list[dict] | None = None
+    table: str | None = None
 
 
 class Disambiguation(BaseModel):
@@ -312,7 +347,11 @@ def run_agent_loop(
                     downloads.append(Download(filename=csv_filename, content=csv_content))
 
                 tables_list = parsed.pop("tables", None)
-                table_payload = parsed.pop("table", None)
+                table_payload = parsed.get("table")
+                if isinstance(table_payload, dict):
+                    parsed.pop("table")
+                else:
+                    table_payload = None
                 if tables_list:
                     for tp in tables_list:
                         tables.append(TablePayload(**tp))
@@ -343,6 +382,18 @@ def run_agent_loop(
                         vendor_name=vendor["name"],
                         proposed_updates=parsed.get("proposed_updates"),
                         display_fields=parsed.get("display_fields"),
+                    ))
+                elif parsed.get("action") == "set_columns":
+                    pending_actions.append(PendingAction(
+                        type="set_columns",
+                        table=parsed.get("table"),
+                        view_columns=parsed.get("view_columns"),
+                    ))
+                elif parsed.get("action") == "set_filters":
+                    pending_actions.append(PendingAction(
+                        type="set_filters",
+                        table=parsed.get("table"),
+                        table_filters=parsed.get("table_filters"),
                     ))
                 elif parsed.get("status") == "ambiguous":
                     field_args = {k: v for k, v in fn_args.items() if k != "identifier" and v is not None}
@@ -946,7 +997,7 @@ def _execute_ask_expense_agent(args: dict, caller_email: str = "") -> str:
     return json.dumps(response)
 
 
-def _resolve_domain(app_context: str, has_csv: bool) -> tuple[str, list[dict], dict]:
+def _resolve_domain(app_context: str, has_csv: bool, table_view: dict | None = None) -> tuple[str, list[dict], dict]:
     """Return (system_prompt_body, tool_definitions, tool_handlers) for a domain."""
     if app_context == "expenses":
         return EXPENSE_ANALYTICS_PROMPT, EXPENSE_TOOL_DEFINITIONS, EXPENSE_TOOL_HANDLERS
@@ -956,7 +1007,8 @@ def _resolve_domain(app_context: str, has_csv: bool) -> tuple[str, list[dict], d
         if t["function"]["name"] != "process_vendor_csv"
     ]
     handlers = {**VENDOR_TOOL_HANDLERS, "ask_expense_agent": _execute_ask_expense_agent}
-    return VENDOR_MANAGEMENT_PROMPT, tools, handlers
+    prompt = VENDOR_MANAGEMENT_PROMPT + "\n\n" + build_table_prompt(["vendors"], table_view=table_view)
+    return prompt, tools, handlers
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -998,7 +1050,8 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
     has_csv_attachment = any(
         a.get("filename", "").lower().endswith(".csv") for a in att_dicts
     )
-    prompt_body, active_tools, active_handlers = _resolve_domain(app_context, has_csv_attachment)
+    table_view = (req.context or {}).get("tableView")
+    prompt_body, active_tools, active_handlers = _resolve_domain(app_context, has_csv_attachment, table_view=table_view)
     system_prompt = f"Today's date is {today}.\n\n{prompt_body}"
 
     result = run_agent_loop(

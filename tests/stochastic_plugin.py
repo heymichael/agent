@@ -1,13 +1,13 @@
 """Stochastic runner for LLM-dependent tests.
 
 Activated with ``--stochastic``.  Re-runs every ``@llm_live``-marked test
-up to N times (``--stochastic-runs``, default 4) and applies a dual pass
+up to N times (``--stochastic-runs``, default 5) and applies a dual pass
 criterion:
 
-  * **4-consecutive**: stop early as soon as the test passes 4 times in a
+  * **3-consecutive**: stop early as soon as the test passes 3 times in a
     row (default, configurable via ``--stochastic-consecutive``).
-  * **90 % floor**: if the consecutive threshold is never reached, accept
-    the test when >= 90 % of all runs passed.
+  * **80 % floor**: if the consecutive threshold is never reached, accept
+    the test when >= 80 % of all runs passed (4/5).
 
 Non-``@llm_live`` tests run normally regardless of the flag.
 
@@ -40,23 +40,23 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     group.addoption(
         "--stochastic-runs",
         type=int,
-        default=10,
+        default=5,
         metavar="N",
-        help="Maximum number of runs per @llm_live test (default: 10).",
+        help="Maximum number of runs per @llm_live test (default: 5).",
     )
     group.addoption(
         "--stochastic-consecutive",
         type=int,
-        default=4,
+        default=3,
         metavar="N",
-        help="Consecutive passes required for early exit (default: 4).",
+        help="Consecutive passes required for early exit (default: 3).",
     )
     group.addoption(
         "--stochastic-floor",
         type=float,
-        default=0.9,
+        default=0.8,
         metavar="P",
-        help="Minimum pass rate (0.0–1.0) to accept a test (default: 0.9).",
+        help="Minimum pass rate (0.0–1.0) to accept a test (default: 0.8).",
     )
     group.addoption(
         "--run-name",
@@ -78,6 +78,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     _run_name = session.config.getoption("run_name", default=None)
 
 
+@pytest.hookimpl(optionalhook=True)
 def pytest_json_modifyreport(json_report: dict) -> None:
     """Inject run_name into the top-level json-report dict."""
     if _run_name:

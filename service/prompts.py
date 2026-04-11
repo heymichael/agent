@@ -8,6 +8,8 @@ filter reference, and table-rendered behaviour.
 See task 151 and strategy 135 for the design rationale.
 """
 
+from __future__ import annotations
+
 # ---------------------------------------------------------------------------
 # Shared prompt fragments
 # ---------------------------------------------------------------------------
@@ -185,6 +187,112 @@ that cannot be expressed as a single period range (e.g. "compare Q1 vs Q3").
 4. Never fabricate vendor data.
 5. """ + _SHARED_TABLE_RENDERED_RULE + """
 """
+
+
+# ---------------------------------------------------------------------------
+# Table view prompt builder
+# ---------------------------------------------------------------------------
+
+
+def build_table_prompt(table_ids: list[str], *, table_view: dict | None = None) -> str:
+    """Generate prompt guidance for table view control tools.
+
+    Reads TABLE_CONFIGS at call time (populated during startup).
+    ``table_view`` is the optional frontend context with current
+    ``visibleColumns`` and ``activeFilters``.
+    """
+    from .tools import TABLE_CONFIGS
+
+    sections = [
+        "## Table view controls",
+        "",
+        "| Tool | Use when |",
+        "|------|----------|",
+        "| set_view_columns | Changing which columns the user sees in a data table |",
+        "| set_table_filters | Applying row-level filters to a data table |",
+        "",
+    ]
+
+    for tid in table_ids:
+        config = TABLE_CONFIGS.get(tid)
+        if not config:
+            continue
+
+        sections.append(f"### Table: {tid}")
+        sections.append("")
+
+        sections.append("**Column keys** (use these exact keys in tool calls):")
+        sections.append("")
+        for key, col in sorted(config.columns.items()):
+            filterable = " (filterable)" if key in config.filterable_columns else ""
+            sections.append(f"- `{key}` — {col.label}{filterable}")
+        sections.append("")
+
+        if config.column_groups:
+            sections.append(
+                "**Column groups** — when the user mentions a group name, "
+                "expand to the listed keys:"
+            )
+            sections.append("")
+            for group_name, keys in config.column_groups.items():
+                sections.append(
+                    f"- \"{group_name}\" → {', '.join(f'`{k}`' for k in keys)}"
+                )
+            sections.append("")
+
+        sections.append(
+            f"**Default columns**: "
+            f"{', '.join(f'`{k}`' for k in config.default_columns)}"
+        )
+        sections.append("")
+        sections.append(
+            f"**Pinned column**: `{config.pinned}` (always visible, "
+            f"never needs to be included in set_view_columns)"
+        )
+        sections.append("")
+
+    if table_view:
+        visible = table_view.get("visibleColumns")
+        active_filters = table_view.get("activeFilters")
+        data_pane_open = table_view.get("dataPaneOpen", False)
+
+        sections.append("### Current table state")
+        sections.append("")
+        sections.append(
+            f"**Data pane**: {'open — the user can see the table' if data_pane_open else 'closed — the user cannot see the table'}"
+        )
+        if data_pane_open:
+            sections.append(
+                'When the data pane is open and the user says "show me", '
+                '"filter", or "only show" vendors matching criteria, prefer '
+                "set_table_filters to control the visible table. Use "
+                "vendor_list only when they explicitly ask to list, count, "
+                "export, or download data."
+            )
+        else:
+            sections.append(
+                "When the data pane is closed, do not use set_view_columns "
+                "or set_table_filters. Use vendor_list or vendor_count to "
+                "answer data questions in the chat."
+            )
+        sections.append("")
+        if visible:
+            sections.append(
+                f"**Currently visible columns**: "
+                f"{', '.join(f'`{k}`' for k in visible)}"
+            )
+            sections.append(
+                'When the user says "hide" or "remove" a column, '
+                "send set_view_columns with the current list minus "
+                'that column. When they say "add" or "also show" a '
+                "column, send the current list plus the new column."
+            )
+        if active_filters:
+            parts = [f"`{f['column']}` = {f['values']}" for f in active_filters]
+            sections.append(f"**Active filters**: {', '.join(parts)}")
+        sections.append("")
+
+    return "\n".join(sections)
 
 
 # ---------------------------------------------------------------------------
