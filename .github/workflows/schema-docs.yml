@@ -1,13 +1,12 @@
 name: update-schema-docs
 
-# Regenerate SchemaSpy database documentation when migrations change.
-"on":
-  workflow_dispatch:
+on:
   push:
     branches:
       - main
     paths:
       - "migrations/**"
+  workflow_dispatch:
 
 permissions:
   contents: read
