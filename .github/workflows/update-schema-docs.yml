@@ -13,9 +13,9 @@ permissions:
   id-token: write
 
 env:
-  INSTANCE_CONNECTION_NAME: haderach-ai:us-central1:haderach-main
-  DB_NAME: haderach
-  DB_SCHEMA: public
+  INSTANCE_CONNECTION_NAME: "haderach-ai:us-central1:haderach-main"
+  DB_NAME: "haderach"
+  DB_SCHEMA: "public"
 
 jobs:
   regenerate:
