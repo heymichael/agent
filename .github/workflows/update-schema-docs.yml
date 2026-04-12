@@ -1,5 +1,6 @@
 name: update-schema-docs
 
+# Regenerate SchemaSpy database documentation when migrations change.
 on:
   push:
     branches:
