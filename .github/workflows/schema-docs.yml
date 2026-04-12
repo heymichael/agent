@@ -82,8 +82,7 @@ jobs:
             -s "$DB_SCHEMA" \
             -u "$PGUSER" \
             -p "$PGPASSWORD" \
-            -desc "Transformation Platform" \
-            -o /output
+            -desc "Transformation Platform"
 
       - name: Clone haderach-content
         env:
