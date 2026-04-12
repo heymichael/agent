@@ -65,14 +65,16 @@ jobs:
           sleep 5
 
       - name: Create output directory
-        run: mkdir -p schemaspy-output
+        run: |
+          mkdir -p schemaspy-output
+          chmod 0777 schemaspy-output
 
       - name: Run SchemaSpy
         env:
           PGUSER: ${{ steps.creds.outputs.db_user }}
           PGPASSWORD: ${{ steps.creds.outputs.db_pass }}
         run: |
-          docker run --rm --network host \
+          docker run --rm --network host --user 0:0 \
             -v "$(pwd)/schemaspy-output:/output" \
             schemaspy/schemaspy:latest \
             -t pgsql11 \
