@@ -16,13 +16,15 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
+from .credentials import load_text_credential
+
 _pool: ConnectionPool | None = None
 
 
 def get_pool() -> ConnectionPool:
     global _pool
     if _pool is None:
-        conninfo = os.environ["DATABASE_URL"]
+        conninfo = load_text_credential("DATABASE_URL")
         _pool = ConnectionPool(
             conninfo,
             min_size=2,

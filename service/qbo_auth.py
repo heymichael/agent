@@ -16,7 +16,6 @@ OAuth endpoints are fetched from the Intuit OpenID discovery document and
 cached for 1 hour.  Hardcoded fallbacks are used if the fetch fails.
 """
 
-import json
 import logging
 import os
 import secrets
@@ -25,6 +24,8 @@ from base64 import b64encode
 from urllib.parse import urlencode
 
 import requests
+
+from .credentials import load_json_credential
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +84,7 @@ def _get_token_url() -> str:
 
 
 def _load_creds() -> dict:
-    raw = os.environ.get("VENDOR_QBO_CREDENTIALS", "{}")
-    return json.loads(raw)
+    return load_json_credential("VENDOR_QBO_CREDENTIALS")
 
 
 def _basic_auth_header(client_id: str, client_secret: str) -> str:

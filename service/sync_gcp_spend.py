@@ -19,7 +19,6 @@ Usage:
     python -m service.sync_gcp_spend --months 3     # rolling 3-month re-sync
 """
 
-import json
 import logging
 import os
 from datetime import date, datetime, timezone
@@ -31,6 +30,7 @@ load_dotenv(interpolate=False)
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
+from .credentials import load_json_credential
 from .pg_client import get_pool
 from .sync_tracker import SyncTracker
 
@@ -68,7 +68,7 @@ def _now() -> datetime:
 
 
 def _build_bq_client() -> bigquery.Client:
-    creds_json = json.loads(os.environ["VENDOR_GCP_BILLING_CREDENTIALS"])
+    creds_json = load_json_credential("VENDOR_GCP_BILLING_CREDENTIALS")
     creds = service_account.Credentials.from_service_account_info(creds_json)
     return bigquery.Client(credentials=creds, project=creds.project_id)
 

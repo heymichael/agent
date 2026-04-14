@@ -1,9 +1,12 @@
 # OS
 .DS_Store
 
-# GCP service account keys
+# Credential files — SA keys, vendor credentials, API keys, connection strings
 *-sa-key.json
 *-publisher-key.json
+*-credentials.json
+*-api-key.txt
+*-database-url.txt
 
 __pycache__/
 *.pyc

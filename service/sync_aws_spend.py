@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 
 load_dotenv(interpolate=False)
 
+from .credentials import load_json_credential
 from .pg_client import get_pool
 from .sync_tracker import SyncTracker
 
@@ -51,7 +52,7 @@ def _fetch_monthly_costs_grouped(months: int = 12) -> list[dict]:
     Returns a list of dicts:
         [{"date": date, "category": str, "subcategory": str, "amount": float}, ...]
     """
-    creds = json.loads(os.environ["VENDOR_AWS_BILLING_CREDENTIALS"])
+    creds = load_json_credential("VENDOR_AWS_BILLING_CREDENTIALS")
     ce = boto3.client(
         "ce",
         aws_access_key_id=creds["access_key_id"],
