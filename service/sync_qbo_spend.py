@@ -35,6 +35,7 @@ load_dotenv(interpolate=False)
 
 import requests
 
+from .credentials import load_json_credential
 from .pg_client import get_pool
 from .qbo_auth import refresh_access_token
 from .sync_tracker import SyncTracker
@@ -258,7 +259,7 @@ def sync(months: int | None = None):
     tracker.start(metadata={"months": months or "all"})
 
     try:
-        creds = json.loads(os.environ["VENDOR_QBO_CREDENTIALS"])
+        creds = load_json_credential("VENDOR_QBO_CREDENTIALS")
         realm_id = creds["realm_id"]
 
         with tracker.step("api_fetch") as s:

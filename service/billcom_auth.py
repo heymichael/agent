@@ -1,18 +1,19 @@
 """Shared Bill.com v3 authentication helper."""
 
-import json
 import os
 
 import requests
+
+from .credentials import load_json_credential
 
 
 def billcom_login() -> tuple[str, str, dict]:
     """Login to Bill.com and return (base_url, session_id, headers).
 
-    Reads credentials from the VENDOR_BILL_CREDENTIALS env var (JSON string
-    with keys: userName, password, orgId, devKey, optional baseUrl).
+    Reads credentials from the file path in VENDOR_BILL_CREDENTIALS
+    (JSON with keys: userName, password, orgId, devKey, optional baseUrl).
     """
-    creds = json.loads(os.environ["VENDOR_BILL_CREDENTIALS"])
+    creds = load_json_credential("VENDOR_BILL_CREDENTIALS")
     base = creds.get("baseUrl", "https://gateway.prod.bill.com/connect")
 
     resp = requests.post(
