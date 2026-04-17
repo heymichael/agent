@@ -19,10 +19,18 @@ load_dotenv(interpolate=False)
 from pydantic import BaseModel
 from openai import OpenAI
 
-from .prompts import EXPENSE_ANALYTICS_PROMPT, VENDOR_MANAGEMENT_PROMPT, build_table_prompt
+from .prompts import (
+    EXPENSE_ANALYTICS_PROMPT, VENDOR_MANAGEMENT_PROMPT, build_table_prompt,
+    CMS_GUIDE_PROMPT, CMS_EDITING_PROMPT, CMS_SCHEDULING_PROMPT, CMS_ADMIN_PROMPT,
+)
 from .tools import (
     EXPENSE_TOOL_DEFINITIONS, EXPENSE_TOOL_HANDLERS,
     VENDOR_TOOL_DEFINITIONS, VENDOR_TOOL_HANDLERS,
+)
+from .cms_tools import (
+    CMS_EDITING_TOOLS, CMS_EDITING_HANDLERS,
+    CMS_SCHEDULING_TOOLS, CMS_SCHEDULING_HANDLERS,
+    CMS_ADMIN_TOOLS, CMS_ADMIN_HANDLERS,
 )
 from . import pg_client
 from .auth import get_verified_user, warm_firebase_public_keys
@@ -997,8 +1005,24 @@ def _execute_ask_expense_agent(args: dict, caller_email: str = "") -> str:
     return json.dumps(response)
 
 
-def _resolve_domain(app_context: str, has_csv: bool, table_view: dict | None = None) -> tuple[str, list[dict], dict]:
+def _resolve_cms_mode(mode: str) -> tuple[str, list[dict], dict]:
+    """Dispatch CMS domain by mode → (prompt, tools, handlers)."""
+    if mode == "editing":
+        return CMS_EDITING_PROMPT, CMS_EDITING_TOOLS, CMS_EDITING_HANDLERS
+    if mode == "scheduling":
+        return CMS_SCHEDULING_PROMPT, CMS_SCHEDULING_TOOLS, CMS_SCHEDULING_HANDLERS
+    if mode == "admin":
+        return CMS_ADMIN_PROMPT, CMS_ADMIN_TOOLS, CMS_ADMIN_HANDLERS
+    # browse, approval, admin-permissions → guide-only (no tools)
+    return CMS_GUIDE_PROMPT, [], {}
+
+
+def _resolve_domain(app_context: str, has_csv: bool, table_view: dict | None = None, context: dict | None = None) -> tuple[str, list[dict], dict]:
     """Return (system_prompt_body, tool_definitions, tool_handlers) for a domain."""
+    if app_context == "cms":
+        mode = (context or {}).get("mode", "browse")
+        return _resolve_cms_mode(mode)
+
     if app_context == "expenses":
         return EXPENSE_ANALYTICS_PROMPT, EXPENSE_TOOL_DEFINITIONS, EXPENSE_TOOL_HANDLERS
 
@@ -1051,7 +1075,7 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
         a.get("filename", "").lower().endswith(".csv") for a in att_dicts
     )
     table_view = (req.context or {}).get("tableView")
-    prompt_body, active_tools, active_handlers = _resolve_domain(app_context, has_csv_attachment, table_view=table_view)
+    prompt_body, active_tools, active_handlers = _resolve_domain(app_context, has_csv_attachment, table_view=table_view, context=req.context)
     system_prompt = f"Today's date is {today}.\n\n{prompt_body}"
 
     result = run_agent_loop(
