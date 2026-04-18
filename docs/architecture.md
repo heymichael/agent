@@ -129,18 +129,34 @@ Schema: `migrations/007_site_feedback.sql`.
 
 ## Domain routing
 
-The agent service hosts two domain agents behind a single `/chat` endpoint.
-The `context.app` field in `ChatRequest` selects the domain:
+The agent service hosts multiple domain agents behind a single `/chat` endpoint.
+The `context.app` field in `ChatRequest` selects the top-level domain, and for the CMS domain `context.mode` selects the sub-mode:
 
 | `context.app` | Prompt | Tools | Notes |
 |---|---|---|---|
 | `"expenses"` | `EXPENSE_ANALYTICS_PROMPT` | spend_total, spend_by_vendor, spend_by_dimension, top_vendors, spend_detail, spend_detail_dimensions | Read-only analytics |
 | `"vendors"` (default) | `VENDOR_MANAGEMENT_PROMPT` | vendor_lookup, vendor_count, vendor_list, add_vendor, modify_vendor, generate_vendor_edit_csv, process_vendor_csv, ask_expense_agent | CRUD + delegation |
+| `"cms"` | CMS prompt per mode (see below) | CMS tools per mode (see below) | Content workflow |
 
 The vendor management agent has an `ask_expense_agent` delegation tool that
 invokes `run_agent_loop()` with the expense analytics prompt and tool set.
 This is a V1 sub-agent pattern — simple one-shot delegation for spend
 questions, with redirect guidance for complex follow-ups.
+
+### CMS domain modes (`context.app = "cms"`)
+
+The CMS domain uses `context.mode` to select the operator's current context. Mode is set by the frontend based on explicit UI actions — no intent inference.
+
+| `context.mode` | Agent role | Tools active |
+|---|---|---|
+| `browse` | Guide-only | none |
+| `editing` | Tool-active | cms_get_item, cms_create_item, cms_update_item, cms_lock_item, cms_unlock_item, cms_submit_for_approval, cms_restore_version, cms_add_to_schedule |
+| `scheduling` | Tool-active | cms_add_to_schedule, cms_get_item |
+| `approval` | Guide-only | none |
+| `admin` | Tool-active | cms_create_content_type, cms_update_content_type_schema, cms_commit_content_type, cms_extend_content_type_schema |
+| `admin-permissions` | Guide-only | none |
+
+Guide-only modes inject `cms_user_guide.md` and answer questions about the UI without making tool calls.
 
 ## MCP analytics layer
 
@@ -166,10 +182,12 @@ protocol overhead). It can also be run as a standalone MCP server via
 
 | File | Responsibility |
 |---|---|
-| `service/app.py` | FastAPI application, `/chat` endpoint, `run_agent_loop()` orchestration, domain routing, `ask_expense_agent` sub-agent handler |
+| `service/app.py` | FastAPI application, `/chat` endpoint, `run_agent_loop()` orchestration, domain routing, `ask_expense_agent` sub-agent handler, CMS proxy endpoints |
 | `service/auth.py` | Firebase ID token verification dependency (`get_verified_user`) |
 | `service/tools.py` | OpenAI tool schemas, domain-specific tool/handler subsets (EXPENSE_TOOL_*, VENDOR_TOOL_*), thin handler wrappers that delegate to MCP module |
-| `service/prompts.py` | Domain-specific prompts (EXPENSE_ANALYTICS_PROMPT, VENDOR_MANAGEMENT_PROMPT) composed from shared fragments |
+| `service/prompts.py` | Domain-specific prompts (EXPENSE_ANALYTICS_PROMPT, VENDOR_MANAGEMENT_PROMPT, CMS mode prompts) composed from shared fragments |
+| `service/cms_tools.py` | 12 CMS tool handlers against the Payload REST API (get, create, update, lock/unlock, submit, restore, schedule, content-type CRUD) |
+| `service/cms_user_guide.md` | Operator-facing CMS user guide injected in guide-only modes |
 | `service/pg_client.py` | Postgres connection pool, all CRUD queries, vendor/user/app/spend/department/role operations |
 | `service/sandbox.py` | Sandboxed Python executor for LLM-generated code (120s timeout) |
 | `service/billcom_auth.py` | Shared Bill.com v3 login helper |
@@ -419,6 +437,10 @@ levels without restarting the server. The header is ignored in production
 | `PATCH` | `/vendors/{vendor_id}` | Required | Partial update a vendor |
 | `POST` | `/feedback` | Required | Submit thumbs up/down on a chat message |
 | `POST` | `/feedback/site` | Required | Submit general site/app feedback |
+| `PATCH` | `/cms/items/{item_id}` | Required | Update CMS item data or workflow_status; always sets `_status: published` |
+| `GET` | `/cms/items/{item_id}/versions` | Required | List Payload versions for a CMS item, including workflowStatus |
+| `POST` | `/cms/items/{item_id}/versions/{version_id}/restore` | Required | Restore a Payload version and re-publish |
+| `POST` | `/cms/items` | Required | Create a new CMS content item |
 | `GET` | `/apps` | Required | List all app definitions |
 | `PATCH` | `/apps/{app_id}` | `admin` | Update app label, granting roles, or sort order |
 | `GET` | `/users?role=...` | Required | List users (optional role filter) |
