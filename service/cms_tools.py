@@ -19,7 +19,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 CMS_API_URL = os.environ.get("CMS_API_URL", "")
-CMS_API_KEY = os.environ.get("CMS_API_KEY", "")
+_cms_key_ref = os.environ.get("CMS_API_KEY", "")
+CMS_API_KEY = open(_cms_key_ref).read().strip() if _cms_key_ref and os.path.isfile(_cms_key_ref) else _cms_key_ref
 
 
 def _headers() -> dict[str, str]:
@@ -49,7 +50,9 @@ def handle_cms_get_item(args: dict, **_kw) -> str:
     ct = item.get("contentType")
     guidelines = {}
     if isinstance(ct, dict) and ct.get("schema"):
-        for field_def in ct["schema"]:
+        schema = ct["schema"]
+        fields = schema.get("fields", schema) if isinstance(schema, dict) else schema
+        for field_def in fields:
             if field_def.get("guidelines"):
                 guidelines[field_def["name"]] = field_def["guidelines"]
 
@@ -62,6 +65,7 @@ def handle_cms_create_item(args: dict, **_kw) -> str:
         "contentType": args["contentTypeId"],
         "data": args["data"],
         "workflow_status": "draft",
+        "_status": "published",
     }
     if args.get("slug"):
         body["slug"] = args["slug"]
@@ -83,9 +87,14 @@ def handle_cms_update_item(args: dict, **_kw) -> str:
     if locked_by and locked_by != caller:
         return json.dumps({"status": "locked", "message": f"Item is locked by {locked_by}."})
 
-    body: dict = {}
+    body: dict = {"_status": "published"}
     if "data" in args:
         body["data"] = args["data"]
+    else:
+        content_fields = {k: v for k, v in args.items() if k not in ("itemId", "slug")}
+        if content_fields:
+            existing_data = existing.get("data") or {}
+            body["data"] = {**existing_data, **content_fields}
     if "slug" in args:
         body["slug"] = args["slug"]
     r = httpx.patch(_api(f"/api/content-items/{item_id}"), headers=_headers(), json=body, timeout=10)
@@ -117,12 +126,19 @@ def handle_cms_restore_version(args: dict, **_kw) -> str:
     item_id = args["itemId"]
     version_id = args["versionId"]
     r = httpx.post(
-        _api(f"/api/content-items/{item_id}/versions/{version_id}"),
+        _api(f"/api/content-items/versions/{version_id}"),
         headers=_headers(),
-        json={"restoreVersion": True},
+        json={},
         timeout=10,
     )
     r.raise_for_status()
+    # Payload restore resets _status to draft; re-publish so the item stays visible
+    httpx.patch(
+        _api(f"/api/content-items/{item_id}"),
+        headers=_headers(),
+        json={"_status": "published"},
+        timeout=10,
+    )
     restored = httpx.get(_api(f"/api/content-items/{item_id}"), headers=_headers(), timeout=10)
     restored.raise_for_status()
     return json.dumps({"status": "ok", "item": restored.json()})

@@ -519,6 +519,40 @@ After loading the item, each field with ui="chat" has a guidelines string \
 in the field_guidelines response. Use these guidelines to understand the \
 editorial intent for each field and produce content that matches.
 
+## Content workflow
+
+Items follow a 6-state workflow: draft → needs_approval → \
+changes_requested → approved → live. From approved, items can also be \
+scheduled (approved → scheduled → live).
+
+State meanings:
+- **draft** — editable, not yet submitted. Fields in the work pane are \
+unlocked.
+- **needs_approval** — submitted for review, not editable.
+- **changes_requested** — sent back by a reviewer, editable again.
+- **approved** — accepted, waiting to be published. Not editable.
+- **scheduled** — queued for future publication. Not editable.
+- **live** — published and serving on the site. Not directly editable.
+
+### Editing a live item
+
+Live items cannot be edited in place. The operator must click the \
+"New Version" button in the toolbar to create a draft revision. This \
+preserves the current live content as a version snapshot and flips the \
+item back to draft status so editing can begin. The workflow then \
+proceeds normally: draft → needs_approval → approved → live.
+
+### Toolbar actions
+
+The work pane toolbar provides these buttons (left to right):
+- **Save** — persists edits (active when form has unsaved changes)
+- **Submit for approval** — transitions draft/changes_requested → \
+needs_approval (active in draft or changes_requested)
+- **Publish** — transitions approved → live (active in approved)
+- **New Version** — creates a draft from a live item (active in live)
+- **Version history** — opens version history (always active)
+- **Close** — returns to the items list
+
 ## Behaviour rules
 
 1. Apply edits directly via cms_update_item. Do NOT echo the full content \
@@ -530,6 +564,8 @@ cms_submit_for_approval.
 5. For version history, call cms_restore_version when asked to restore.
 6. Keep responses concise and conversational.
 7. Never fabricate content data.
+8. If the operator asks how to edit a live item, explain the New Version \
+workflow — do not suggest locking or direct edits.
 """
 
 CMS_SCHEDULING_PROMPT = """\
