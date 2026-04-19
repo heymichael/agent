@@ -594,6 +594,30 @@ def _get_user_context_row(conn, email: str) -> dict | None:
     return conn.execute(_USER_CONTEXT_SQL, (email,)).fetchone()
 
 
+_USER_ORG_SLUGS_SQL = """
+    SELECT uom.org_slug
+    FROM users u
+    JOIN user_org_memberships uom ON uom.user_id = u.id
+    WHERE u.email = %s
+    ORDER BY uom.org_slug
+"""
+
+
+def list_user_org_slugs(email: str) -> list[str]:
+    """Return the list of org slugs the user is a member of.
+
+    Cheap lookup intended for the auth dependency on every authenticated
+    request (one indexed JOIN on the membership table). Avoids paying for
+    the full `user_context` view, which materializes vendor/department
+    allowlists this caller doesn't need.
+    """
+    pool = get_pool()
+    normalized = email.strip().lower()
+    with pool.connection() as conn:
+        rows = conn.execute(_USER_ORG_SLUGS_SQL, (normalized,)).fetchall()
+    return [r["org_slug"] for r in rows]
+
+
 def _context_row_to_user(row: dict) -> dict:
     return {
         **_user_summary(
@@ -604,6 +628,11 @@ def _context_row_to_user(row: dict) -> dict:
             list(row.get("denied_vendor_ids") or []),
         ),
         "allowedVendors": row.get("allowed_vendors") or [],
+        # `orgs` is a jsonb array of {slug, name, enabledApps} populated by the
+        # `user_context` view (migration 021). Each element is already in the
+        # camelCased shape the frontend expects, so it serves straight through.
+        # Empty list when the user has no memberships yet — never null.
+        "orgs": row.get("orgs") or [],
     }
 
 
