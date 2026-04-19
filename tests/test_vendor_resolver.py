@@ -200,18 +200,18 @@ class TestResolveVendorByIdentifier:
     @patch("service.pg_client.get_pool")
     def test_empty_identifier(self, mock_pool):
         """An empty identifier must return None without querying the database."""
-        assert resolve_vendor_by_identifier("") is None
+        assert resolve_vendor_by_identifier("", "arcade") is None
 
     @patch("service.pg_client.get_pool")
     def test_whitespace_only(self, mock_pool):
         """Whitespace-only input must be treated as empty and return None."""
-        assert resolve_vendor_by_identifier("   ") is None
+        assert resolve_vendor_by_identifier("   ", "arcade") is None
 
     @patch("service.pg_client.get_pool")
     def test_exact_uuid(self, mock_pool):
         """A valid UUID must resolve via direct ID lookup and return an exact match."""
         mock_pool.return_value = _make_pool(uuid_match=_VENDOR_ACME)
-        result = resolve_vendor_by_identifier(_VENDOR_ACME["id"])
+        result = resolve_vendor_by_identifier(_VENDOR_ACME["id"], "arcade")
         assert result is not None
         assert result.vendor["id"] == _VENDOR_ACME["id"]
         assert result.match == "exact"
@@ -220,7 +220,7 @@ class TestResolveVendorByIdentifier:
     def test_exact_name(self, mock_pool):
         """An exact vendor name must resolve without falling through to fuzzy matching."""
         mock_pool.return_value = _make_pool(name_match=_VENDOR_ACME)
-        result = resolve_vendor_by_identifier("Acme Corp")
+        result = resolve_vendor_by_identifier("Acme Corp", "arcade")
         assert result is not None
         assert result.vendor["id"] == _VENDOR_ACME["id"]
         assert result.match in ("exact", "disambiguate")
@@ -231,7 +231,7 @@ class TestResolveVendorByIdentifier:
         mock_pool.return_value = _make_pool(
             all_vendors=_ALL_VENDORS_LIGHT,
         )
-        result = resolve_vendor_by_identifier("AWS")
+        result = resolve_vendor_by_identifier("AWS", "arcade")
         assert result is not None
         assert result.vendor["id"] == _VENDOR_AWS["id"]
         assert result.match == "close"
@@ -242,7 +242,7 @@ class TestResolveVendorByIdentifier:
         mock_pool.return_value = _make_pool(
             all_vendors=_ALL_VENDORS_LIGHT,
         )
-        result = resolve_vendor_by_identifier("obrien associates llc")
+        result = resolve_vendor_by_identifier("obrien associates llc", "arcade")
         assert result is not None
         assert result.vendor["id"] == _VENDOR_OBRIEN["id"]
         assert result.match in ("exact", "disambiguate")
@@ -254,7 +254,7 @@ class TestResolveVendorByIdentifier:
             similar_results=[(_VENDOR_ACME, 0.65)],
             all_vendors=_ALL_VENDORS_LIGHT,
         )
-        result = resolve_vendor_by_identifier("Acmee Corp")
+        result = resolve_vendor_by_identifier("Acmee Corp", "arcade")
         assert result is not None
         assert result.vendor["id"] == _VENDOR_ACME["id"]
         assert result.match in ("close", "disambiguate")
@@ -266,7 +266,7 @@ class TestResolveVendorByIdentifier:
             similar_results=[(_VENDOR_ACME, 0.30)],
             all_vendors=_ALL_VENDORS_LIGHT,
         )
-        result = resolve_vendor_by_identifier("Acm Crp")
+        result = resolve_vendor_by_identifier("Acm Crp", "arcade")
         assert result is not None
         assert result.vendor["id"] == _VENDOR_ACME["id"]
         assert result.match in ("fuzzy", "disambiguate")
@@ -278,7 +278,7 @@ class TestResolveVendorByIdentifier:
             similar_results=[],
             all_vendors=_ALL_VENDORS_LIGHT,
         )
-        result = resolve_vendor_by_identifier("Completely Unknown Vendor XYZ")
+        result = resolve_vendor_by_identifier("Completely Unknown Vendor XYZ", "arcade")
         assert result is None
 
     @patch("service.pg_client.get_pool")
@@ -292,7 +292,7 @@ class TestResolveVendorByIdentifier:
             ],
             all_vendors=_ALL_VENDORS_LIGHT,
         )
-        result = resolve_vendor_by_identifier("Interexy")
+        result = resolve_vendor_by_identifier("Interexy", "arcade")
         assert result is not None
         assert result.vendor["id"] == _VENDOR_INTEREXY["id"]
         assert result.match == "exact"
@@ -308,7 +308,7 @@ class TestResolveVendorByIdentifier:
             ],
             all_vendors=_ALL_VENDORS_LIGHT,
         )
-        result = resolve_vendor_by_identifier("Interexi")
+        result = resolve_vendor_by_identifier("Interexi", "arcade")
         assert result is not None
         assert result.vendor["id"] == _VENDOR_INTEREXY["id"]
         assert result.match == "disambiguate"
@@ -323,5 +323,5 @@ class TestResolveVendorByIdentifier:
             similar_results=[],
             all_vendors=[],
         )
-        result = resolve_vendor_by_identifier("Maya Glenn")
+        result = resolve_vendor_by_identifier("Maya Glenn", "arcade")
         assert result is None

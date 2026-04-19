@@ -23,6 +23,7 @@ from .prompts import (
     EXPENSE_ANALYTICS_PROMPT, VENDOR_MANAGEMENT_PROMPT, build_table_prompt,
     CMS_GUIDE_PROMPT, CMS_EDITING_PROMPT, CMS_SCHEDULING_PROMPT, CMS_ADMIN_PROMPT,
 )
+from . import tools as tools_module
 from .tools import (
     EXPENSE_TOOL_DEFINITIONS, EXPENSE_TOOL_HANDLERS,
     VENDOR_TOOL_DEFINITIONS, VENDOR_TOOL_HANDLERS,
@@ -138,12 +139,39 @@ def require_finance_admin(caller: dict) -> str:
     return email
 
 
-def _resolve_caller_access(caller: dict) -> set[str] | None:
+def _require_active_org(caller: dict) -> str:
+    """Return the caller's active org slug or raise 400 `Active-Org-Required`.
+
+    Phase 2 leaves `caller["active_org_slug"]` as None only for
+    zero-membership users (every other path either auto-defaults the
+    single membership or raises in `get_verified_user`). Endpoints that
+    operate on org-scoped data must reject None — there is no safe
+    default once data scoping is in effect.
+    """
+    slug = caller.get("active_org_slug")
+    if not slug:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "Active-Org-Required",
+                "message": "No active org resolved for this caller.",
+            },
+        )
+    return slug
+
+
+def _resolve_caller_access(caller: dict, org_slug: str) -> set[str] | None:
     """Resolve the caller's effective vendor set for REST endpoint filtering.
 
-    Returns None for finance_admin (full access) or a set of allowed vendor
-    IDs for restricted users. Empty set means no vendor access.
-    Contractor vendors without an explicit grant are excluded.
+    Returns None for finance_admin (full access *within the active org*)
+    or a set of allowed vendor IDs for restricted users. Empty set means
+    no vendor access. Contractor vendors without an explicit grant are
+    excluded.
+
+    The finance_admin bypass returns None — the *endpoint* then queries
+    `pg_client.list_vendors(org_slug)` (or equivalent) so the active-org
+    filter applies even for finance_admin. The bypass only skips the
+    per-user vendor ACL, never the org filter.
     """
     email = caller.get("email", "")
     if not email:
@@ -157,6 +185,7 @@ def _resolve_caller_access(caller: dict) -> set[str] | None:
         ctx.get("allowed_departments", []),
         ctx.get("allowed_vendor_ids", []),
         ctx.get("denied_vendor_ids", []),
+        org_slug,
         user_id=ctx.get("user_id"),
     ))
 
@@ -676,7 +705,8 @@ def qbo_callback(
 
 @app.delete("/vendors/{vendor_id}")
 def delete_vendor(vendor_id: str, caller: dict = Depends(get_verified_user)):
-    vendor = pg_client.get_vendor(vendor_id)
+    org_slug = _require_active_org(caller)
+    vendor = pg_client.get_vendor(vendor_id, org_slug)
     if not vendor:
         raise HTTPException(status_code=404, detail=f"Vendor '{vendor_id}' not found")
     if vendor.get("sourceSystem") != "manual":
@@ -687,7 +717,7 @@ def delete_vendor(vendor_id: str, caller: dict = Depends(get_verified_user)):
                 "it would be re-created on the next nightly sync."
             ),
         )
-    pg_client.delete_vendor(vendor_id)
+    pg_client.delete_vendor(vendor_id, org_slug)
     return {"ok": True, "deleted": vendor_id}
 
 
@@ -712,7 +742,8 @@ def list_users(
     role: list[str] | None = Query(default=None),
     caller: dict = Depends(get_verified_user),
 ):
-    return pg_client.list_users(role if role else None)
+    org_slug = _require_active_org(caller)
+    return pg_client.list_users(org_slug, role if role else None)
 
 
 @app.get("/me")
@@ -813,8 +844,9 @@ def list_departments(caller: dict = Depends(get_verified_user)):
 
 @app.get("/vendors")
 def list_vendors(caller: dict = Depends(get_verified_user)):
-    vendors = pg_client.list_vendors()
-    allowed = _resolve_caller_access(caller)
+    org_slug = _require_active_org(caller)
+    vendors = pg_client.list_vendors(org_slug)
+    allowed = _resolve_caller_access(caller, org_slug)
     if allowed is None:
         return vendors
     return [v for v in vendors if v.get("id") in allowed]
@@ -852,8 +884,9 @@ def _map_vendor_fields(updates: dict) -> dict:
 def update_vendor(vendor_id: str, updates: dict, caller: dict = Depends(get_verified_user)):
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
+    org_slug = _require_active_org(caller)
     try:
-        result = pg_client.update_vendor(vendor_id, _map_vendor_fields(updates))
+        result = pg_client.update_vendor(vendor_id, _map_vendor_fields(updates), org_slug)
         return {"ok": True, "vendor": result}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -867,8 +900,9 @@ class BatchUpdateRequest(BaseModel):
 def batch_update_vendors(req: BatchUpdateRequest, caller: dict = Depends(get_verified_user)):
     if not req.updates:
         raise HTTPException(status_code=400, detail="No updates provided")
+    org_slug = _require_active_org(caller)
     try:
-        count = pg_client.batch_update_vendors(req.updates)
+        count = pg_client.batch_update_vendors(req.updates, org_slug)
         return {"ok": True, "updated": count}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -890,11 +924,12 @@ def set_vendor_contractor(
     caller: dict = Depends(get_verified_user),
 ):
     email = require_finance_admin(caller)
+    org_slug = _require_active_org(caller)
     actor_id = pg_client.get_user_id_by_email(email)
     if not actor_id:
         raise HTTPException(status_code=403, detail="User not found")
     try:
-        vendor = pg_client.set_vendor_is_contractor(vendor_id, req.is_contractor, actor_id)
+        vendor = pg_client.set_vendor_is_contractor(vendor_id, req.is_contractor, actor_id, org_slug)
         return {"ok": True, "vendor": vendor}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -903,13 +938,15 @@ def set_vendor_contractor(
 @app.get("/vendors/contractors")
 def list_contractor_vendors(caller: dict = Depends(get_verified_user)):
     require_finance_admin(caller)
-    return pg_client.list_contractor_vendors()
+    org_slug = _require_active_org(caller)
+    return pg_client.list_contractor_vendors(org_slug)
 
 
 @app.get("/vendors/{vendor_id}/access")
 def list_vendor_access(vendor_id: str, caller: dict = Depends(get_verified_user)):
     require_finance_admin(caller)
-    vendor = pg_client.get_vendor(vendor_id)
+    org_slug = _require_active_org(caller)
+    vendor = pg_client.get_vendor(vendor_id, org_slug)
     if not vendor:
         raise HTTPException(status_code=404, detail=f"Vendor '{vendor_id}' not found")
     return pg_client.list_contractor_access(vendor_id)
@@ -926,10 +963,11 @@ def grant_vendor_access(
     caller: dict = Depends(get_verified_user),
 ):
     email = require_finance_admin(caller)
+    org_slug = _require_active_org(caller)
     actor_id = pg_client.get_user_id_by_email(email)
     if not actor_id:
         raise HTTPException(status_code=403, detail="User not found")
-    vendor = pg_client.get_vendor(vendor_id)
+    vendor = pg_client.get_vendor(vendor_id, org_slug)
     if not vendor:
         raise HTTPException(status_code=404, detail=f"Vendor '{vendor_id}' not found")
     target_user_id = pg_client.get_user_id_by_email(req.user_email)
@@ -946,7 +984,8 @@ def revoke_vendor_access(
     caller: dict = Depends(get_verified_user),
 ):
     require_finance_admin(caller)
-    vendor = pg_client.get_vendor(vendor_id)
+    org_slug = _require_active_org(caller)
+    vendor = pg_client.get_vendor(vendor_id, org_slug)
     if not vendor:
         raise HTTPException(status_code=404, detail=f"Vendor '{vendor_id}' not found")
     target_user_id = pg_client.get_user_id_by_email(user_email)
@@ -963,15 +1002,16 @@ def get_spend(
     to_month: str = Query(..., alias="to"),
     caller: dict = Depends(get_verified_user),
 ):
-    allowed = _resolve_caller_access(caller)
+    org_slug = _require_active_org(caller)
+    allowed = _resolve_caller_access(caller, org_slug)
     if vendor_ids is None or len(vendor_ids) == 0:
         if allowed is not None:
             vendor_ids = list(allowed)
         else:
-            vendor_ids = [v["id"] for v in pg_client.list_vendors()]
+            vendor_ids = [v["id"] for v in pg_client.list_vendors(org_slug)]
     elif allowed is not None:
         vendor_ids = [v for v in vendor_ids if v in allowed]
-    data = pg_client.query_spend_by_vendor_ids(vendor_ids, from_month, to_month)
+    data = pg_client.query_spend_by_vendor_ids(vendor_ids, from_month, to_month, org_slug)
     return {"data": data}
 
 
@@ -1062,6 +1102,13 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
 
     att_dicts = [a.model_dump() for a in (req.attachments or [])]
     _request_attachments.set(att_dicts)
+
+    # Phase 3 of multi-org tenancy (task 254). Pin the caller's active
+    # org slug to a contextvar so every tool handler under run_agent_loop
+    # — including the sub-agent invoked via ask_expense_agent — scopes
+    # SQL queries to this tenant. Sub-agents run inside the same Python
+    # task and inherit the contextvar automatically.
+    tools_module.set_caller_org_slug(caller.get("active_org_slug"))
 
     today = date.today().isoformat()
 

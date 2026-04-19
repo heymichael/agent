@@ -445,8 +445,11 @@ class TestGenerateVendorEditCsv:
 
 # ── Batch update endpoint ────────────────────────────────────────────────
 
-def _make_client(email="test@example.com"):
-    app.dependency_overrides[get_verified_user] = lambda: {"email": email}
+def _make_client(email="test@example.com", active_org_slug="arcade"):
+    app.dependency_overrides[get_verified_user] = lambda: {
+        "email": email,
+        "active_org_slug": active_org_slug,
+    }
     return TestClient(app)
 
 
@@ -469,7 +472,7 @@ class TestBatchUpdateEndpoint:
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
         assert resp.json()["updated"] == 3
-        mock_batch.assert_called_once_with(updates)
+        mock_batch.assert_called_once_with(updates, "arcade")
 
     def test_empty_updates_returns_400(self):
         """An empty update list must be rejected with 400, not silently no-op."""

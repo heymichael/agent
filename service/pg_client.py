@@ -125,45 +125,54 @@ _VENDOR_LIST_SQL = """
     LEFT JOIN users us ON us.id = v.secondary_owner_id
 """
 
+# Phase 3 of multi-org tenancy (task 254). Every vendor query helper takes
+# `org_slug` as a required positional argument. Defaults are intentionally
+# omitted so a missed call site fails at type-check / import time rather
+# than silently returning cross-tenant rows. See strategy 197-r2 risk
+# section ("Missing an `org_slug` filter on a query").
 
-def list_vendors() -> list[dict]:
-    """Return all vendors with joined department/owner names."""
+
+def list_vendors(org_slug: str) -> list[dict]:
+    """Return all vendors in the given org with joined department/owner names."""
     pool = get_pool()
     with pool.connection() as conn:
         rows = conn.execute(
-            f"{_VENDOR_LIST_SQL} ORDER BY LOWER(v.name)"
+            f"{_VENDOR_LIST_SQL} WHERE v.org_slug = %s ORDER BY LOWER(v.name)",
+            (org_slug,),
         ).fetchall()
     return [_vendor_row_to_dict(r) for r in rows]
 
 
-def get_vendor(vendor_id: str) -> dict | None:
-    """Fetch a vendor by UUID id."""
+def get_vendor(vendor_id: str, org_slug: str) -> dict | None:
+    """Fetch a vendor by UUID id, scoped to the active org."""
     pool = get_pool()
     with pool.connection() as conn:
         row = conn.execute(
-            f"{_VENDOR_LIST_SQL} WHERE v.id = %s", (vendor_id,)
+            f"{_VENDOR_LIST_SQL} WHERE v.id = %s AND v.org_slug = %s",
+            (vendor_id, org_slug),
         ).fetchone()
     return _vendor_row_to_dict(row) if row else None
 
 
-def get_vendor_by_source(source_system: str, source_system_id: str) -> dict | None:
-    """Fetch a vendor by its upstream identity."""
+def get_vendor_by_source(source_system: str, source_system_id: str, org_slug: str) -> dict | None:
+    """Fetch a vendor by its upstream identity, scoped to the active org."""
     pool = get_pool()
     with pool.connection() as conn:
         row = conn.execute(
-            f"{_VENDOR_LIST_SQL} WHERE v.source_system = %s AND v.source_system_id = %s",
-            (source_system, source_system_id),
+            f"{_VENDOR_LIST_SQL} WHERE v.source_system = %s AND v.source_system_id = %s AND v.org_slug = %s",
+            (source_system, source_system_id, org_slug),
         ).fetchone()
     return _vendor_row_to_dict(row) if row else None
 
 
-def find_vendor_by_name(name: str, include_hidden: bool = False) -> dict | None:
-    """Find a vendor by exact name (case-insensitive)."""
+def find_vendor_by_name(name: str, org_slug: str, include_hidden: bool = False) -> dict | None:
+    """Find a vendor by exact name (case-insensitive), scoped to the active org."""
     hidden_clause = "" if include_hidden else " AND v.hidden_from_agent = false"
     pool = get_pool()
     with pool.connection() as conn:
         row = conn.execute(
-            f"{_VENDOR_LIST_SQL} WHERE LOWER(v.name) = LOWER(%s){hidden_clause} LIMIT 1", (name,)
+            f"{_VENDOR_LIST_SQL} WHERE LOWER(v.name) = LOWER(%s) AND v.org_slug = %s{hidden_clause} LIMIT 1",
+            (name, org_slug),
         ).fetchone()
     return _vendor_row_to_dict(row) if row else None
 
@@ -173,13 +182,15 @@ FUZZY_SUGGEST = 0.25
 SIMILAR_THRESHOLD = 0.4
 
 
-def find_vendors_similar(name: str, threshold: float = FUZZY_SUGGEST,
+def find_vendors_similar(name: str, org_slug: str,
+                         threshold: float = FUZZY_SUGGEST,
                          limit: int = 5,
                          include_hidden: bool = False) -> list[tuple[dict, float]]:
-    """Find vendors by trigram similarity (requires pg_trgm).
+    """Find vendors by trigram similarity, scoped to the active org.
 
     Returns a list of (vendor_dict, similarity_score) tuples sorted by
-    descending score, filtered to scores above *threshold*.
+    descending score, filtered to scores above *threshold*. Requires
+    pg_trgm.
     """
     hidden_clause = "" if include_hidden else " AND sub.hidden_from_agent = false"
     pool = get_pool()
@@ -187,10 +198,11 @@ def find_vendors_similar(name: str, threshold: float = FUZZY_SUGGEST,
         rows = conn.execute(
             f"""SELECT sub.*, similarity(LOWER(sub.name), LOWER(%s)) AS sim_score
                 FROM ({_VENDOR_LIST_SQL}) sub
-                WHERE similarity(LOWER(sub.name), LOWER(%s)) > %s{hidden_clause}
+                WHERE similarity(LOWER(sub.name), LOWER(%s)) > %s
+                  AND sub.org_slug = %s{hidden_clause}
                 ORDER BY sim_score DESC
                 LIMIT %s""",
-            (name, name, threshold, limit),
+            (name, name, threshold, org_slug, limit),
         ).fetchall()
     results = []
     for row in rows:
@@ -199,50 +211,60 @@ def find_vendors_similar(name: str, threshold: float = FUZZY_SUGGEST,
     return results
 
 
-def add_vendor(data: dict) -> dict:
-    """Create a new vendor. Returns the created record."""
+def add_vendor(data: dict, org_slug: str) -> dict:
+    """Create a new vendor in the active org. Returns the created record."""
     pool = get_pool()
     now = _now()
     with pool.connection() as conn:
         row = conn.execute(
-            """INSERT INTO vendors (name, source_system, source_system_id, created_at, modified_at)
-               VALUES (%s, %s, %s, %s, %s)
+            """INSERT INTO vendors (name, source_system, source_system_id, org_slug, created_at, modified_at)
+               VALUES (%s, %s, %s, %s, %s, %s)
                RETURNING *""",
-            (data["name"], data.get("source_system", "manual"), data.get("source_system_id", _slugify(data["name"])), now, now),
+            (
+                data["name"],
+                data.get("source_system", "manual"),
+                data.get("source_system_id", _slugify(data["name"])),
+                org_slug,
+                now,
+                now,
+            ),
         ).fetchone()
-    return get_vendor(str(row["id"]))
+    return get_vendor(str(row["id"]), org_slug)
 
 
-def update_vendor(vendor_id: str, updates: dict) -> dict:
-    """Partial-update a vendor. Returns the full record after update."""
+def update_vendor(vendor_id: str, updates: dict, org_slug: str) -> dict:
+    """Partial-update a vendor scoped to the active org. Returns the full record after update."""
     pool = get_pool()
     fields = {k: v for k, v in updates.items() if k in VENDOR_EDITABLE_COLUMNS}
     if not fields:
-        result = get_vendor(vendor_id)
+        result = get_vendor(vendor_id, org_slug)
         if not result:
             raise ValueError(f"Vendor '{vendor_id}' not found")
         return result
 
     fields["modified_at"] = _now()
     set_clause = ", ".join(f"{k} = %s" for k in fields)
-    values = list(fields.values()) + [vendor_id]
+    values = list(fields.values()) + [vendor_id, org_slug]
 
     with pool.connection() as conn:
         cur = conn.execute(
-            f"UPDATE vendors SET {set_clause} WHERE id = %s RETURNING id",
+            f"UPDATE vendors SET {set_clause} WHERE id = %s AND org_slug = %s RETURNING id",
             values,
         )
         if cur.fetchone() is None:
             raise ValueError(f"Vendor '{vendor_id}' not found")
 
-    return get_vendor(vendor_id)
+    return get_vendor(vendor_id, org_slug)
 
 
-def delete_vendor(vendor_id: str) -> bool:
-    """Delete a vendor. Returns True if deleted."""
+def delete_vendor(vendor_id: str, org_slug: str) -> bool:
+    """Delete a vendor scoped to the active org. Returns True if deleted."""
     pool = get_pool()
     with pool.connection() as conn:
-        cur = conn.execute("DELETE FROM vendors WHERE id = %s RETURNING id", (vendor_id,))
+        cur = conn.execute(
+            "DELETE FROM vendors WHERE id = %s AND org_slug = %s RETURNING id",
+            (vendor_id, org_slug),
+        )
         return cur.fetchone() is not None
 
 
@@ -261,13 +283,14 @@ def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _load_all_vendors_light(include_hidden: bool = False) -> list[dict]:
-    """Load id, name, aliases for all vendors (used by alias/normalized matching)."""
-    hidden_clause = "" if include_hidden else " WHERE hidden_from_agent = false"
+def _load_all_vendors_light(org_slug: str, include_hidden: bool = False) -> list[dict]:
+    """Load id, name, aliases for all vendors in an org (used by alias/normalized matching)."""
+    hidden_clause = "" if include_hidden else " AND hidden_from_agent = false"
     pool = get_pool()
     with pool.connection() as conn:
         rows = conn.execute(
-            f"SELECT id::text, name, aliases FROM vendors{hidden_clause} ORDER BY name"
+            f"SELECT id::text, name, aliases FROM vendors WHERE org_slug = %s{hidden_clause} ORDER BY name",
+            (org_slug,),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -283,8 +306,8 @@ class VendorMatch:
         self.alternatives = alternatives or []
 
 
-def resolve_vendor_by_identifier(identifier: str) -> VendorMatch | None:
-    """Resolve a vendor by UUID, name, alias, normalized name, or fuzzy match.
+def resolve_vendor_by_identifier(identifier: str, org_slug: str) -> VendorMatch | None:
+    """Resolve a vendor by UUID, name, alias, normalized name, or fuzzy match within an org.
 
     Two passes:
       1. Find the best match through a cascade of strategies.
@@ -310,18 +333,18 @@ def resolve_vendor_by_identifier(identifier: str) -> VendorMatch | None:
 
     # Step 1: UUID
     if _is_uuid(identifier):
-        vendor = get_vendor(identifier)
+        vendor = get_vendor(identifier, org_slug)
         if vendor:
             return VendorMatch(vendor, "exact")
 
     # Step 2: exact name
-    vendor = find_vendor_by_name(identifier)
+    vendor = find_vendor_by_name(identifier, org_slug)
     if vendor:
         match_type = "exact"
     else:
         id_lower = identifier.lower()
         norm_query = _normalise(identifier)
-        all_vendors = _load_all_vendors_light()
+        all_vendors = _load_all_vendors_light(org_slug)
 
         # Step 3: alias match
         alias_matches = [
@@ -329,12 +352,12 @@ def resolve_vendor_by_identifier(identifier: str) -> VendorMatch | None:
             if any(a.lower() == id_lower for a in (v.get("aliases") or []))
         ]
         if len(alias_matches) == 1:
-            vendor = get_vendor(alias_matches[0]["id"])
+            vendor = get_vendor(alias_matches[0]["id"], org_slug)
             match_type = "close"
         elif len(alias_matches) > 1:
-            vendor = get_vendor(alias_matches[0]["id"])
+            vendor = get_vendor(alias_matches[0]["id"], org_slug)
             match_type = "disambiguate"
-            alternatives = [get_vendor(v["id"]) for v in alias_matches[1:]]
+            alternatives = [get_vendor(v["id"], org_slug) for v in alias_matches[1:]]
             return VendorMatch(vendor, match_type, [a for a in alternatives if a])
 
         # Step 4: normalized match
@@ -344,17 +367,17 @@ def resolve_vendor_by_identifier(identifier: str) -> VendorMatch | None:
                 if _normalise(v.get("name", "")) == norm_query
             ]
             if len(norm_matches) == 1:
-                vendor = get_vendor(norm_matches[0]["id"])
+                vendor = get_vendor(norm_matches[0]["id"], org_slug)
                 match_type = "exact"
             elif len(norm_matches) > 1:
-                vendor = get_vendor(norm_matches[0]["id"])
+                vendor = get_vendor(norm_matches[0]["id"], org_slug)
                 match_type = "disambiguate"
-                alternatives = [get_vendor(v["id"]) for v in norm_matches[1:]]
+                alternatives = [get_vendor(v["id"], org_slug) for v in norm_matches[1:]]
                 return VendorMatch(vendor, match_type, [a for a in alternatives if a])
 
         # Step 5: pg_trgm fuzzy
         if not vendor:
-            similar = find_vendors_similar(identifier)
+            similar = find_vendors_similar(identifier, org_slug)
             if not similar:
                 return None
             vendor, score = similar[0]
@@ -364,7 +387,7 @@ def resolve_vendor_by_identifier(identifier: str) -> VendorMatch | None:
     if match_type == "exact":
         return VendorMatch(vendor, match_type)
 
-    similar = find_vendors_similar(identifier, threshold=SIMILAR_THRESHOLD)
+    similar = find_vendors_similar(identifier, org_slug, threshold=SIMILAR_THRESHOLD)
     alternatives = [v for v, _ in similar if v["id"] != vendor["id"]]
     if alternatives:
         match_type = "disambiguate"
@@ -386,11 +409,17 @@ def query_spend_by_vendor_ids(
     vendor_ids: list[str],
     start_month: str,
     end_month: str,
+    org_slug: str,
 ) -> list[dict]:
-    """Query spend for specific vendors within a month range.
+    """Query spend for specific vendors within a month range, scoped to the active org.
 
     Accepts YYYY-MM strings for start/end and converts to DATE internally.
     Returns rows shaped for the frontend: {vendor, vendorId, month, amount}.
+
+    Org scoping is enforced via the JOIN on vendors.org_slug — even if the
+    caller hands in a cross-org vendor_id, the row is dropped because the
+    join predicate fails. Defense in depth on top of the
+    `_resolve_caller_access` filter that already org-scopes the input list.
     """
     pool = get_pool()
     start_date = _month_to_date(start_month)
@@ -402,11 +431,11 @@ def query_spend_by_vendor_ids(
                       TO_CHAR(s.date, 'YYYY-MM') AS month,
                       s.total_amount
                FROM vendor_monthly_spend s
-               JOIN vendors v ON v.id = s.vendor_id
+               INNER JOIN vendors v ON v.id = s.vendor_id AND v.org_slug = %s
                WHERE s.vendor_id = ANY(%s::uuid[])
                  AND s.date >= %s AND s.date <= %s
                ORDER BY s.date, v.name""",
-            (vendor_ids, start_date, end_date),
+            (org_slug, vendor_ids, start_date, end_date),
         ).fetchall()
 
     return [
@@ -420,19 +449,20 @@ def query_spend_by_vendor_ids(
     ]
 
 
-def get_vendor_spend(vendor_id: str, months: int = 6) -> list[dict]:
-    """Return recent monthly spend for a single vendor."""
+def get_vendor_spend(vendor_id: str, org_slug: str, months: int = 6) -> list[dict]:
+    """Return recent monthly spend for a single vendor, scoped to the active org."""
     pool = get_pool()
     with pool.connection() as conn:
         rows = conn.execute(
-            """SELECT TO_CHAR(date, 'YYYY-MM') AS month,
-                      total_amount AS "totalAmount",
-                      bill_count AS "billCount"
-               FROM vendor_monthly_spend
-               WHERE vendor_id = %s
-               ORDER BY date DESC
+            """SELECT TO_CHAR(s.date, 'YYYY-MM') AS month,
+                      s.total_amount AS "totalAmount",
+                      s.bill_count AS "billCount"
+               FROM vendor_monthly_spend s
+               INNER JOIN vendors v ON v.id = s.vendor_id AND v.org_slug = %s
+               WHERE s.vendor_id = %s
+               ORDER BY s.date DESC
                LIMIT %s""",
-            (vendor_id, months),
+            (org_slug, vendor_id, months),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -451,13 +481,14 @@ def query_spend_detail(
     vendor_id: str,
     start_month: str,
     end_month: str,
+    org_slug: str,
     category: str | None = None,
     subcategory: str | None = None,
     project: str | None = None,
     group_by: str | None = None,
     secondary_group_by: str | None = None,
 ) -> list[dict]:
-    """Query vendor_spend_detail with optional filters and grouping.
+    """Query vendor_spend_detail with optional filters and grouping, scoped to the active org.
 
     When group_by is set (one of 'category', 'subcategory', 'project'),
     returns rows grouped and summed by that dimension with a month column.
@@ -465,12 +496,15 @@ def query_spend_detail(
     When secondary_group_by is also set, returns a 2D cross-tab: rows have
     both dimension_value (group_by) and secondary_value (secondary_group_by)
     with amounts summed across the entire period (no month column).
+
+    Org scoping is enforced via INNER JOIN vendors on org_slug; a
+    cross-org vendor_id silently returns no rows.
     """
     pool = get_pool()
     start_date = _month_to_date(start_month)
     end_date = _month_to_date(end_month)
 
-    params: list[Any] = [vendor_id, start_date, end_date]
+    params: list[Any] = [org_slug, vendor_id, start_date, end_date]
     filters = ""
 
     if category:
@@ -493,6 +527,7 @@ def query_spend_detail(
                    d.{secondary_group_by} AS secondary_value,
                    SUM(d.amount) AS amount
             FROM vendor_spend_detail d
+            INNER JOIN vendors v ON v.id = d.vendor_id AND v.org_slug = %s
             WHERE d.vendor_id = %s AND d.date >= %s AND d.date <= %s
             {filters}
             GROUP BY d.{group_by}, d.{secondary_group_by}
@@ -504,6 +539,7 @@ def query_spend_detail(
                    TO_CHAR(d.date, 'YYYY-MM') AS month,
                    SUM(d.amount) AS amount
             FROM vendor_spend_detail d
+            INNER JOIN vendors v ON v.id = d.vendor_id AND v.org_slug = %s
             WHERE d.vendor_id = %s AND d.date >= %s AND d.date <= %s
             {filters}
             GROUP BY d.{group_by}, d.date
@@ -514,6 +550,7 @@ def query_spend_detail(
             SELECT TO_CHAR(d.date, 'YYYY-MM') AS month,
                    SUM(d.amount) AS amount
             FROM vendor_spend_detail d
+            INNER JOIN vendors v ON v.id = d.vendor_id AND v.org_slug = %s
             WHERE d.vendor_id = %s AND d.date >= %s AND d.date <= %s
             {filters}
             GROUP BY d.date
@@ -536,9 +573,10 @@ def query_spend_detail(
 
 def get_spend_detail_dimensions(
     vendor_id: str,
+    org_slug: str,
     dimension: str | None = None,
 ) -> dict:
-    """Return distinct dimension values for a vendor's detail rows.
+    """Return distinct dimension values for a vendor's detail rows, scoped to the active org.
 
     If dimension is specified ('category', 'subcategory', or 'project'),
     returns only that dimension's values. Otherwise returns all three.
@@ -552,11 +590,12 @@ def get_spend_detail_dimensions(
     with pool.connection() as conn:
         for dim in dims_to_query:
             rows = conn.execute(
-                f"""SELECT DISTINCT {dim} AS val
-                    FROM vendor_spend_detail
-                    WHERE vendor_id = %s AND {dim} IS NOT NULL
+                f"""SELECT DISTINCT d.{dim} AS val
+                    FROM vendor_spend_detail d
+                    INNER JOIN vendors v ON v.id = d.vendor_id AND v.org_slug = %s
+                    WHERE d.vendor_id = %s AND d.{dim} IS NOT NULL
                     ORDER BY val""",
-                (vendor_id,),
+                (org_slug, vendor_id),
             ).fetchall()
             key = f"{dim}s" if not dim.endswith("y") else f"{dim[:-1]}ies"
             result[key] = [r["val"] for r in rows]
@@ -636,16 +675,36 @@ def _context_row_to_user(row: dict) -> dict:
     }
 
 
-def list_users(roles: list[str] | None = None) -> list[dict]:
-    """Return users, optionally filtered to those holding any of the given roles."""
+def list_users(org_slug: str, roles: list[str] | None = None) -> list[dict]:
+    """Return users in the active org, optionally filtered to those holding any of the given roles.
+
+    Membership join (gate 5 of the request flow): only users who have a
+    row in user_org_memberships for `org_slug` are returned. Today every
+    user has exactly one membership, but the join handles the
+    multi-membership future case correctly (returns the same user once).
+    """
     pool = get_pool()
     with pool.connection() as conn:
         if not roles:
-            rows = conn.execute("SELECT * FROM user_context ORDER BY email").fetchall()
+            rows = conn.execute(
+                """SELECT uc.* FROM user_context uc
+                   WHERE uc.id IN (
+                       SELECT uom.user_id FROM user_org_memberships uom
+                       WHERE uom.org_slug = %s
+                   )
+                   ORDER BY uc.email""",
+                (org_slug,),
+            ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM user_context WHERE role_names && %s ORDER BY email",
-                (roles,),
+                """SELECT uc.* FROM user_context uc
+                   WHERE uc.role_names && %s
+                     AND uc.id IN (
+                         SELECT uom.user_id FROM user_org_memberships uom
+                         WHERE uom.org_slug = %s
+                     )
+                   ORDER BY uc.email""",
+                (roles, org_slug),
             ).fetchall()
         return [_context_row_to_user(row) for row in rows]
 
@@ -791,14 +850,19 @@ def resolve_effective_vendor_ids(
     allowed_departments: list[str],
     allowed_vendor_ids: list[str],
     denied_vendor_ids: list[str],
+    org_slug: str,
     user_id: str | None = None,
 ) -> list[str]:
-    """Compute the effective set of vendor IDs a user can access.
+    """Compute the effective set of vendor IDs a user can access in the active org.
 
-    Formula: ((dept vendors UNION allowed) MINUS denied) MINUS
-    (contractors without a user_contractor_access grant).
+    Formula: ((dept vendors in org UNION allowed) MINUS denied) MINUS
+    (contractors without a user_contractor_access grant), then
+    intersected with the org's vendors.
 
-    When user_id is None the contractor filter is skipped (backward compat).
+    Cross-org IDs in the user's `allowed_vendor_ids` (defensive: shouldn't
+    happen post-Phase-3 writes, but harmless if present in legacy data)
+    are filtered out by the final org INTERSECT. When user_id is None the
+    contractor filter is skipped (backward compat).
     """
     base_sql = """
         SELECT id FROM vendors
@@ -809,11 +873,14 @@ def resolve_effective_vendor_ids(
         SELECT unnest(%s::text[])::uuid
         EXCEPT
         SELECT unnest(%s::text[])::uuid
+        INTERSECT
+        SELECT id FROM vendors WHERE org_slug = %s
     """
     base_params: list = [
         allowed_departments or [],
         allowed_vendor_ids or [],
         denied_vendor_ids or [],
+        org_slug,
     ]
 
     if user_id is not None:
@@ -821,13 +888,14 @@ def resolve_effective_vendor_ids(
                   WHERE base.id NOT IN (
                       SELECT v.id FROM vendors v
                       WHERE v.is_contractor = true
+                        AND v.org_slug = %s
                         AND v.id NOT IN (
                             SELECT uca.vendor_id
                             FROM user_contractor_access uca
                             WHERE uca.user_id = %s
                         )
                   )"""
-        base_params.append(user_id)
+        base_params.extend([org_slug, user_id])
     else:
         sql = f"SELECT id::text FROM ({base_sql}) AS base"
 
@@ -843,18 +911,22 @@ def resolve_effective_vendor_ids(
 
 
 def set_vendor_is_contractor(
-    vendor_id: str, is_contractor: bool, actor_user_id: str,
+    vendor_id: str, is_contractor: bool, actor_user_id: str, org_slug: str,
 ) -> dict:
-    """Update the is_contractor flag on a vendor. Returns the updated vendor."""
+    """Update the is_contractor flag on a vendor scoped to the active org.
+
+    Returns the updated vendor. Raises ValueError if the vendor does not
+    belong to *org_slug* (prevents cross-tenant flag flips via guessed UUID).
+    """
     pool = get_pool()
     with pool.connection() as conn:
         cur = conn.execute(
-            "UPDATE vendors SET is_contractor = %s, modified_at = %s WHERE id = %s RETURNING id",
-            (is_contractor, _now(), vendor_id),
+            "UPDATE vendors SET is_contractor = %s, modified_at = %s WHERE id = %s AND org_slug = %s RETURNING id",
+            (is_contractor, _now(), vendor_id, org_slug),
         )
         if cur.fetchone() is None:
             raise ValueError(f"Vendor '{vendor_id}' not found")
-    return get_vendor(vendor_id)
+    return get_vendor(vendor_id, org_slug)
 
 
 def grant_contractor_access(
@@ -911,12 +983,13 @@ def list_contractor_access(vendor_id: str) -> list[dict]:
     ]
 
 
-def list_contractor_vendors() -> list[dict]:
-    """List all vendors where is_contractor = true."""
+def list_contractor_vendors(org_slug: str) -> list[dict]:
+    """List all contractor vendors in the active org."""
     pool = get_pool()
     with pool.connection() as conn:
         rows = conn.execute(
-            f"{_VENDOR_LIST_SQL} WHERE v.is_contractor = true ORDER BY LOWER(v.name)"
+            f"{_VENDOR_LIST_SQL} WHERE v.is_contractor = true AND v.org_slug = %s ORDER BY LOWER(v.name)",
+            (org_slug,),
         ).fetchall()
     return [_vendor_row_to_dict(r) for r in rows]
 
@@ -1099,18 +1172,26 @@ def batch_update(
     pk: str = "id",
     pk_key: str = "vendor_id",
     ts_column: str | None = "modified_at",
+    org_slug: str | None = None,
+    org_column: str | None = None,
 ) -> int:
     """Apply multiple row updates in a single transaction.
 
     Each item in *updates* must have *pk_key* (the row identifier) and
     'changes' (snake_case field dict). Returns the count of rows updated.
     Raises ValueError if any row is not found.
+
+    When *org_slug* and *org_column* are supplied, every UPDATE is scoped
+    by `org_column = org_slug`, so a row in another tenant raises
+    ValueError as if not found. Used by `batch_update_vendors` to enforce
+    Phase 3 tenant isolation on bulk edits.
     """
     if not updates:
         return 0
     pool = get_pool()
     now = _now()
     count = 0
+    org_clause = f" AND {org_column} = %s" if org_slug and org_column else ""
     with pool.connection() as conn:
         with conn.transaction():
             for item in updates:
@@ -1120,9 +1201,11 @@ def batch_update(
                 if ts_column:
                     fields[ts_column] = now
                 set_clause = ", ".join(f"{k} = %s" for k in fields)
-                values = list(fields.values()) + [item[pk_key]]
+                values: list = list(fields.values()) + [item[pk_key]]
+                if org_clause:
+                    values.append(org_slug)
                 cur = conn.execute(
-                    f"UPDATE {table} SET {set_clause} WHERE {pk} = %s RETURNING {pk}",
+                    f"UPDATE {table} SET {set_clause} WHERE {pk} = %s{org_clause} RETURNING {pk}",
                     values,
                 )
                 if cur.fetchone() is None:
@@ -1135,12 +1218,35 @@ def get_vendor_editable_schema() -> list[dict]:
     return get_editable_schema("vendors", VENDOR_EDITABLE_COLUMNS)
 
 
-def vendor_ids_exist(vendor_ids: list[str]) -> dict[str, bool]:
-    return ids_exist("vendors", vendor_ids)
+def vendor_ids_exist(vendor_ids: list[str], org_slug: str) -> dict[str, bool]:
+    """Return {id: bool} indicating which vendor IDs exist in the active org.
+
+    Cross-org IDs always read as False so CSV uploads referencing another
+    tenant's vendor surface as "unknown vendor" rather than mutating it.
+    """
+    if not vendor_ids:
+        return {}
+    pool = get_pool()
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT id::text AS pk FROM vendors WHERE id = ANY(%s::uuid[]) AND org_slug = %s",
+            (vendor_ids, org_slug),
+        ).fetchall()
+    found = {r["pk"] for r in rows}
+    return {v: v in found for v in vendor_ids}
 
 
-def batch_update_vendors(updates: list[dict]) -> int:
-    return batch_update("vendors", VENDOR_EDITABLE_COLUMNS, updates)
+def batch_update_vendors(updates: list[dict], org_slug: str) -> int:
+    """Apply multiple vendor updates in a transaction, scoped to the active org.
+
+    Each update dict must include 'vendor_id' and 'changes'. Rows in
+    other orgs raise ValueError as if not found, preventing
+    cross-tenant writes via guessed UUIDs.
+    """
+    return batch_update(
+        "vendors", VENDOR_EDITABLE_COLUMNS, updates,
+        org_slug=org_slug, org_column="org_slug",
+    )
 
 
 def get_or_create_department(name: str) -> str:

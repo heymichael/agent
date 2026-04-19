@@ -8,6 +8,7 @@ Write tools (add_vendor, modify_vendor) and execute_python remain here.
 delete_vendor is disabled — deletion must go through a system admin.
 """
 
+import contextvars
 import csv
 import io
 import json
@@ -16,6 +17,47 @@ from dataclasses import dataclass, field
 from datetime import date as date_type
 
 from . import pg_client
+
+
+# Phase 3 of multi-org tenancy (task 254). The chat endpoint sets this
+# contextvar to `caller["active_org_slug"]` once per request, so every
+# tool handler — and the SQL queries underneath them — automatically
+# scopes to the caller's org without changing 30+ handler signatures.
+# Mirrors the pre-existing `_request_attachments` pattern in service.app.
+#
+# Default of None means "no org context" (used in unit tests that don't
+# care about scoping). Helpers that need a slug must guard for None
+# explicitly.
+_caller_org_slug: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "caller_org_slug", default=None,
+)
+
+
+def set_caller_org_slug(slug: str | None) -> None:
+    """Set the active org slug for the current request (called from `/chat`)."""
+    _caller_org_slug.set(slug)
+
+
+def get_caller_org_slug() -> str | None:
+    """Read the active org slug for the current request, or None if unset."""
+    return _caller_org_slug.get()
+
+
+def _require_caller_org_slug() -> str:
+    """Return the caller's active org slug, raising RuntimeError if unset.
+
+    Tool handlers that hit org-scoped SQL must call this — failing fast
+    is preferable to silently returning cross-tenant data when the chat
+    endpoint forgot to call `set_caller_org_slug`.
+    """
+    slug = _caller_org_slug.get()
+    if not slug:
+        raise RuntimeError(
+            "Caller org slug not set on this request. "
+            "Ensure /chat (or the calling endpoint) invokes "
+            "tools.set_caller_org_slug(caller['active_org_slug'])."
+        )
+    return slug
 
 logger = logging.getLogger(__name__)
 from .sandbox import execute_python
@@ -608,31 +650,46 @@ TOOL_DEFINITIONS = [
 # ---------------------------------------------------------------------------
 
 
-def _build_caller_context(caller_email: str) -> dict | None:
-    """Build caller context for spend-level access control.
+def _build_caller_context(caller_email: str) -> dict:
+    """Build caller context for spend-level access control, scoped to active org.
 
     Resolves the caller's effective vendor set from their
-    allowed_departments, allowed_vendor_ids, and denied_vendor_ids.
-    Contractor vendors without an explicit grant are excluded.
-    finance_admin users bypass filtering entirely.
+    allowed_departments, allowed_vendor_ids, and denied_vendor_ids,
+    intersected with the active org's vendors. Contractor vendors
+    without an explicit grant are excluded. finance_admin users bypass
+    the per-vendor ACL but the org filter still applies (it lives below
+    the bypass — see strategy 197-r2 gate 5/6).
+
+    The returned context always carries `org_slug` so downstream
+    handlers can pass it straight to `pg_client.query_spend_by_vendor_ids`
+    etc. without re-reading the contextvar.
     """
+    org_slug = get_caller_org_slug()
+
     if not caller_email:
-        return {"allowed_vendor_ids": [], "is_finance_admin": False}
+        return {"allowed_vendor_ids": [], "is_finance_admin": False, "org_slug": org_slug}
 
     user = pg_client.get_user_access_context(caller_email)
     if not user:
-        return {"allowed_vendor_ids": [], "is_finance_admin": False}
+        return {"allowed_vendor_ids": [], "is_finance_admin": False, "org_slug": org_slug}
 
     if "finance_admin" in user.get("roles", []):
-        return {"is_finance_admin": True}
+        return {"is_finance_admin": True, "org_slug": org_slug}
+
+    if not org_slug:
+        # Without an active org we can't safely resolve the effective set
+        # (every helper would need to fall back to "no scope"). Treat as
+        # "no vendor access" — same posture as a missing user doc.
+        return {"allowed_vendor_ids": [], "is_finance_admin": False, "org_slug": None}
 
     effective_ids = pg_client.resolve_effective_vendor_ids(
         user.get("allowed_departments", []),
         user.get("allowed_vendor_ids", []),
         user.get("denied_vendor_ids", []),
+        org_slug,
         user_id=user.get("user_id"),
     )
-    return {"allowed_vendor_ids": effective_ids, "is_finance_admin": False}
+    return {"allowed_vendor_ids": effective_ids, "is_finance_admin": False, "org_slug": org_slug}
 
 
 def _check_write_auth(caller_email: str, vendor_id: str, vendor_name: str | None = None) -> str | None:
@@ -650,16 +707,25 @@ def _check_write_auth(caller_email: str, vendor_id: str, vendor_name: str | None
     return None
 
 
+def _org_only_context() -> dict:
+    """Minimal caller_context carrying only the active org slug.
+
+    Used by lookup/count/list tools that don't need spend ACLs but
+    still must org-scope (Phase 3 of multi-org tenancy, task 254).
+    """
+    return {"org_slug": get_caller_org_slug()}
+
+
 def execute_vendor_lookup(args: dict, caller_email: str = "") -> str:
-    return json.dumps(handle_vendor_lookup(args))
+    return json.dumps(handle_vendor_lookup(args, caller_context=_org_only_context()))
 
 
 def execute_vendor_count(args: dict, caller_email: str = "") -> str:
-    return json.dumps(handle_vendor_count(args))
+    return json.dumps(handle_vendor_count(args, caller_context=_org_only_context()))
 
 
 def execute_vendor_list(args: dict, caller_email: str = "") -> str:
-    return json.dumps(handle_vendor_list(args))
+    return json.dumps(handle_vendor_list(args, caller_context=_org_only_context()))
 
 
 def execute_spend_total(args: dict, caller_email: str = "") -> str:
@@ -695,7 +761,7 @@ def execute_spend_detail_dimensions(args: dict, caller_email: str = "") -> str:
 def execute_add_vendor(args: dict, caller_email: str = "") -> str:
     args.setdefault("status", "active")
     try:
-        result = pg_client.add_vendor(args)
+        result = pg_client.add_vendor(args, _require_caller_org_slug())
         return json.dumps({"ok": True, "vendor": result})
     except ValueError as exc:
         return json.dumps({"ok": False, "error": str(exc)})
@@ -712,7 +778,7 @@ def _match_response(result: pg_client.VendorMatch) -> dict:
 
 
 def execute_delete_vendor(args: dict, caller_email: str = "") -> str:
-    result = pg_client.resolve_vendor_by_identifier(args["identifier"])
+    result = pg_client.resolve_vendor_by_identifier(args["identifier"], _require_caller_org_slug())
     if not result:
         return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
     vendor = result.vendor
@@ -754,9 +820,9 @@ def _resolve_field_value(field_name: str, value: str, candidates: list[str]) -> 
 
 
 def _user_candidates() -> list[tuple[str, str]]:
-    """Build (candidate, user_id) pairs for both name and email."""
+    """Build (candidate, user_id) pairs for both name and email, scoped to active org."""
     pairs: list[tuple[str, str]] = []
-    for u in pg_client.list_users():
+    for u in pg_client.list_users(_require_caller_org_slug()):
         uid = u["id"]
         pairs.append((u["email"], uid))
         full = u.get("fullName", "")
@@ -819,7 +885,7 @@ _CONFIRM_FIELD_META = {
 
 
 def execute_modify_vendor(args: dict, caller_email: str = "") -> str:
-    result = pg_client.resolve_vendor_by_identifier(args["identifier"])
+    result = pg_client.resolve_vendor_by_identifier(args["identifier"], _require_caller_org_slug())
     if not result:
         return json.dumps({"ok": False, "error": f"Vendor '{args['identifier']}' not found"})
 
@@ -994,7 +1060,7 @@ VENDOR_CSV_PROFILE = TableCsvProfile(
         CsvColumnSpec("contractEndDate", "contract_end", "date"),
         CsvColumnSpec("autoRenew", "auto_renew", "bool"),
     ],
-    id_check_fn=pg_client.vendor_ids_exist,
+    id_check_fn=lambda ids: pg_client.vendor_ids_exist(ids, _require_caller_org_slug()),
 )
 
 
@@ -1185,7 +1251,7 @@ def process_csv_upload(profile: TableCsvProfile, content: str) -> dict:
     if not resolved:
         return {"ok": True, "message": "No changes detected in the CSV."}
 
-    all_vendors = pg_client.list_vendors()
+    all_vendors = pg_client.list_vendors(_require_caller_org_slug())
     vendor_map = {v["id"]: v for v in all_vendors}
 
     field_counts: dict[str, int] = {}
@@ -1270,7 +1336,7 @@ def process_csv_upload(profile: TableCsvProfile, content: str) -> dict:
 def execute_generate_vendor_edit_csv(args: dict, caller_email: str = "") -> str:
     from service.resolve import resolve_canonical_value
 
-    vendors = pg_client.list_vendors()
+    vendors = pg_client.list_vendors(_require_caller_org_slug())
     profile = VENDOR_CSV_PROFILE
 
     dept_filters = args.get("departments") or []

@@ -237,10 +237,14 @@ class TestContractorFiltering:
             ctx = _build_caller_context("user@co.com")
 
         mock_resolve.assert_called_once_with(
-            ["Engineering"], [], [],
+            ["Engineering"], [], [], "arcade",
             user_id="uid-scoped",
         )
-        assert ctx == {"allowed_vendor_ids": ["v-alpha"], "is_finance_admin": False}
+        assert ctx == {
+            "allowed_vendor_ids": ["v-alpha"],
+            "is_finance_admin": False,
+            "org_slug": "arcade",
+        }
 
     def test_finance_admin_skips_resolve(self):
         """finance_admin bypasses resolve_effective_vendor_ids entirely."""
@@ -253,7 +257,7 @@ class TestContractorFiltering:
             ctx = _build_caller_context("admin@co.com")
 
         mock_resolve.assert_not_called()
-        assert ctx == {"is_finance_admin": True}
+        assert ctx == {"is_finance_admin": True, "org_slug": "arcade"}
 
     def test_contractor_excluded_without_grant(self):
         """A contractor vendor should be excluded when no user_contractor_access row exists."""
