@@ -245,6 +245,75 @@ class TestEnabledAppsResolvedOncePerRequest:
         mock_enabled.assert_called_once_with("arcade")
 
 
+# ── Phase 5: CMS REST passthrough threads org slug into handlers ─────────
+
+
+class TestCmsRestPassthroughPhase5:
+    """`/cms/*` REST endpoints must seed the contextvar so cms_tools handlers
+    can resolve the caller's Payload org id without an `orgId` arg.
+
+    Phase 4 already proved arcade callers get blocked at `require_app('site')`.
+    Phase 5 covers what happens for a permitted (haderach) caller: the
+    contextvar is populated, the handler skips its `orgId` requirement,
+    and the resolver-cached Payload id flows into the POST body.
+    """
+
+    def setup_method(self):
+        from service import cms_tools, tools as tools_module
+        cms_tools._clear_org_id_cache()
+        cms_tools._org_id_cache["haderach"] = 1
+        # Reset any contextvar leakage from prior tests.
+        try:
+            tools_module._caller_org_slug.set(None)
+        except Exception:
+            pass
+
+    def teardown_method(self):
+        from service import cms_tools
+        app.dependency_overrides.clear()
+        cms_tools._clear_org_id_cache()
+
+    def _make_resp(self, status_code, body):
+        from unittest.mock import MagicMock
+        r = MagicMock()
+        r.status_code = status_code
+        r.json.return_value = body
+        r.raise_for_status = MagicMock()
+        return r
+
+    def test_post_cms_items_haderach_caller_resolves_org_no_orgid_arg(self):
+        """A haderach caller's POST /cms/items must resolve org from context, not from orgId."""
+        from service import cms_tools
+
+        _override_caller("u@haderach.ai", "haderach", ["site", "system_administration"])
+        client = TestClient(app)
+
+        with patch.object(cms_tools.httpx, "post", return_value=self._make_resp(201, {"doc": {"id": 99}})) as mock_post:
+            resp = client.post("/cms/items", json={"contentTypeId": 5, "data": {"title": "Hi"}})
+
+        assert resp.status_code == 200
+        assert resp.json()["item"]["id"] == 99
+        body = mock_post.call_args.kwargs["json"]
+        # org must come from the resolver cache (haderach -> 1), not from
+        # any client-supplied orgId.
+        assert body["org"] == 1
+        assert body["contentType"] == 5
+
+    def test_get_cms_versions_blocks_cross_tenant_access(self):
+        """The version-list endpoint must 404 when the parent item belongs to another tenant."""
+        from service import cms_tools
+
+        _override_caller("u@haderach.ai", "haderach", ["site", "system_administration"])
+        client = TestClient(app)
+
+        # Guard fetch returns an item owned by Arcade — must surface as 404.
+        cross_tenant_item = {"id": 50, "org": {"id": 2, "slug": "arcade"}}
+        with patch.object(cms_tools.httpx, "get", return_value=self._make_resp(200, cross_tenant_item)):
+            resp = client.get("/cms/items/50/versions")
+
+        assert resp.status_code == 404
+
+
 # ── /apps endpoint pipes the slug through ────────────────────────────────
 
 

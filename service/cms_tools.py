@@ -8,13 +8,34 @@ CMS_API_KEY. Tools are grouped by agent mode:
 - Scheduling: add_to_schedule, get_item (read-only confirmation)
 - Admin: create_content_type, update_content_type_schema,
   commit_content_type, extend_content_type_schema
+
+Multi-org gating (task 254 Phase 5)
+-----------------------------------
+
+Every handler derives its tenant from the caller's `active_org_slug`
+contextvar (populated once per request in `service/app.py:chat()` and
+in the `/cms/*` REST passthroughs). Tools no longer take `orgId` as a
+required argument; the two write tools that historically did keep
+`orgId` as an optional schema arg purely for backward-compat
+validation: if a model emits one and it disagrees with the resolved
+caller org, the handler errors out instead of silently writing into
+the wrong tenant.
+
+By-ID reads/writes (`get_item`, `update_item`, `lock`, `unlock`,
+`submit_for_approval`, `restore_version`, and the three content-type
+admin tools) re-fetch with `depth=1` and verify `doc.org.slug ==
+caller_slug`. Mismatches return `{"status": "not_found"}` so existence
+of cross-tenant items is not leaked to the caller.
 """
 
 import json
 import logging
 import os
+import threading
 
 import httpx
+
+from . import tools as tools_module
 
 logger = logging.getLogger(__name__)
 
@@ -35,17 +56,175 @@ def _api(path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Slug -> Payload-numeric-id resolver (task 254 Phase 5)
+#
+# The mapping from org slug to Payload's auto-incremented numeric id is
+# essentially static (orgs are added by a manual playbook step, never
+# renamed in place). Cache process-wide; refresh on miss. Lock guards
+# concurrent first-time misses across worker threads, but the happy
+# path (cache hit) is lock-free.
+# ---------------------------------------------------------------------------
+
+_org_id_cache: dict[str, int] = {}
+_org_id_cache_lock = threading.Lock()
+
+
+def _fetch_payload_org_id(slug: str) -> int:
+    r = httpx.get(
+        _api("/api/orgs"),
+        headers=_headers(),
+        params={"where[slug][equals]": slug, "limit": 1, "depth": 0},
+        timeout=10,
+    )
+    r.raise_for_status()
+    docs = r.json().get("docs", [])
+    if not docs:
+        raise ValueError(f"No Payload org found for slug '{slug}'")
+    return int(docs[0]["id"])
+
+
+def resolve_payload_org_id(slug: str) -> int:
+    """Resolve an org slug to its Payload numeric id, cached process-wide."""
+    cached = _org_id_cache.get(slug)
+    if cached is not None:
+        return cached
+    with _org_id_cache_lock:
+        cached = _org_id_cache.get(slug)
+        if cached is not None:
+            return cached
+        org_id = _fetch_payload_org_id(slug)
+        _org_id_cache[slug] = org_id
+        return org_id
+
+
+def _clear_org_id_cache() -> None:
+    """Reset the resolver cache. Test-only helper."""
+    with _org_id_cache_lock:
+        _org_id_cache.clear()
+
+
+def _require_caller_org_slug() -> str:
+    slug = tools_module.get_caller_org_slug()
+    if not slug:
+        raise RuntimeError(
+            "CMS tool invoked without an active org slug. "
+            "Caller context (tools.set_caller_org_slug) must be set "
+            "before any /chat or /cms/* request reaches a handler."
+        )
+    return slug
+
+
+def _caller_payload_org_id() -> int:
+    return resolve_payload_org_id(_require_caller_org_slug())
+
+
+def _doc_org_slug(doc: dict) -> str | None:
+    """Extract the nested org slug from a Payload doc fetched at depth>=1.
+
+    Returns None if the relationship was returned as a bare id (depth=0).
+    """
+    org = doc.get("org")
+    if isinstance(org, dict):
+        return org.get("slug")
+    return None
+
+
+def _belongs_to_caller(doc: dict) -> bool:
+    """True iff the fetched doc belongs to the caller's active org.
+
+    Caller MUST have fetched the doc at depth>=1 so the org relationship
+    is hydrated. Treats a bare-id org (depth=0) as a programmer error
+    rather than silently passing — that would be a tenant-leak hazard.
+    """
+    doc_slug = _doc_org_slug(doc)
+    if doc_slug is None:
+        raise RuntimeError(
+            "Cross-tenant guard called on a doc without nested org. "
+            "Fetch with depth>=1 before calling _belongs_to_caller."
+        )
+    return doc_slug == _require_caller_org_slug()
+
+
+def _not_found(item_id: int | str) -> str:
+    return json.dumps({"status": "not_found", "message": f"Content item {item_id} not found."})
+
+
+def _ct_not_found(ct_id: int | str) -> str:
+    return json.dumps({"status": "not_found", "message": f"Content type {ct_id} not found."})
+
+
+def _validate_org_id_arg(args: dict) -> str | None:
+    """Reject `orgId` if present and pointing at a different tenant.
+
+    Backward-compat shim for the two write tools (`cms_create_item`,
+    `cms_create_content_type`) that historically required `orgId`. New
+    callers should omit it entirely; the handler resolves from caller
+    context. If a model still emits an `orgId`, validate it matches the
+    caller's resolved id rather than silently writing into the wrong
+    tenant.
+
+    Returns a JSON error string on mismatch, or None on pass.
+    """
+    if "orgId" not in args or args["orgId"] is None:
+        return None
+    try:
+        supplied = int(args["orgId"])
+    except (TypeError, ValueError):
+        return json.dumps({
+            "status": "error",
+            "message": f"orgId must be an integer, got {args['orgId']!r}.",
+        })
+    expected = _caller_payload_org_id()
+    if supplied != expected:
+        return json.dumps({
+            "status": "error",
+            "message": (
+                f"orgId {supplied} does not match the caller's active org "
+                f"(slug='{_require_caller_org_slug()}', id={expected}). "
+                f"Omit orgId — it is now derived from caller context."
+            ),
+        })
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Editing mode tools
 # ---------------------------------------------------------------------------
 
 
-def handle_cms_get_item(args: dict, **_kw) -> str:
-    item_id = args["itemId"]
+def _fetch_item(item_id: int | str) -> dict | None:
+    """Fetch a content item at depth=1 with cross-tenant guard.
+
+    Returns the item dict on success, or None on Payload 404 / cross-tenant
+    mismatch (caller should translate None to a `not_found` response so
+    cross-tenant existence is not leaked).
+    """
     r = httpx.get(_api(f"/api/content-items/{item_id}"), headers=_headers(), params={"depth": 1}, timeout=10)
     if r.status_code == 404:
-        return json.dumps({"status": "not_found", "message": f"Content item {item_id} not found."})
+        return None
     r.raise_for_status()
     item = r.json()
+    if not _belongs_to_caller(item):
+        return None
+    return item
+
+
+def _fetch_content_type(ct_id: int | str) -> dict | None:
+    r = httpx.get(_api(f"/api/content-types/{ct_id}"), headers=_headers(), params={"depth": 1}, timeout=10)
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    ct = r.json()
+    if not _belongs_to_caller(ct):
+        return None
+    return ct
+
+
+def handle_cms_get_item(args: dict, **_kw) -> str:
+    item_id = args["itemId"]
+    item = _fetch_item(item_id)
+    if item is None:
+        return _not_found(item_id)
 
     ct = item.get("contentType")
     guidelines = {}
@@ -60,8 +239,11 @@ def handle_cms_get_item(args: dict, **_kw) -> str:
 
 
 def handle_cms_create_item(args: dict, **_kw) -> str:
+    mismatch = _validate_org_id_arg(args)
+    if mismatch:
+        return mismatch
     body = {
-        "org": args["orgId"],
+        "org": _caller_payload_org_id(),
         "contentType": args["contentTypeId"],
         "data": args["data"],
         "workflow_status": "draft",
@@ -76,11 +258,9 @@ def handle_cms_create_item(args: dict, **_kw) -> str:
 
 def handle_cms_update_item(args: dict, **_kw) -> str:
     item_id = args["itemId"]
-    r_check = httpx.get(_api(f"/api/content-items/{item_id}"), headers=_headers(), timeout=10)
-    if r_check.status_code == 404:
-        return json.dumps({"status": "not_found", "message": f"Content item {item_id} not found."})
-    r_check.raise_for_status()
-    existing = r_check.json()
+    existing = _fetch_item(item_id)
+    if existing is None:
+        return _not_found(item_id)
 
     locked_by = existing.get("locked_by")
     caller = _kw.get("caller_email", "")
@@ -104,11 +284,10 @@ def handle_cms_update_item(args: dict, **_kw) -> str:
 
 def handle_cms_submit_for_approval(args: dict, **_kw) -> str:
     item_id = args["itemId"]
-    r_check = httpx.get(_api(f"/api/content-items/{item_id}"), headers=_headers(), timeout=10)
-    if r_check.status_code == 404:
-        return json.dumps({"status": "not_found"})
-    r_check.raise_for_status()
-    current = r_check.json().get("workflow_status", "draft")
+    existing = _fetch_item(item_id)
+    if existing is None:
+        return _not_found(item_id)
+    current = existing.get("workflow_status", "draft")
     if current not in ("draft", "changes_requested"):
         return json.dumps({"status": "invalid_state", "message": f"Cannot submit from state '{current}'. Must be draft or changes_requested."})
 
@@ -125,6 +304,10 @@ def handle_cms_submit_for_approval(args: dict, **_kw) -> str:
 def handle_cms_restore_version(args: dict, **_kw) -> str:
     item_id = args["itemId"]
     version_id = args["versionId"]
+    # Verify the parent item is in the caller's tenant before touching versions.
+    if _fetch_item(item_id) is None:
+        return _not_found(item_id)
+
     r = httpx.post(
         _api(f"/api/content-items/versions/{version_id}"),
         headers=_headers(),
@@ -147,9 +330,10 @@ def handle_cms_restore_version(args: dict, **_kw) -> str:
 def handle_cms_lock_item(args: dict, **_kw) -> str:
     item_id = args["itemId"]
     caller = _kw.get("caller_email", "")
-    r_check = httpx.get(_api(f"/api/content-items/{item_id}"), headers=_headers(), timeout=10)
-    r_check.raise_for_status()
-    existing_lock = r_check.json().get("locked_by")
+    existing = _fetch_item(item_id)
+    if existing is None:
+        return _not_found(item_id)
+    existing_lock = existing.get("locked_by")
     if existing_lock and existing_lock == caller:
         return json.dumps({"status": "ok", "message": "Already locked by you."})
     if existing_lock:
@@ -163,9 +347,10 @@ def handle_cms_lock_item(args: dict, **_kw) -> str:
 def handle_cms_unlock_item(args: dict, **_kw) -> str:
     item_id = args["itemId"]
     caller = _kw.get("caller_email", "")
-    r_check = httpx.get(_api(f"/api/content-items/{item_id}"), headers=_headers(), timeout=10)
-    r_check.raise_for_status()
-    existing_lock = r_check.json().get("locked_by")
+    existing = _fetch_item(item_id)
+    if existing is None:
+        return _not_found(item_id)
+    existing_lock = existing.get("locked_by")
     if existing_lock and existing_lock != caller:
         return json.dumps({"status": "error", "message": f"Cannot unlock — locked by {existing_lock}."})
 
@@ -218,8 +403,11 @@ def handle_cms_add_to_schedule(args: dict, **_kw) -> str:
 
 
 def handle_cms_create_content_type(args: dict, **_kw) -> str:
+    mismatch = _validate_org_id_arg(args)
+    if mismatch:
+        return mismatch
     body = {
-        "org": args["orgId"],
+        "org": _caller_payload_org_id(),
         "name": args["name"],
         "schema": args.get("schema", []),
         "status": "draft",
@@ -234,9 +422,9 @@ def handle_cms_create_content_type(args: dict, **_kw) -> str:
 
 def handle_cms_update_content_type_schema(args: dict, **_kw) -> str:
     ct_id = args["contentTypeId"]
-    r_check = httpx.get(_api(f"/api/content-types/{ct_id}"), headers=_headers(), timeout=10)
-    r_check.raise_for_status()
-    ct = r_check.json()
+    ct = _fetch_content_type(ct_id)
+    if ct is None:
+        return _ct_not_found(ct_id)
     if ct.get("status") == "committed":
         return json.dumps({"status": "error", "message": "Cannot overwrite schema on a committed content type. Use extend instead."})
 
@@ -247,9 +435,9 @@ def handle_cms_update_content_type_schema(args: dict, **_kw) -> str:
 
 def handle_cms_commit_content_type(args: dict, **_kw) -> str:
     ct_id = args["contentTypeId"]
-    r_check = httpx.get(_api(f"/api/content-types/{ct_id}"), headers=_headers(), timeout=10)
-    r_check.raise_for_status()
-    ct = r_check.json()
+    ct = _fetch_content_type(ct_id)
+    if ct is None:
+        return _ct_not_found(ct_id)
     if ct.get("status") == "committed":
         return json.dumps({"status": "ok", "message": "Already committed."})
 
@@ -270,9 +458,9 @@ def handle_cms_commit_content_type(args: dict, **_kw) -> str:
 
 def handle_cms_extend_content_type_schema(args: dict, **_kw) -> str:
     ct_id = args["contentTypeId"]
-    r_check = httpx.get(_api(f"/api/content-types/{ct_id}"), headers=_headers(), timeout=10)
-    r_check.raise_for_status()
-    ct = r_check.json()
+    ct = _fetch_content_type(ct_id)
+    if ct is None:
+        return _ct_not_found(ct_id)
     if ct.get("status") != "committed":
         return json.dumps({"status": "error", "message": "Can only extend committed content types. Use update_schema for draft types."})
 
@@ -309,16 +497,15 @@ CMS_TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "cms_create_item",
-            "description": "Create a new content item in draft state.",
+            "description": "Create a new content item in draft state. Org is derived from the caller's active org — do not pass orgId.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "orgId": {"type": "integer", "description": "Payload ID of the org."},
                     "contentTypeId": {"type": "integer", "description": "Payload ID of the content type."},
                     "data": {"type": "object", "description": "Content field values as key-value pairs."},
                     "slug": {"type": "string", "description": "Optional URL-safe slug."},
                 },
-                "required": ["orgId", "contentTypeId", "data"],
+                "required": ["contentTypeId", "data"],
             },
         },
     },
@@ -415,11 +602,10 @@ CMS_TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "cms_create_content_type",
-            "description": "Create a new content type (collection) in draft status. Admin only.",
+            "description": "Create a new content type (collection) in draft status. Admin only. Org is derived from the caller's active org — do not pass orgId.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "orgId": {"type": "integer", "description": "Payload ID of the org."},
                     "name": {"type": "string", "description": "Human-readable name (e.g. 'Job Listings')."},
                     "slug": {"type": "string", "description": "Optional URL-safe slug."},
                     "schema": {
@@ -428,7 +614,7 @@ CMS_TOOL_DEFINITIONS: list[dict] = [
                         "items": {"type": "object"},
                     },
                 },
-                "required": ["orgId", "name"],
+                "required": ["name"],
             },
         },
     },
