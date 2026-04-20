@@ -17,14 +17,17 @@ load_dotenv(interpolate=False)
 
 from service.pg_client import get_pool
 
+# alexmader@gmail.com and binamader@gmail.com used to be seeded with the
+# legacy haderach_user role. The role was retired by migration 023 (task 254
+# Phase 9) and their actual role state — user/home/investor — is managed via
+# admin-system UI and migration 020 step 3b/3c, not via seed. Same pattern as
+# rene.saroukhanoff@gmail.com, who has prod membership but no seed entry.
 USERS = {
     "michael@haderach.ai": ["admin", "finance_admin"],
     "michael@heretic.fund": ["admin", "finance_admin"],
     "huy@heretic.fund": ["admin", "finance_admin"],
     "mariam@heretic.fund": ["admin", "finance_admin"],
     "mariam@heretic.ventures": ["admin", "finance_admin"],
-    "alexmader@gmail.com": ["haderach_user"],
-    "binamader@gmail.com": ["haderach_user"],
     "suman@heretic.fund": ["admin"],
     "michael.d.mader@gmail.com": ["user"],
 }
