@@ -1246,8 +1246,10 @@ def create_cms_item(
     _org_slug: str = Depends(require_app("site")),
 ):
     from .cms_tools import handle_cms_create_item
+    # Phase 5 task 254: pin caller's active org slug into the tools contextvar so
+    # the CMS handler can resolve the Payload org id without orgId being passed.
+    tools_module.set_caller_org_slug(_org_slug)
     result = json.loads(handle_cms_create_item({
-        "orgId": 1,
         "contentTypeId": req.contentTypeId,
         "data": req.data,
     }))
@@ -1261,11 +1263,16 @@ def patch_cms_item(
     caller: dict = Depends(get_verified_user),
     _org_slug: str = Depends(require_app("site")),
 ):
-    from .cms_tools import handle_cms_update_item, _api, _headers
+    from .cms_tools import handle_cms_update_item, _api, _headers, _fetch_item, _not_found
     import httpx
+    tools_module.set_caller_org_slug(_org_slug)
     caller_email = caller.get("email", "")
 
     if req.workflow_status is not None or req.workflow_comment is not None:
+        # Phase 5 cross-tenant guard: confirm the item belongs to the caller
+        # before applying a workflow transition direct to Payload.
+        if _fetch_item(item_id) is None:
+            raise HTTPException(status_code=404, detail=f"Content item {item_id} not found.")
         body: dict = {"_status": "published"}
         if req.workflow_status is not None:
             body["workflow_status"] = req.workflow_status
@@ -1294,8 +1301,13 @@ def list_cms_item_versions(
     caller: dict = Depends(get_verified_user),
     _org_slug: str = Depends(require_app("site")),
 ):
-    from .cms_tools import _api, _headers
+    from .cms_tools import _api, _headers, _fetch_item
     import httpx
+    tools_module.set_caller_org_slug(_org_slug)
+    # Phase 5 cross-tenant guard: confirm the parent item belongs to the
+    # caller before exposing its version history.
+    if _fetch_item(item_id) is None:
+        raise HTTPException(status_code=404, detail=f"Content item {item_id} not found.")
     r = httpx.get(
         _api(f"/api/content-items/versions"),
         headers=_headers(),
@@ -1325,6 +1337,7 @@ def restore_cms_item_version(
     _org_slug: str = Depends(require_app("site")),
 ):
     from .cms_tools import handle_cms_restore_version
+    tools_module.set_caller_org_slug(_org_slug)
     caller_email = caller.get("email", "")
     result = json.loads(handle_cms_restore_version({"itemId": item_id, "versionId": version_id}, caller_email=caller_email))
     if result.get("status") == "not_found":

@@ -186,7 +186,7 @@ protocol overhead). It can also be run as a standalone MCP server via
 | `service/auth.py` | Firebase ID token verification dependency (`get_verified_user`) |
 | `service/tools.py` | OpenAI tool schemas, domain-specific tool/handler subsets (EXPENSE_TOOL_*, VENDOR_TOOL_*), thin handler wrappers that delegate to MCP module |
 | `service/prompts.py` | Domain-specific prompts (EXPENSE_ANALYTICS_PROMPT, VENDOR_MANAGEMENT_PROMPT, CMS mode prompts) composed from shared fragments |
-| `service/cms_tools.py` | 12 CMS tool handlers against the Payload REST API (get, create, update, lock/unlock, submit, restore, schedule, content-type CRUD) |
+| `service/cms_tools.py` | 12 CMS tool handlers against the Payload REST API (get, create, update, lock/unlock, submit, restore, schedule, content-type CRUD); slug→Payload-org-id resolver (process-level cache); cross-tenant guard on every by-ID read/write — all org context is derived from the caller's `active_org_slug` contextvar (task 254 Phase 5) |
 | `service/cms_user_guide.md` | Operator-facing CMS user guide injected in guide-only modes |
 | `service/pg_client.py` | Postgres connection pool, all CRUD queries, vendor/user/app/spend/department/role operations |
 | `service/sandbox.py` | Sandboxed Python executor for LLM-generated code (120s timeout) |
