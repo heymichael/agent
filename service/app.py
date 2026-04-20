@@ -759,7 +759,8 @@ def get_current_user(caller: dict = Depends(get_verified_user)):
 
 @app.get("/users/{email}")
 def get_user(email: str, caller: dict = Depends(get_verified_user)):
-    user = pg_client.get_user(email)
+    org_slug = _require_active_org(caller)
+    user = pg_client.get_user_in_org(email, org_slug)
     if not user:
         raise HTTPException(status_code=404, detail=f"User '{email}' not found")
     return user
@@ -768,8 +769,9 @@ def get_user(email: str, caller: dict = Depends(get_verified_user)):
 @app.post("/users", status_code=201)
 def create_user(req: CreateUserRequest, caller: dict = Depends(get_verified_user)):
     require_admin(caller)
+    org_slug = _require_active_org(caller)
     try:
-        return pg_client.create_user(req.email, req.firstName, req.lastName, req.roles)
+        return pg_client.create_user(req.email, req.firstName, req.lastName, req.roles, org_slug)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -777,6 +779,7 @@ def create_user(req: CreateUserRequest, caller: dict = Depends(get_verified_user
 @app.patch("/users/{email}")
 def update_user(email: str, req: UpdateUserRequest, caller: dict = Depends(get_verified_user)):
     _email, caller_roles = _get_caller_roles(caller)
+    org_slug = _require_active_org(caller)
 
     admin_fields = req.roles is not None or req.firstName is not None or req.lastName is not None
     access_fields = (
@@ -793,6 +796,7 @@ def update_user(email: str, req: UpdateUserRequest, caller: dict = Depends(get_v
     try:
         return pg_client.update_user(
             email,
+            org_slug,
             roles=req.roles,
             first_name=req.firstName,
             last_name=req.lastName,
@@ -807,7 +811,8 @@ def update_user(email: str, req: UpdateUserRequest, caller: dict = Depends(get_v
 @app.delete("/users/{email}")
 def delete_user_endpoint(email: str, caller: dict = Depends(get_verified_user)):
     require_admin(caller)
-    if not pg_client.delete_user(email):
+    org_slug = _require_active_org(caller)
+    if not pg_client.delete_user(email, org_slug):
         raise HTTPException(status_code=404, detail=f"User '{email}' not found")
     return {"ok": True, "deleted": email}
 

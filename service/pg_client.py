@@ -709,8 +709,30 @@ def list_users(org_slug: str, roles: list[str] | None = None) -> list[dict]:
         return [_context_row_to_user(row) for row in rows]
 
 
+def _is_member_of_org(conn, user_id: str, org_slug: str) -> bool:
+    """Check whether `user_id` has a membership row in `org_slug`.
+
+    Phase 3 of multi-org tenancy (task 254 / strategy 197-r2): user-record
+    CRUD endpoints scope by membership so a caller in one org cannot
+    read, update, or delete a user that lives only in another org. A
+    `False` return on read paths surfaces as "not found" — never leak
+    existence across tenants.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM user_org_memberships WHERE user_id = %s AND org_slug = %s",
+        (user_id, org_slug),
+    ).fetchone()
+    return row is not None
+
+
 def get_user(email: str) -> dict | None:
-    """Fetch a single user by email."""
+    """Fetch a single user by email, unscoped.
+
+    Used by the caller-self lookup paths (`_get_caller_roles`, `/me`)
+    that need the caller's own record before any org-scope decision is
+    made. Other-user lookups should use `get_user_in_org` to enforce
+    membership scoping.
+    """
     pool = get_pool()
     normalized = email.strip()
     with pool.connection() as conn:
@@ -718,8 +740,40 @@ def get_user(email: str) -> dict | None:
     return _context_row_to_user(row) if row else None
 
 
-def create_user(email: str, first_name: str, last_name: str, roles: list[str]) -> dict:
-    """Create a new user with roles. Raises ValueError if user already exists."""
+def get_user_in_org(email: str, org_slug: str) -> dict | None:
+    """Fetch a single user by email, scoped to the active org.
+
+    Returns `None` if the user doesn't exist OR exists but isn't a
+    member of `org_slug`. Callers cannot distinguish the two cases by
+    design — this prevents tenant-existence leaks across the
+    `/users/{email}` GET path.
+    """
+    pool = get_pool()
+    normalized = email.strip()
+    with pool.connection() as conn:
+        row = _get_user_context_row(conn, normalized)
+        if not row:
+            return None
+        if not _is_member_of_org(conn, str(row["id"]), org_slug):
+            return None
+    return _context_row_to_user(row)
+
+
+def create_user(
+    email: str,
+    first_name: str,
+    last_name: str,
+    roles: list[str],
+    org_slug: str,
+) -> dict:
+    """Create a new user with roles in the active org.
+
+    Adds a `user_org_memberships` row for `org_slug` in the same
+    transaction so the new user is scoped to the caller's tenant.
+    Raises `ValueError` if a user with this email already exists in
+    any org — cross-org "invite an existing user" flows are out of
+    scope for Phase 3 and will be revisited when the picker UX lands.
+    """
     pool = get_pool()
     normalized = email.strip()
     with pool.connection() as conn:
@@ -732,6 +786,12 @@ def create_user(email: str, first_name: str, last_name: str, roles: list[str]) -
             (normalized, first_name, last_name),
         ).fetchone()
         user_id = str(row["id"])
+
+        conn.execute(
+            """INSERT INTO user_org_memberships (user_id, org_slug)
+               VALUES (%s, %s) ON CONFLICT DO NOTHING""",
+            (user_id, org_slug),
+        )
 
         if roles:
             for role_name in roles:
@@ -748,6 +808,7 @@ def create_user(email: str, first_name: str, last_name: str, roles: list[str]) -
 
 def update_user(
     email: str,
+    org_slug: str,
     roles: list[str] | None = None,
     first_name: str | None = None,
     last_name: str | None = None,
@@ -755,7 +816,13 @@ def update_user(
     allowed_vendor_ids: list[str] | None = None,
     denied_vendor_ids: list[str] | None = None,
 ) -> dict:
-    """Update a user's fields. Only non-None arguments are changed."""
+    """Update a user's fields, scoped to the active org.
+
+    Only non-None arguments are changed. Raises `ValueError` if the
+    target user doesn't exist OR isn't a member of `org_slug` — the
+    "not found" message is intentionally identical to the no-such-user
+    case to avoid leaking cross-tenant existence.
+    """
     pool = get_pool()
     normalized = email.strip()
     with pool.connection() as conn:
@@ -763,6 +830,8 @@ def update_user(
         if not row:
             raise ValueError(f"User '{normalized}' not found")
         user_id = str(row["id"])
+        if not _is_member_of_org(conn, user_id, org_slug):
+            raise ValueError(f"User '{normalized}' not found")
 
         updates = {}
         if first_name is not None:
@@ -816,12 +885,27 @@ def update_user(
         return _context_row_to_user(updated)
 
 
-def delete_user(email: str) -> bool:
-    """Delete a user. Returns True if deleted."""
+def delete_user(email: str, org_slug: str) -> bool:
+    """Delete a user, scoped to the active org.
+
+    Returns False (treated as "not found" by the caller) when the user
+    doesn't exist OR isn't a member of `org_slug`. We never delete a
+    user across an org boundary even if the caller is a global admin —
+    the membership row is the authority gate. When the user IS a
+    member of the active org, the row is removed entirely (including
+    memberships in OTHER orgs); cross-org cleanup is deliberate
+    because users are global-by-email today.
+    """
     pool = get_pool()
     normalized = email.strip()
     with pool.connection() as conn:
-        cur = conn.execute("DELETE FROM users WHERE email = %s RETURNING id", (normalized,))
+        row = conn.execute("SELECT id FROM users WHERE email = %s", (normalized,)).fetchone()
+        if not row:
+            return False
+        user_id = str(row["id"])
+        if not _is_member_of_org(conn, user_id, org_slug):
+            return False
+        cur = conn.execute("DELETE FROM users WHERE id = %s RETURNING id", (user_id,))
         return cur.fetchone() is not None
 
 

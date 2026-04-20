@@ -310,3 +310,125 @@ class TestRequireCallerOrgSlug:
             assert tools._require_caller_org_slug() == "arcade"
         finally:
             tools.set_caller_org_slug(None)
+
+
+# ── User-record CRUD org scoping ────────────────────────────────────────
+
+
+class TestGetUserInOrgScoping:
+    """`get_user_in_org` must membership-gate the lookup."""
+
+    def _user_row(self, *, uid: str = "u-1", email: str = "x@arcade.com") -> dict:
+        return {"id": uid, "email": email, "first_name": "X", "last_name": "Y"}
+
+    def test_returns_user_when_member(self):
+        user_row = self._user_row()
+        membership_row = {"?column?": 1}
+
+        with _mock_pool() as cursor:
+            cursor.execute.return_value.fetchone.side_effect = [user_row, membership_row]
+            result = pg_client.get_user_in_org("x@arcade.com", "arcade")
+
+        assert result is not None
+        assert result["email"] == "x@arcade.com"
+
+    def test_returns_none_when_not_member(self):
+        user_row = self._user_row()
+
+        with _mock_pool() as cursor:
+            # First fetchone returns the user, second (membership probe) returns None.
+            cursor.execute.return_value.fetchone.side_effect = [user_row, None]
+            result = pg_client.get_user_in_org("x@arcade.com", "haderach")
+
+        assert result is None
+
+    def test_returns_none_when_user_missing(self):
+        with _mock_pool() as cursor:
+            cursor.execute.return_value.fetchone.side_effect = [None]
+            result = pg_client.get_user_in_org("ghost@arcade.com", "arcade")
+
+        assert result is None
+
+
+class TestUpdateUserOrgScoping:
+    """`update_user` must membership-gate the target user."""
+
+    def test_raises_when_target_not_member(self):
+        user_row = {"id": "u-1", "email": "x@arcade.com", "first_name": "X", "last_name": "Y"}
+
+        with _mock_pool() as cursor:
+            cursor.execute.return_value.fetchone.side_effect = [user_row, None]
+            with pytest.raises(ValueError, match="not found"):
+                pg_client.update_user("x@arcade.com", "haderach", first_name="New")
+
+    def test_raises_when_user_missing(self):
+        with _mock_pool() as cursor:
+            cursor.execute.return_value.fetchone.side_effect = [None]
+            with pytest.raises(ValueError, match="not found"):
+                pg_client.update_user("ghost@arcade.com", "arcade", first_name="N")
+
+
+class TestDeleteUserOrgScoping:
+    """`delete_user` must membership-gate the target user."""
+
+    def test_returns_false_when_target_not_member(self):
+        user_row = {"id": "u-1"}
+
+        with _mock_pool() as cursor:
+            cursor.execute.return_value.fetchone.side_effect = [user_row, None]
+            result = pg_client.delete_user("x@arcade.com", "haderach")
+
+        assert result is False
+
+    def test_returns_false_when_user_missing(self):
+        with _mock_pool() as cursor:
+            cursor.execute.return_value.fetchone.side_effect = [None]
+            result = pg_client.delete_user("ghost@arcade.com", "arcade")
+
+        assert result is False
+
+
+class TestCreateUserOrgScoping:
+    """`create_user` must add a membership row in the active org."""
+
+    def test_inserts_membership_in_active_org(self):
+        with _mock_pool() as cursor:
+            # 1) duplicate-check returns no row
+            # 2) INSERT into users RETURNING the new row
+            # 3) INSERT into memberships
+            # 4) get_user_context_row returns the created context
+            # fetchone is invoked for: (1) duplicate-email probe, (2) the
+            # user INSERT RETURNING, (3) the final _get_user_context_row.
+            # The membership INSERT and any role INSERTs do not call fetchone.
+            cursor.execute.return_value.fetchone.side_effect = [
+                None,
+                {"id": "new-uid", "email": "new@arcade.com", "first_name": "N", "last_name": "U"},
+                {
+                    "id": "new-uid",
+                    "email": "new@arcade.com",
+                    "first_name": "N",
+                    "last_name": "U",
+                    "role_names": [],
+                    "allowed_departments": [],
+                    "allowed_vendor_ids": [],
+                    "denied_vendor_ids": [],
+                    "orgs": [{"slug": "arcade"}],
+                },
+            ]
+
+            result = pg_client.create_user("new@arcade.com", "N", "U", [], "arcade")
+
+        assert result["email"] == "new@arcade.com"
+
+        membership_calls = [
+            call for call in cursor.execute.call_args_list
+            if "user_org_memberships" in call.args[0]
+        ]
+        assert len(membership_calls) == 1
+        assert membership_calls[0].args[1] == ("new-uid", "arcade")
+
+    def test_raises_when_email_already_exists(self):
+        with _mock_pool() as cursor:
+            cursor.execute.return_value.fetchone.side_effect = [{"id": "existing"}]
+            with pytest.raises(ValueError, match="already exists"):
+                pg_client.create_user("dup@arcade.com", "D", "U", [], "arcade")
