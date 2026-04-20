@@ -12,6 +12,7 @@ pytestmark = pytest.mark.vendor_management
 from fastapi.testclient import TestClient
 
 from service.app import app, get_verified_user
+from service.auth import get_caller_enabled_apps
 from service import pg_client
 from service.tools import (
     CsvColumnSpec,
@@ -450,6 +451,9 @@ def _make_client(email="test@example.com", active_org_slug="arcade"):
         "email": email,
         "active_org_slug": active_org_slug,
     }
+    app.dependency_overrides[get_caller_enabled_apps] = lambda: [
+        "expenses", "vendors", "vendor_administration", "system_administration",
+    ]
     return TestClient(app)
 
 

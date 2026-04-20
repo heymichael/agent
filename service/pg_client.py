@@ -1082,8 +1082,16 @@ def list_contractor_vendors(org_slug: str) -> list[dict]:
 # Apps
 # ---------------------------------------------------------------------------
 
-def list_apps() -> list[dict]:
-    """Return all app definitions, sorted by type then sort_order."""
+def list_apps(org_slug: str) -> list[dict]:
+    """Return app definitions enabled for `org_slug`, sorted by type then sort_order.
+
+    Phase 4 of multi-org tenancy (task 254): the result is filtered to
+    apps whose slug appears in `orgs.enabled_apps` for the active org.
+    The existing `granting_roles` join is preserved so the client-side
+    role gate keeps working unchanged (entitlement is layered on top of
+    the role gate, not a replacement). An unknown `org_slug` returns
+    no apps — callers are expected to validate the slug upstream.
+    """
     pool = get_pool()
     with pool.connection() as conn:
         rows = conn.execute(
@@ -1095,10 +1103,34 @@ def list_apps() -> list[dict]:
                FROM apps a
                LEFT JOIN app_granting_roles agr ON agr.app_id = a.id
                LEFT JOIN roles r ON r.id = agr.role_id
+               WHERE a.slug = ANY(
+                   SELECT unnest(enabled_apps) FROM orgs WHERE slug = %s
+               )
                GROUP BY a.id
-               ORDER BY (CASE WHEN a.type = 'app' THEN 0 ELSE 1 END), a.sort_order"""
+               ORDER BY (CASE WHEN a.type = 'app' THEN 0 ELSE 1 END), a.sort_order""",
+            (org_slug,),
         ).fetchall()
     return [_app_row_to_dict(r) for r in rows]
+
+
+def get_org_enabled_apps(org_slug: str) -> list[str]:
+    """Return the `enabled_apps` array for `org_slug`, or `[]` if unknown.
+
+    Phase 4 of multi-org tenancy (task 254): used by the `require_app`
+    FastAPI dependency to gate domain endpoints. Returns `[]` (not None)
+    for an unknown slug so callers can do `if app not in result` without
+    a None check; an unknown active org will simply fail every
+    entitlement check, which is the desired behavior.
+    """
+    pool = get_pool()
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT enabled_apps FROM orgs WHERE slug = %s",
+            (org_slug,),
+        ).fetchone()
+    if not row:
+        return []
+    return list(row["enabled_apps"] or [])
 
 
 def get_app(app_id: str) -> dict | None:

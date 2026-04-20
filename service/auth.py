@@ -2,11 +2,12 @@
 
 import logging
 import os
+from typing import Callable
 from urllib.request import urlopen
 
 import firebase_admin
 from firebase_admin import auth as firebase_auth
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
 logger = logging.getLogger(__name__)
 
@@ -141,3 +142,74 @@ def get_verified_user(request: Request) -> dict:
     )
     decoded["active_org_slug"] = _resolve_active_org_slug(email, requested)
     return decoded
+
+
+def get_caller_enabled_apps(
+    caller: dict = Depends(get_verified_user),
+) -> list[str]:
+    """Return the active org's `enabled_apps` for the current request.
+
+    Phase 4 of multi-org tenancy (task 254). FastAPI's per-request
+    dependency cache means this resolves at most once per request even
+    if multiple `require_app(...)` dependencies reference it. Endpoints
+    that don't use `require_app` never trigger this lookup.
+
+    Returns `[]` if the caller has no active org (zero-membership user
+    or an endpoint that didn't enforce a slug). The downstream
+    `require_app` distinguishes "no active org" (400) from "app not
+    enabled" (403) so the 403 path is reserved for genuine entitlement
+    misses.
+    """
+    from . import pg_client
+
+    slug = caller.get("active_org_slug")
+    if not slug:
+        return []
+    return pg_client.get_org_enabled_apps(slug)
+
+
+def require_app(app_slug: str) -> Callable[..., str]:
+    """Build a FastAPI dependency that enforces app entitlement.
+
+    Returns the active org slug on success so endpoints can drop their
+    own `_require_active_org(caller)` call when they use this dep.
+
+    Failure modes:
+    - No active org resolved (zero-membership user, or somehow no slug
+      pinned to the request) → 400 `Active-Org-Required`. Mirrors the
+      existing helper in `service/app.py` so the frontend treats both
+      paths identically.
+    - Active org doesn't have `app_slug` in its `enabled_apps` →
+      403 `App-Not-Enabled`. The 403 message names both the app and the
+      org so logs are immediately diagnosable.
+
+    The role-based gate (`app_granting_roles` / `_get_caller_roles`)
+    stays as-is; entitlement is layered on top, not a replacement
+    (197-r2 / task 254 plan §"App entitlement is layered, not
+    replacing").
+    """
+    def dep(
+        caller: dict = Depends(get_verified_user),
+        enabled_apps: list[str] = Depends(get_caller_enabled_apps),
+    ) -> str:
+        slug = caller.get("active_org_slug")
+        if not slug:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "Active-Org-Required",
+                    "message": "No active org resolved for this caller.",
+                },
+            )
+        if app_slug not in enabled_apps:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "App-Not-Enabled",
+                    "message": (
+                        f"App '{app_slug}' is not enabled for org '{slug}'."
+                    ),
+                },
+            )
+        return slug
+    return dep

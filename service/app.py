@@ -34,7 +34,7 @@ from .cms_tools import (
     CMS_ADMIN_TOOLS, CMS_ADMIN_HANDLERS,
 )
 from . import pg_client
-from .auth import get_verified_user, warm_firebase_public_keys
+from .auth import get_verified_user, require_app, warm_firebase_public_keys
 from .qbo_auth import get_authorization_url, exchange_code_for_tokens
 
 logging.basicConfig(level=logging.INFO)
@@ -704,8 +704,11 @@ def qbo_callback(
 
 
 @app.delete("/vendors/{vendor_id}")
-def delete_vendor(vendor_id: str, caller: dict = Depends(get_verified_user)):
-    org_slug = _require_active_org(caller)
+def delete_vendor(
+    vendor_id: str,
+    caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("vendors")),
+):
     vendor = pg_client.get_vendor(vendor_id, org_slug)
     if not vendor:
         raise HTTPException(status_code=404, detail=f"Vendor '{vendor_id}' not found")
@@ -741,8 +744,8 @@ class UpdateUserRequest(BaseModel):
 def list_users(
     role: list[str] | None = Query(default=None),
     caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("system_administration")),
 ):
-    org_slug = _require_active_org(caller)
     return pg_client.list_users(org_slug, role if role else None)
 
 
@@ -758,8 +761,11 @@ def get_current_user(caller: dict = Depends(get_verified_user)):
 
 
 @app.get("/users/{email}")
-def get_user(email: str, caller: dict = Depends(get_verified_user)):
-    org_slug = _require_active_org(caller)
+def get_user(
+    email: str,
+    caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("system_administration")),
+):
     user = pg_client.get_user_in_org(email, org_slug)
     if not user:
         raise HTTPException(status_code=404, detail=f"User '{email}' not found")
@@ -767,9 +773,12 @@ def get_user(email: str, caller: dict = Depends(get_verified_user)):
 
 
 @app.post("/users", status_code=201)
-def create_user(req: CreateUserRequest, caller: dict = Depends(get_verified_user)):
+def create_user(
+    req: CreateUserRequest,
+    caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("system_administration")),
+):
     require_admin(caller)
-    org_slug = _require_active_org(caller)
     try:
         return pg_client.create_user(req.email, req.firstName, req.lastName, req.roles, org_slug)
     except ValueError as exc:
@@ -777,9 +786,13 @@ def create_user(req: CreateUserRequest, caller: dict = Depends(get_verified_user
 
 
 @app.patch("/users/{email}")
-def update_user(email: str, req: UpdateUserRequest, caller: dict = Depends(get_verified_user)):
+def update_user(
+    email: str,
+    req: UpdateUserRequest,
+    caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("system_administration")),
+):
     _email, caller_roles = _get_caller_roles(caller)
-    org_slug = _require_active_org(caller)
 
     admin_fields = req.roles is not None or req.firstName is not None or req.lastName is not None
     access_fields = (
@@ -809,9 +822,12 @@ def update_user(email: str, req: UpdateUserRequest, caller: dict = Depends(get_v
 
 
 @app.delete("/users/{email}")
-def delete_user_endpoint(email: str, caller: dict = Depends(get_verified_user)):
+def delete_user_endpoint(
+    email: str,
+    caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("system_administration")),
+):
     require_admin(caller)
-    org_slug = _require_active_org(caller)
     if not pg_client.delete_user(email, org_slug):
         raise HTTPException(status_code=404, detail=f"User '{email}' not found")
     return {"ok": True, "deleted": email}
@@ -825,11 +841,17 @@ class UpdateAppRequest(BaseModel):
 
 @app.get("/apps")
 def list_apps(caller: dict = Depends(get_verified_user)):
-    return pg_client.list_apps()
+    org_slug = _require_active_org(caller)
+    return pg_client.list_apps(org_slug)
 
 
 @app.patch("/apps/{app_id}")
-def update_app(app_id: str, req: UpdateAppRequest, caller: dict = Depends(get_verified_user)):
+def update_app(
+    app_id: str,
+    req: UpdateAppRequest,
+    caller: dict = Depends(get_verified_user),
+    _org_slug: str = Depends(require_app("system_administration")),
+):
     require_admin(caller)
     try:
         return pg_client.update_app(
@@ -848,8 +870,10 @@ def list_departments(caller: dict = Depends(get_verified_user)):
 
 
 @app.get("/vendors")
-def list_vendors(caller: dict = Depends(get_verified_user)):
-    org_slug = _require_active_org(caller)
+def list_vendors(
+    caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("vendors")),
+):
     vendors = pg_client.list_vendors(org_slug)
     allowed = _resolve_caller_access(caller, org_slug)
     if allowed is None:
@@ -886,10 +910,14 @@ def _map_vendor_fields(updates: dict) -> dict:
 
 
 @app.patch("/vendors/{vendor_id}")
-def update_vendor(vendor_id: str, updates: dict, caller: dict = Depends(get_verified_user)):
+def update_vendor(
+    vendor_id: str,
+    updates: dict,
+    caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("vendors")),
+):
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
-    org_slug = _require_active_org(caller)
     try:
         result = pg_client.update_vendor(vendor_id, _map_vendor_fields(updates), org_slug)
         return {"ok": True, "vendor": result}
@@ -902,10 +930,13 @@ class BatchUpdateRequest(BaseModel):
 
 
 @app.post("/vendors/batch-update")
-def batch_update_vendors(req: BatchUpdateRequest, caller: dict = Depends(get_verified_user)):
+def batch_update_vendors(
+    req: BatchUpdateRequest,
+    caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("vendors")),
+):
     if not req.updates:
         raise HTTPException(status_code=400, detail="No updates provided")
-    org_slug = _require_active_org(caller)
     try:
         count = pg_client.batch_update_vendors(req.updates, org_slug)
         return {"ok": True, "updated": count}
@@ -927,9 +958,9 @@ def set_vendor_contractor(
     vendor_id: str,
     req: SetContractorRequest,
     caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("vendor_administration")),
 ):
     email = require_finance_admin(caller)
-    org_slug = _require_active_org(caller)
     actor_id = pg_client.get_user_id_by_email(email)
     if not actor_id:
         raise HTTPException(status_code=403, detail="User not found")
@@ -941,16 +972,21 @@ def set_vendor_contractor(
 
 
 @app.get("/vendors/contractors")
-def list_contractor_vendors(caller: dict = Depends(get_verified_user)):
+def list_contractor_vendors(
+    caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("vendor_administration")),
+):
     require_finance_admin(caller)
-    org_slug = _require_active_org(caller)
     return pg_client.list_contractor_vendors(org_slug)
 
 
 @app.get("/vendors/{vendor_id}/access")
-def list_vendor_access(vendor_id: str, caller: dict = Depends(get_verified_user)):
+def list_vendor_access(
+    vendor_id: str,
+    caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("vendor_administration")),
+):
     require_finance_admin(caller)
-    org_slug = _require_active_org(caller)
     vendor = pg_client.get_vendor(vendor_id, org_slug)
     if not vendor:
         raise HTTPException(status_code=404, detail=f"Vendor '{vendor_id}' not found")
@@ -966,9 +1002,9 @@ def grant_vendor_access(
     vendor_id: str,
     req: GrantAccessRequest,
     caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("vendor_administration")),
 ):
     email = require_finance_admin(caller)
-    org_slug = _require_active_org(caller)
     actor_id = pg_client.get_user_id_by_email(email)
     if not actor_id:
         raise HTTPException(status_code=403, detail="User not found")
@@ -987,9 +1023,9 @@ def revoke_vendor_access(
     vendor_id: str,
     user_email: str,
     caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("vendor_administration")),
 ):
     require_finance_admin(caller)
-    org_slug = _require_active_org(caller)
     vendor = pg_client.get_vendor(vendor_id, org_slug)
     if not vendor:
         raise HTTPException(status_code=404, detail=f"Vendor '{vendor_id}' not found")
@@ -1006,8 +1042,8 @@ def get_spend(
     from_month: str = Query(..., alias="from"),
     to_month: str = Query(..., alias="to"),
     caller: dict = Depends(get_verified_user),
+    org_slug: str = Depends(require_app("vendors")),
 ):
-    org_slug = _require_active_org(caller)
     allowed = _resolve_caller_access(caller, org_slug)
     if vendor_ids is None or len(vendor_ids) == 0:
         if allowed is not None:
@@ -1204,7 +1240,11 @@ class CmsItemCreateRequest(BaseModel):
 
 
 @app.post("/cms/items")
-def create_cms_item(req: CmsItemCreateRequest, caller: dict = Depends(get_verified_user)):
+def create_cms_item(
+    req: CmsItemCreateRequest,
+    caller: dict = Depends(get_verified_user),
+    _org_slug: str = Depends(require_app("site")),
+):
     from .cms_tools import handle_cms_create_item
     result = json.loads(handle_cms_create_item({
         "orgId": 1,
@@ -1215,7 +1255,12 @@ def create_cms_item(req: CmsItemCreateRequest, caller: dict = Depends(get_verifi
 
 
 @app.patch("/cms/items/{item_id}")
-def patch_cms_item(item_id: int, req: CmsItemPatchRequest, caller: dict = Depends(get_verified_user)):
+def patch_cms_item(
+    item_id: int,
+    req: CmsItemPatchRequest,
+    caller: dict = Depends(get_verified_user),
+    _org_slug: str = Depends(require_app("site")),
+):
     from .cms_tools import handle_cms_update_item, _api, _headers
     import httpx
     caller_email = caller.get("email", "")
@@ -1244,7 +1289,11 @@ def patch_cms_item(item_id: int, req: CmsItemPatchRequest, caller: dict = Depend
 
 
 @app.get("/cms/items/{item_id}/versions")
-def list_cms_item_versions(item_id: int, caller: dict = Depends(get_verified_user)):
+def list_cms_item_versions(
+    item_id: int,
+    caller: dict = Depends(get_verified_user),
+    _org_slug: str = Depends(require_app("site")),
+):
     from .cms_tools import _api, _headers
     import httpx
     r = httpx.get(
@@ -1269,7 +1318,12 @@ def list_cms_item_versions(item_id: int, caller: dict = Depends(get_verified_use
 
 
 @app.post("/cms/items/{item_id}/versions/{version_id}/restore")
-def restore_cms_item_version(item_id: int, version_id: int, caller: dict = Depends(get_verified_user)):
+def restore_cms_item_version(
+    item_id: int,
+    version_id: int,
+    caller: dict = Depends(get_verified_user),
+    _org_slug: str = Depends(require_app("site")),
+):
     from .cms_tools import handle_cms_restore_version
     caller_email = caller.get("email", "")
     result = json.loads(handle_cms_restore_version({"itemId": item_id, "versionId": version_id}, caller_email=caller_email))

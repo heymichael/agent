@@ -13,6 +13,7 @@ pytestmark = [pytest.mark.expense_analytics, pytest.mark.vendor_management]
 from fastapi.testclient import TestClient
 
 from service.app import app, get_verified_user
+from service.auth import get_caller_enabled_apps
 from service import pg_client
 
 
@@ -32,8 +33,20 @@ SAMPLE_SPEND = [
     {"vendor": "Gamma LLC", "month": "2026-01", "amount": 20000.0},
 ]
 
+# Default to Arcade's full app set so existing tests don't have to thread
+# entitlement awareness through every assertion. Tests that want to
+# exercise require_app's 403 path pass `enabled_apps=[]` (or a list
+# excluding the relevant slug).
+_DEFAULT_ENABLED_APPS = [
+    "expenses", "vendors", "vendor_administration", "system_administration",
+]
 
-def _make_client(email="test@example.com", active_org_slug="arcade"):
+
+def _make_client(
+    email="test@example.com",
+    active_org_slug="arcade",
+    enabled_apps=None,
+):
     """Create a TestClient with auth overridden to return the given email.
 
     Phase 3 of multi-org tenancy (task 254): the override now also
@@ -41,11 +54,21 @@ def _make_client(email="test@example.com", active_org_slug="arcade"):
     `_require_active_org(caller)` and reject callers without one.
     Pass `active_org_slug=None` explicitly to test the
     `Active-Org-Required` (400) path.
+
+    Phase 4 of multi-org tenancy (task 254): also overrides
+    `get_caller_enabled_apps` so the `require_app(...)` dependencies on
+    domain endpoints don't fall through to a real DB lookup. Defaults
+    to Arcade's enabled-apps set; tests that need to exercise the
+    `App-Not-Enabled` 403 path pass `enabled_apps=[]` or omit the
+    relevant slug.
     """
     app.dependency_overrides[get_verified_user] = lambda: {
         "email": email,
         "active_org_slug": active_org_slug,
     }
+    app.dependency_overrides[get_caller_enabled_apps] = lambda: list(
+        enabled_apps if enabled_apps is not None else _DEFAULT_ENABLED_APPS
+    )
     client = TestClient(app)
     return client
 
