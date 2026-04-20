@@ -33,9 +33,19 @@ SAMPLE_SPEND = [
 ]
 
 
-def _make_client(email="test@example.com"):
-    """Create a TestClient with auth overridden to return the given email."""
-    app.dependency_overrides[get_verified_user] = lambda: {"email": email}
+def _make_client(email="test@example.com", active_org_slug="arcade"):
+    """Create a TestClient with auth overridden to return the given email.
+
+    Phase 3 of multi-org tenancy (task 254): the override now also
+    sets `active_org_slug` since most endpoints call
+    `_require_active_org(caller)` and reject callers without one.
+    Pass `active_org_slug=None` explicitly to test the
+    `Active-Org-Required` (400) path.
+    """
+    app.dependency_overrides[get_verified_user] = lambda: {
+        "email": email,
+        "active_org_slug": active_org_slug,
+    }
     client = TestClient(app)
     return client
 
@@ -322,7 +332,7 @@ class TestGetSpend:
 
         assert resp.status_code == 200
         assert len(resp.json()["data"]) == 2
-        mock_spend.assert_called_once_with(["v_acme"], "2026-01", "2026-02")
+        mock_spend.assert_called_once_with(["v_acme"], "2026-01", "2026-02", "arcade")
         mock_resolve.assert_not_called()
 
     @patch.object(pg_client, "query_spend_by_vendor_ids")
@@ -342,7 +352,7 @@ class TestGetSpend:
         })
 
         assert resp.status_code == 200
-        mock_spend.assert_called_once_with(["v_acme"], "2026-01", "2026-01")
+        mock_spend.assert_called_once_with(["v_acme"], "2026-01", "2026-01", "arcade")
 
     @patch.object(pg_client, "query_spend_by_vendor_ids")
     @patch.object(pg_client, "resolve_effective_vendor_ids")
@@ -361,7 +371,7 @@ class TestGetSpend:
 
         assert resp.status_code == 200
         assert resp.json()["data"] == []
-        mock_spend.assert_called_once_with([], "2026-01", "2026-02")
+        mock_spend.assert_called_once_with([], "2026-01", "2026-02", "arcade")
 
     def test_missing_params_returns_422(self):
         """Omitting required query params (from/to) must return 422, not a server error."""
@@ -557,7 +567,7 @@ class TestSetContractor:
 
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
-        mock_set.assert_called_once_with("v_alpha", True, "uid-fa")
+        mock_set.assert_called_once_with("v_alpha", True, "uid-fa", "arcade")
 
     @patch.object(pg_client, "get_user")
     def test_non_finance_admin_rejected(self, mock_get_user):

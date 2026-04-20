@@ -19,8 +19,11 @@ from service.app import app, get_verified_user
 from service import pg_client
 
 
-def _make_client(email="test@example.com"):
-    app.dependency_overrides[get_verified_user] = lambda: {"email": email}
+def _make_client(email="test@example.com", active_org_slug="arcade"):
+    app.dependency_overrides[get_verified_user] = lambda: {
+        "email": email,
+        "active_org_slug": active_org_slug,
+    }
     return TestClient(app)
 
 

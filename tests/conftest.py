@@ -70,6 +70,29 @@ def _reset_cost_tracker():
     yield
 
 
+# ── Multi-org tenancy: default caller_org_slug for unit tests ───────────
+#
+# Phase 3 of multi-org tenancy (task 254) makes tool handlers in
+# `service.tools` and `mcp_server.tools` read the active org slug from a
+# contextvar set by the `/chat` endpoint at request entry. Unit tests
+# don't go through `/chat`, so we auto-set a default slug here and reset
+# it after each test. Tests that need to assert the "no slug" path can
+# call `tools.set_caller_org_slug(None)` themselves inside the test body.
+
+DEFAULT_TEST_ORG_SLUG = "arcade"
+
+
+@pytest.fixture(autouse=True)
+def _default_caller_org_slug():
+    """Set a default caller org slug for the duration of each test."""
+    from service import tools as _tools  # local to avoid import-time DB cost
+    _tools.set_caller_org_slug(DEFAULT_TEST_ORG_SLUG)
+    try:
+        yield DEFAULT_TEST_ORG_SLUG
+    finally:
+        _tools.set_caller_org_slug(None)
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     """Inject per-test cost metadata into json-report.

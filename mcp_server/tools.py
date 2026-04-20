@@ -31,15 +31,27 @@ from .period_parser import parse_period, PeriodParseError
 CallerContext = dict[str, Any] | None
 
 
-def _resolve_or_ambiguous(vendor_input: str) -> dict | None:
+def _resolve_or_ambiguous(vendor_input: str, org_slug: str | None) -> dict | None:
     """Resolve a vendor input, returning an ambiguous/not_found response dict
     if resolution fails, or None on success (caller reads result from the
     returned VendorMatch).
 
-    Returns a tuple of (error_response | None, VendorMatch | None).
+    Returns a tuple of (error_response | None, VendorMatch | None). When
+    *org_slug* is provided, the resolution is org-scoped (a vendor in a
+    different tenant reads as not_found). When *org_slug* is None — only
+    expected from internal call sites that don't pass caller_context,
+    e.g. unit tests — the lookup falls back to a synthetic empty-tenant
+    behavior. Production call sites always go through `execute_*`
+    handlers in `service.tools`, which set a caller_context whose
+    `org_slug` comes from the request contextvar.
     """
     from service.pg_client import VendorMatch  # avoid circular at module level
-    result = resolve_vendor_by_identifier(vendor_input)
+    if not org_slug:
+        # Legacy / no-context path. Use the empty-string sentinel so the
+        # underlying resolver routes through its "no match" branch
+        # without hitting Postgres org-keyed predicates with NULL.
+        org_slug = ""
+    result = resolve_vendor_by_identifier(vendor_input, org_slug)
     if not result:
         return {"status": "not_found", "message": f"No vendor matched '{vendor_input}'."}, None
     if result.match == "disambiguate" or (result.match == "fuzzy" and result.alternatives):
@@ -155,6 +167,19 @@ def _append_filter_clauses(filters: dict, clauses: list, params: list) -> None:
             params.append(value)
 
 
+def _org_slug_from_context(caller_context: CallerContext) -> str | None:
+    """Extract the active org slug from caller_context, if present.
+
+    Phase 3 of multi-org tenancy (task 254): every spend/vendor SQL
+    query in this module appends `v.org_slug = %s` so a finance_admin
+    bypass — or any future caller_context with no allowed_vendor_ids
+    filter — still cannot see another tenant's rows.
+    """
+    if caller_context is None:
+        return None
+    return caller_context.get("org_slug")
+
+
 def _build_where(
     filters: dict,
     start_month: str | None,
@@ -165,6 +190,10 @@ def _build_where(
     """Build a WHERE clause from filters, period, vendor, and access control.
 
     Returns (where_sql, params) — the SQL starts with ' WHERE 1=1'.
+
+    Org scoping (gate 5/6 of strategy 197-r2): when caller_context
+    carries `org_slug`, an explicit `v.org_slug = %s` clause is added so
+    even finance_admin reads stay inside the active tenant.
     """
     clauses = ["1=1", "v.hidden_from_agent = false"]
     params: list = []
@@ -182,6 +211,11 @@ def _build_where(
 
     _append_filter_clauses(filters, clauses, params)
 
+    org_slug = _org_slug_from_context(caller_context)
+    if org_slug:
+        clauses.append("v.org_slug = %s")
+        params.append(org_slug)
+
     if caller_context and not caller_context.get("is_finance_admin"):
         allowed = caller_context.get("allowed_vendor_ids") or []
         if not allowed:
@@ -197,11 +231,19 @@ def _build_vendor_where(
     filters: dict,
     caller_context: CallerContext = None,
 ) -> tuple[str, list]:
-    """Build a WHERE clause for vendor-only queries (no spend table)."""
+    """Build a WHERE clause for vendor-only queries (no spend table).
+
+    See `_build_where` for the org-scoping rationale.
+    """
     clauses = ["1=1", "v.hidden_from_agent = false"]
     params: list = []
 
     _append_filter_clauses(filters, clauses, params)
+
+    org_slug = _org_slug_from_context(caller_context)
+    if org_slug:
+        clauses.append("v.org_slug = %s")
+        params.append(org_slug)
 
     return " WHERE " + " AND ".join(clauses), params
 
@@ -379,7 +421,7 @@ def handle_vendor_lookup(args: dict, caller_context: CallerContext = None) -> di
     if not vendor_input:
         return {"status": "not_found", "message": "No vendor specified."}
 
-    err, result = _resolve_or_ambiguous(vendor_input)
+    err, result = _resolve_or_ambiguous(vendor_input, _org_slug_from_context(caller_context))
     if err:
         return err
 
@@ -619,7 +661,7 @@ def handle_spend_by_vendor(args: dict, caller_context: CallerContext = None) -> 
     vendor_id = None
     vendor_name = None
     if vendor_input:
-        err, result = _resolve_or_ambiguous(vendor_input)
+        err, result = _resolve_or_ambiguous(vendor_input, _org_slug_from_context(caller_context))
         if err:
             return err
         vendor_id = result.vendor["id"]
@@ -629,9 +671,15 @@ def handle_spend_by_vendor(args: dict, caller_context: CallerContext = None) -> 
         if auth_err:
             return auth_err
 
+    # When a vendor was resolved + authed above, skip the per-vendor ACL
+    # in _build_where but still carry org_slug forward so the WHERE
+    # clause stays org-scoped.
+    where_ctx: CallerContext = caller_context
+    if vendor_input:
+        where_ctx = {"org_slug": _org_slug_from_context(caller_context), "is_finance_admin": True}
     where_sql, params = _build_where(
         filters, start_month, end_month,
-        vendor_id=vendor_id, caller_context=caller_context if not vendor_input else None,
+        vendor_id=vendor_id, caller_context=where_ctx,
     )
     pool = get_pool()
 
@@ -857,7 +905,8 @@ def handle_spend_detail(args: dict, caller_context: CallerContext = None) -> dic
     if not vendor_input:
         return {"status": "invalid_filter", "field": "vendor", "provided": None, "valid_values": []}
 
-    err, match = _resolve_or_ambiguous(vendor_input)
+    org_slug = _org_slug_from_context(caller_context)
+    err, match = _resolve_or_ambiguous(vendor_input, org_slug)
     if err:
         return err
 
@@ -877,6 +926,7 @@ def handle_spend_detail(args: dict, caller_context: CallerContext = None) -> dic
         vendor_id=vendor_id,
         start_month=start_month,
         end_month=end_month,
+        org_slug=org_slug,
         category=category,
         project=project,
         group_by=group_by,
@@ -950,7 +1000,8 @@ def handle_spend_detail_dimensions(args: dict, caller_context: CallerContext = N
     if not vendor_input:
         return {"status": "invalid_filter", "field": "vendor", "provided": None, "valid_values": []}
 
-    err, match = _resolve_or_ambiguous(vendor_input)
+    org_slug = _org_slug_from_context(caller_context)
+    err, match = _resolve_or_ambiguous(vendor_input, org_slug)
     if err:
         return err
 
@@ -961,7 +1012,7 @@ def handle_spend_detail_dimensions(args: dict, caller_context: CallerContext = N
     if auth_err:
         return auth_err
 
-    dimensions = pg_get_spend_detail_dimensions(vendor_id=vendor_id, dimension=dimension)
+    dimensions = pg_get_spend_detail_dimensions(vendor_id=vendor_id, org_slug=org_slug, dimension=dimension)
 
     return {
         "status": "ok",
