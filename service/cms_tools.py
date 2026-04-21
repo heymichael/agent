@@ -1,7 +1,14 @@
 """CMS tool definitions and Payload REST API handlers.
 
 All handlers call the Payload CMS REST API using CMS_API_URL and
-CMS_API_KEY. Tools are grouped by agent mode:
+CMS_API_KEY. CMS_API_URL is the base of the CMS mount — locally
+"http://localhost:3000/cms", in production "https://haderach.ai/cms".
+The "/cms" suffix matches the Next.js `basePath` set in
+haderach-cms/next.config.ts and the Firebase Hosting `/cms/api/**`
+rewrite. The `_api()` helper concatenates `/api/<resource>` onto this
+base, so callers pass paths like "/api/orgs" or "/api/content-items".
+
+Tools are grouped by agent mode:
 
 - Editing: get, create, update, lock/unlock, submit_for_approval,
   restore_version, add_to_schedule
