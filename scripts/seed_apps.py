@@ -20,6 +20,15 @@ from service.pg_client import get_pool
 
 APPS = [
     {
+        "slug": "site",
+        "label": "CMS",
+        "path": "/site/",
+        "type": "app",
+        "granting_roles": ["user", "admin"],
+        "sort_order": 0,
+        "icon": "layout-template",
+    },
+    {
         "slug": "expenses",
         "label": "Expenses",
         "path": "/expenses/",
@@ -91,9 +100,10 @@ def main():
                      SET label = EXCLUDED.label,
                          path = EXCLUDED.path,
                          type = EXCLUDED.type,
-                         sort_order = EXCLUDED.sort_order
+                         sort_order = EXCLUDED.sort_order,
+                         icon = EXCLUDED.icon
                    RETURNING id""",
-                (app["slug"], app["label"], app["path"], app["type"], app["sort_order"], None),
+                (app["slug"], app["label"], app["path"], app["type"], app["sort_order"], app.get("icon")),
             ).fetchone()
             app_id = str(row["id"])
 
