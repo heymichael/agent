@@ -3,12 +3,39 @@
 Operational scripts for the agent service. Run from the repo root with the
 agent virtualenv active and `DATABASE_URL` set, unless noted.
 
+## Local DB bootstrap — `bootstrap_local_db.py`
+
+Builds a fully local Postgres database for agent development without Cloud SQL
+Proxy or production credentials.
+
+### One-time setup
+
+- Docker Desktop installed and running.
+- Local Postgres started with `docker compose -f docker-compose.local.yml up -d`
+- Python deps installed in the agent virtualenv.
+
+### Usage
+
+```bash
+DATABASE_URL=postgresql://agent_local:localdev@localhost:5436/haderach_local \
+  python scripts/bootstrap_local_db.py
+```
+
+If you want a clean rebuild, add `--reset` to drop and recreate the local
+`public` schema before replaying migrations and seeds.
+
 ## Prod snapshot — `pull_prod_snapshot.sh`
 
+> **Owner-only ops tool.** This script bypasses curation and pulls raw prod
+> data into a local container. Use only for migration validation by the data
+> owner before deploy. Routine local development must use the curated demo
+> dataset (see `haderach-platform/docs/demo-data-runbook.md` section 5,
+> loaded into `docker-compose.local.yml` on port `5436`).
+
 Pulls a fresh snapshot of prod's `haderach` Postgres into a local Docker
-container, so migrations and code changes can be verified against real data
-before deploy. There is no staging environment; this snapshot is the only
-pre-prod safety check.
+container, so migrations can be verified against real-shape data before
+deploy. There is no staging environment; this snapshot is the only pre-prod
+safety check for migrations.
 
 ### One-time setup
 
@@ -79,6 +106,7 @@ docker compose -f docker-compose.snapshot.yml down -v       # also delete data
 | 5433 | Cloud SQL Auth Proxy → prod (long-running, dev use)  |
 | 5434 | **Local snapshot Postgres** (this script)            |
 | 5435 | Temporary Cloud SQL Auth Proxy (this script, ephemeral) |
+| 5436 | **Local clean-room Postgres** (`docker-compose.local.yml`) |
 
 ### No PII concerns
 
