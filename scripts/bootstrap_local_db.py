@@ -63,15 +63,6 @@ LOCAL_APPS = [
         "icon": None,
     },
     {
-        "slug": "card",
-        "label": "Card",
-        "path": "/card/",
-        "type": "app",
-        "granting_roles": ["haderach_user"],
-        "sort_order": 2,
-        "icon": None,
-    },
-    {
         "slug": "stocks",
         "label": "Commodities",
         "path": "/stocks/",

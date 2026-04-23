@@ -37,14 +37,6 @@ APPS = [
         "sort_order": 1,
     },
     {
-        "slug": "card",
-        "label": "Card",
-        "path": "/card/",
-        "type": "app",
-        "granting_roles": ["haderach_user"],
-        "sort_order": 2,
-    },
-    {
         "slug": "stocks",
         "label": "Commodities",
         "path": "/stocks/",
