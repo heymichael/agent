@@ -1,0 +1,101 @@
+name: run-migrations
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'migrations/*.sql'
+  workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: 'Mark migrations 001-023 as applied without running them (one-time setup for existing databases)'
+        required: false
+        default: 'false'
+        type: boolean
+      dry_run:
+        description: 'Show which migrations would run without applying them'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  CLOUD_SQL_INSTANCE: haderach-ai:us-central1:haderach-main
+
+jobs:
+  migrate:
+    name: Apply database migrations
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install psycopg[binary]
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install Cloud SQL Proxy
+        run: |
+          curl -o cloud-sql-proxy https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.14.3/cloud-sql-proxy.linux.amd64
+          chmod +x cloud-sql-proxy
+
+      - name: Run database migrations
+        run: |
+          # Start Cloud SQL Proxy in background
+          ./cloud-sql-proxy "$CLOUD_SQL_INSTANCE" --port 5432 &
+          PROXY_PID=$!
+          sleep 3
+
+          # Verify proxy is running
+          if ! kill -0 $PROXY_PID 2>/dev/null; then
+            echo "Cloud SQL Proxy failed to start"
+            exit 1
+          fi
+
+          # Get DATABASE_URL from Secret Manager (socket format)
+          # Format: postgresql://agent-app:PASSWORD@/haderach?host=/cloudsql/...
+          SOCKET_URL=$(gcloud secrets versions access latest --secret=DATABASE_URL --project=haderach-ai)
+
+          # Extract credentials and convert to TCP format for proxy
+          # User and password are between :// and @
+          CREDS=$(echo "$SOCKET_URL" | sed -n 's|postgresql://\([^@]*\)@.*|\1|p')
+          DB_USER=$(echo "$CREDS" | cut -d: -f1)
+          DB_PASS=$(echo "$CREDS" | cut -d: -f2)
+          # Database name is between @ and ?
+          DB_NAME=$(echo "$SOCKET_URL" | sed -n 's|.*@/\([^?]*\).*|\1|p')
+
+          # Build TCP connection URL
+          export DATABASE_URL="postgresql://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}"
+
+          # Build command arguments
+          ARGS=""
+          if [ "${{ inputs.bootstrap }}" = "true" ]; then
+            ARGS="$ARGS --bootstrap"
+          fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+
+          # Run migrations
+          python scripts/run_migrations.py $ARGS
+
+          # Kill the proxy
+          kill $PROXY_PID 2>/dev/null || true
