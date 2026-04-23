@@ -17,8 +17,14 @@ python3 -m venv .venv && source .venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Copy .env.example to .env and fill in the values
+# Start a local Postgres 15 container
+docker compose -f docker-compose.local.yml up -d
+
+# Copy .env.example to .env
 cp .env.example .env
+
+# Build the local schema and seed the minimum auth/app rows
+python scripts/bootstrap_local_db.py
 
 # Run the service (all config is loaded from .env via python-dotenv)
 uvicorn service.app:app --reload --port 8080
@@ -27,17 +33,45 @@ uvicorn service.app:app --reload --port 8080
 The API is available at `http://localhost:8080`. In production it's mounted at
 `/agent/api/` via Firebase Hosting rewrite.
 
-### Cloud SQL connection (local)
+The default `.env.example` uses a fully local database on `localhost:5436` and
+`DEV_AUTH_EMAIL`, so you can run the agent without Cloud SQL Proxy, Firebase
+credentials, or production database access. Requests authenticate as
+`michael@heretic.fund` by default unless you override with `X-Test-Email`.
 
-Start the Cloud SQL Auth Proxy using the service account key:
+If you need a clean rebuild, rerun the bootstrap with `--reset`:
+
+```bash
+python scripts/bootstrap_local_db.py --reset
+```
+
+### Working against shared demo data
+
+Routine local development should load the curated demo dataset from
+`gs://haderach-demo-data` into `docker-compose.local.yml` on port `5436`.
+See `haderach-platform/docs/demo-data-runbook.md` section 5 for the
+end-to-end download + load steps.
+
+### Owner-only ops paths
+
+The following paths bypass curation and are reserved for the data owner.
+They must not be used as routine developer workflows.
+
+**Prod snapshot (migration validation only).** `scripts/pull_prod_snapshot.sh`
+restores raw prod data into a local Docker Postgres on `localhost:5434` so
+the owner can validate a migration before deploy. Tear down with
+`docker compose -f docker-compose.snapshot.yml down -v` when finished. See
+`scripts/README.md` for the full procedure.
+
+**Direct Cloud SQL proxy (live debugging only).** When the owner needs to
+inspect or debug the live Cloud SQL instance directly:
 
 ```bash
 cloud-sql-proxy haderach-ai:us-central1:haderach-main --port 5433 \
   --credentials-file=agent-local-dev-sa-key.json
 ```
 
-`DATABASE_URL` in `.env` points at `localhost:5433`. The password only changes
-if rotated in Secret Manager — retrieve it once with:
+Then point `DATABASE_URL` at `localhost:5433`. Retrieve the password from
+Secret Manager:
 
 ```bash
 gcloud secrets versions access latest --secret=DATABASE_URL --project=haderach-ai
@@ -45,9 +79,11 @@ gcloud secrets versions access latest --secret=DATABASE_URL --project=haderach-a
 
 ### GCP credentials
 
-The service uses a dedicated service account key for local development. The key
-authenticates Firebase Auth verification, Cloud SQL Proxy, and any other GCP
-calls. It never expires, so you won't be interrupted by credential expiry.
+The default local DB path does not require GCP credentials at all — leave
+`GOOGLE_APPLICATION_CREDENTIALS` commented out in `.env`. You only need the
+service account key when using one of the owner-only ops paths above, or
+when running GCP-backed vendor sync integrations
+(`service.sync_gcp_spend`).
 
 ```bash
 # One-time setup (key already exists for most devs):
@@ -55,9 +91,7 @@ gcloud iam service-accounts keys create agent-local-dev-sa-key.json \
   --iam-account=agent-local-dev@haderach-ai.iam.gserviceaccount.com
 ```
 
-The key is referenced in `.env` via `GOOGLE_APPLICATION_CREDENTIALS` and passed
-to the Cloud SQL Proxy via `--credentials-file`. The `*-sa-key.json` pattern is
-gitignored. Never commit key files.
+The `*-sa-key.json` pattern is gitignored. Never commit key files.
 
 ## Vendor sync
 

@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 #
-# Pull a fresh snapshot of the prod operational Postgres (haderach) into a
-# local Docker Postgres container (haderach_snapshot). Use this snapshot to
-# verify migrations and exercise the agent against real data before deploy.
+# OWNER-ONLY OPS TOOL — NOT A DEVELOPER WORKFLOW.
 #
-# Usage:
+# Pulls raw uncurated production data into a local Docker Postgres. Intended
+# only for the data owner to validate a migration against real-shape data
+# before deploy. Routine local development must use the curated demo dataset
+# loaded into docker-compose.local.yml on port 5436 — see
+# `haderach-platform/docs/demo-data-runbook.md` section 5.
+#
+# This script bypasses curation, so it must not be the basis of day-to-day
+# development. Re-snapshot only when actually needed for migration validation
+# and tear down (`docker compose -f docker-compose.snapshot.yml down -v`)
+# when finished.
+#
+# Usage (owner only):
 #   scripts/pull_prod_snapshot.sh
 #
 # Prerequisites (one-time):

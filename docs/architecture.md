@@ -402,6 +402,20 @@ Adding vendors (`add_vendor`) and generating edit CSVs
   - `VENDOR_QBO_CREDENTIALS` (QuickBooks Online: client_id, client_secret, realm_id, refresh_token)
 - **Model**: configurable via `OPENAI_MODEL` env var (default: `gpt-4o-mini`)
 
+### Local database path
+
+Local development no longer needs Cloud SQL Proxy by default. The repo ships a
+Docker Compose Postgres (`docker-compose.local.yml`, port `5436`) plus
+`scripts/bootstrap_local_db.py`, which:
+
+- creates required extensions (`pgcrypto`, `pg_trgm`, `citext`)
+- replays every SQL migration in order
+- seeds the minimum users, org memberships, and app rows needed for local auth
+
+With that path, `DATABASE_URL` points at `localhost:5436` and
+`DEV_AUTH_EMAIL` can bypass Firebase token verification, so local work does not
+touch the production database.
+
 ## Authentication
 
 All sensitive endpoints require a valid Firebase ID token in the `Authorization`
