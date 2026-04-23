@@ -479,14 +479,14 @@ class TestSiteFeedback:
         client = _make_client()
 
         resp = client.post("/feedback/site", json={
-            "app_id": "card",
+            "app_id": "expenses",
             "feedback_text": "Needs dark mode",
         })
 
         assert resp.status_code == 201
         mock_insert.assert_called_once_with(
             user_id="user-uuid-123",
-            app_id="card",
+            app_id="expenses",
             open_panes=None,
             feedback_text="Needs dark mode",
         )
