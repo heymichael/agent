@@ -291,3 +291,38 @@ Lists users whose roles include the given role.
 
 Merges to `main` trigger the `build-and-deploy` workflow, which builds a Docker
 image, pushes it to Artifact Registry, and deploys to Cloud Run.
+
+## Database Migrations
+
+Migrations live in `migrations/*.sql` and are applied automatically via CI.
+
+### CI process
+
+When migrations change on `main`, the `run-migrations` workflow:
+1. Connects to Cloud SQL via proxy (using `agent-artifact-publisher` SA)
+2. Ensures `schema_migrations` tracking table exists
+3. Computes checksums and skips already-applied migrations
+4. Applies pending migrations in order
+5. Records each applied migration with checksum and timestamp
+
+Manual dispatch is available with `--bootstrap` (mark 001-023 as already applied,
+for initializing an existing database) and `--dry-run` (show pending migrations
+without applying).
+
+### Local development
+
+Local migrations are handled by `scripts/bootstrap_local_db.py`, which applies
+all migrations to the Docker Postgres instance. This script does not use the
+`schema_migrations` table — it expects an empty schema or `--reset` flag.
+
+### Adding a new migration
+
+1. Create `migrations/NNN_descriptive_name.sql` with the next sequence number
+2. Test locally: `python scripts/bootstrap_local_db.py --reset`
+3. Commit and push to a feature branch
+4. After PR merge, CI applies the migration to production
+
+### Migration integrity
+
+Migration files must not be modified after they are applied to production.
+The CI runner verifies checksums and fails if a file has been altered.

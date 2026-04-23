@@ -71,6 +71,11 @@ Full schema: `migrations/001_init.sql`.
 
 ### Key tables
 
+**schema_migrations** — tracks applied database migrations for CI automation.
+Stores `filename`, `checksum` (SHA-256), `applied_at`, and `applied_by`. Used
+by `scripts/run_migrations.py` to ensure idempotent, auditable migration runs.
+Schema: `migrations/025_schema_migrations.sql`.
+
 **vendors** — all vendors regardless of source. Identified by `(source_system,
 source_system_id)` unique natural key with UUID `id` as surrogate PK. The
 `hidden_from_agent` boolean (default `false`) excludes duplicate vendors from
@@ -203,6 +208,7 @@ protocol overhead). It can also be run as a standalone MCP server via
 | `mcp_server/period_parser.py` | Deterministic period string parser |
 | `mcp_server/server.py` | MCP protocol entry point (stdio transport) |
 | `scripts/smoke-test.sh` | Post-deploy auth smoke tests |
+| `scripts/run_migrations.py` | CI migration runner — applies pending migrations with checksum tracking |
 | `scripts/seed_apps.py` | Seed `apps` table with initial app definitions |
 | `scripts/seed_users.py` | Seed `users` table with role assignments |
 | `scripts/seed_departments.py` | Bulk-update vendor departments from CSV |
@@ -212,6 +218,7 @@ protocol overhead). It can also be run as a standalone MCP server via
 | `migrations/004_hidden_from_agent.sql` | Add `hidden_from_agent` boolean to vendors |
 | `migrations/005_branding.sql` | Singleton branding table (logo SVG + lockup toggle) |
 | `migrations/009_contractor_access.sql` | `is_contractor` flag on vendors + `user_contractor_access` grant table |
+| `migrations/025_schema_migrations.sql` | Migration tracking table for CI automation |
 | `scripts/export_contractor_csv.py` | Export all vendors as CSV for contractor classification backfill |
 | `scripts/import_contractor_csv.py` | Import classified CSV to set `is_contractor` on vendors |
 
