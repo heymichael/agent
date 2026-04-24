@@ -1,0 +1,13 @@
+---
+description: Pull request conventions redirect — canonical conventions live in platform
+alwaysApply: true
+---
+
+# PR conventions
+
+Canonical rule lives in `haderach-platform/.cursor/rules/pr-conventions.mdc`.
+Read that file for the full policy.
+
+**Local additions:** In **Deploy / Ops Notes**, explicitly call out `agent-api`,
+Postgres schema or API contract changes, and any Secret Manager or auth
+implications.

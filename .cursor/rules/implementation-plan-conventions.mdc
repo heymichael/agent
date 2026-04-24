@@ -1,0 +1,13 @@
+---
+description: Implementation plan storage redirect — canonical rule lives in platform
+alwaysApply: true
+---
+
+# Implementation Plan Conventions
+
+Canonical rule lives in `haderach-platform/.cursor/rules/implementation-plan-conventions.mdc`.
+Read that file for the full policy.
+
+**Short version:** Store task-backed implementation plans in
+`../haderach-tasks/implementation-plans/`, not in repo-local `.cursor/` or
+`docs/` folders.

@@ -1,6 +1,6 @@
 ---
 description: How to run and inspect e2e tests — MCP for focused runs, shell for full suite
-alwaysApply: true
+alwaysApply: false
 ---
 
 # Test execution

@@ -1,24 +1,14 @@
 ---
-description: Task management redirect — tasks live in the haderach-tasks repo
-alwaysApply: true
+description: Task management redirect — canonical conventions live in haderach-tasks
+alwaysApply: false
 ---
 
 # Task Management
 
-All tasks are managed centrally in the **haderach-tasks** repo at `../haderach-tasks/tasks/`. This app repo does not have its own tasks directory.
+Canonical rule lives in `haderach-tasks/.cursor/rules/todo-conventions.mdc`.
+Read that file for the full policy.
 
-## Creating a task from this repo
-
-Write the task file to the appropriate `../haderach-tasks/tasks/` subdirectory (`features/`, `improvements/`, `chores/`, `docs/`). Follow the conventions defined in `haderach-tasks/.cursor/rules/todo-conventions.mdc`.
-
-Use plain integer IDs with no leading zeros (e.g., `"7"` not `"007"`). Read `../haderach-tasks/tasks/NEXT_ID` to get the next available ID, then increment the value in that file after creating the task.
-
-## Filing a bug from this repo
-
-Write the bug file to `../haderach-tasks/tasks/bugs/`. Follow the format in `haderach-tasks/.cursor/rules/bug-conventions.mdc`. Bugs use the same ID space as tasks.
-
-## Reading tasks
-
-When the user references a task by number (e.g., "task 29"), look it up in `../haderach-tasks/tasks/` by matching the `id` field or filename prefix (e.g., `29-*.md`). All tasks across all apps live there — the referenced task may belong to any group, not just `agent`.
-
-To see tasks for this app, read files in `../haderach-tasks/tasks/` that are clearly related to `agent` work. Only read tasks where `status` is `pending` or `in-progress` unless specifically asked about others.
+**Local defaults:** When creating a task from this repo, write it to
+`../haderach-tasks/tasks/` and set `group: agent`. File bugs in
+`../haderach-tasks/tasks/bugs/`. When reading tasks for this repo, prefer items
+with `group: agent` or clearly agent-related work.
