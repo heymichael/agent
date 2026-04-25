@@ -7,6 +7,8 @@ Cost Explorer) via sandboxed Python execution.
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md).
+Workspace-level Cursor rule coverage is tracked in
+`../haderach-platform/docs/cursor-rule-matrix.md`.
 
 ## Local development
 

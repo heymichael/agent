@@ -313,6 +313,42 @@ class TestCmsRestPassthroughPhase5:
 
         assert resp.status_code == 404
 
+    def test_patch_cms_item_deactivate_live_sets_draft_and_clears_lock(self):
+        """Live -> draft deactivation must clear lock and preserve published status."""
+        from service import cms_tools
+
+        _override_caller("u@haderach.ai", "haderach", ["site", "system_administration"])
+        client = TestClient(app)
+
+        live_item = {"id": 50, "workflow_status": "live", "org": {"id": 1, "slug": "haderach"}}
+        with patch.object(cms_tools.httpx, "get", return_value=self._make_resp(200, live_item)), \
+             patch.object(cms_tools.httpx, "patch", return_value=self._make_resp(200, {"doc": {"id": 50, "workflow_status": "draft", "locked_by": None}})) as mock_patch:
+            resp = client.patch("/cms/items/50", json={"workflow_status": "draft"})
+
+        assert resp.status_code == 200
+        body = mock_patch.call_args.kwargs["json"]
+        assert body["_status"] == "published"
+        assert body["workflow_status"] == "draft"
+        assert body["locked_by"] is None
+
+    def test_patch_cms_item_deactivate_non_live_returns_409(self):
+        """Deactivation is only valid from live state."""
+        from service import cms_tools
+
+        _override_caller("u@haderach.ai", "haderach", ["site", "system_administration"])
+        client = TestClient(app)
+
+        approved_item = {"id": 50, "workflow_status": "approved", "org": {"id": 1, "slug": "haderach"}}
+        with patch.object(cms_tools.httpx, "get", return_value=self._make_resp(200, approved_item)), \
+             patch.object(cms_tools.httpx, "patch") as mock_patch:
+            resp = client.patch("/cms/items/50", json={"workflow_status": "draft"})
+
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert detail["code"] == "Invalid-Workflow-Transition"
+        assert detail["status"] == "invalid_state"
+        mock_patch.assert_not_called()
+
 
 # ── /apps endpoint pipes the slug through ────────────────────────────────
 

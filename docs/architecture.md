@@ -7,6 +7,11 @@ with tool definitions, executes tool calls (SQL analytics layer, Postgres
 writes), and returns natural-language responses with structured data payloads.
 It is consumed by frontend chat panels across Haderach apps.
 
+## Cursor Rules
+
+Workspace-level Cursor rule coverage and `alwaysApply` settings are tracked in
+`../haderach-platform/docs/cursor-rule-matrix.md`.
+
 ## Request flow
 
 ```text

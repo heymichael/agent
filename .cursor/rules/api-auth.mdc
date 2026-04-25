@@ -1,3 +1,8 @@
+---
+description: Agent service API authentication requirements
+alwaysApply: false
+---
+
 # Agent service API authentication
 
 This service uses Firebase Admin SDK for token verification. All endpoints except `/health` require a valid Firebase ID token in the `Authorization: Bearer <token>` header.

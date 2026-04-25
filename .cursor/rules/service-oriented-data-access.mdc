@@ -1,6 +1,6 @@
 ---
 description: Service-oriented data access — definition lives in the platform repo
-alwaysApply: true
+alwaysApply: false
 ---
 
 # Service-Oriented Data Access
