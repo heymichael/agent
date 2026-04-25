@@ -1263,7 +1263,7 @@ def patch_cms_item(
     caller: dict = Depends(get_verified_user),
     _org_slug: str = Depends(require_app("site")),
 ):
-    from .cms_tools import handle_cms_update_item, _api, _headers, _fetch_item, _not_found
+    from .cms_tools import handle_cms_update_item, _api, _headers, _fetch_item
     import httpx
     tools_module.set_caller_org_slug(_org_slug)
     caller_email = caller.get("email", "")
@@ -1271,11 +1271,27 @@ def patch_cms_item(
     if req.workflow_status is not None or req.workflow_comment is not None:
         # Phase 5 cross-tenant guard: confirm the item belongs to the caller
         # before applying a workflow transition direct to Payload.
-        if _fetch_item(item_id) is None:
+        existing = _fetch_item(item_id)
+        if existing is None:
             raise HTTPException(status_code=404, detail=f"Content item {item_id} not found.")
         body: dict = {"_status": "published"}
         if req.workflow_status is not None:
-            body["workflow_status"] = req.workflow_status
+            if req.workflow_status == "draft":
+                current_status = existing.get("workflow_status", "draft")
+                if current_status != "live":
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "Invalid-Workflow-Transition",
+                            "status": "invalid_state",
+                            "message": f"Cannot deactivate from state '{current_status}'. Must be live.",
+                        },
+                    )
+                body["workflow_status"] = "draft"
+                # Deactivation returns the item to an editable state.
+                body["locked_by"] = None
+            else:
+                body["workflow_status"] = req.workflow_status
         if req.workflow_comment is not None:
             body["workflow_comment"] = req.workflow_comment
         r = httpx.patch(_api(f"/api/content-items/{item_id}"), headers=_headers(), json=body, timeout=10)
