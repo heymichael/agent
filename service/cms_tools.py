@@ -247,6 +247,45 @@ def _apply_required_defaults(schema: list[dict]) -> None:
             field["required"] = True
 
 
+def _slugify(text: str) -> str:
+    """Convert text to snake_case slug."""
+    import re
+    # Replace spaces and hyphens with underscores
+    slug = re.sub(r"[\s\-]+", "_", text.strip())
+    # Remove non-alphanumeric chars except underscore
+    slug = re.sub(r"[^\w]", "", slug)
+    # Convert to lowercase
+    slug = slug.lower()
+    # Collapse multiple underscores
+    slug = re.sub(r"_+", "_", slug)
+    # Strip leading/trailing underscores
+    return slug.strip("_")
+
+
+def _normalize_field_names(schema: list[dict]) -> list[str]:
+    """Ensure each field has both name (slug) and label.
+    
+    - If label is present but name is missing, auto-generate name from label
+    - If name is present but label is missing, copy name to label
+    - Returns list of error messages for fields missing both
+    """
+    errors = []
+    for field in schema:
+        label = field.get("label")
+        name = field.get("name")
+        
+        if label and not name:
+            # Auto-generate slug from label
+            field["name"] = _slugify(label)
+        elif name and not label:
+            # Use name as label (backward compat)
+            field["label"] = name
+        elif not name and not label:
+            errors.append("Field missing both 'name' and 'label'")
+    
+    return errors
+
+
 def _validate_org_id_arg(args: dict) -> str | None:
     """Reject `orgId` if present and pointing at a different tenant.
 
@@ -503,6 +542,11 @@ def handle_cms_create_content_type(args: dict, **_kw) -> str:
 
     schema = args.get("schema", [])
 
+    # Normalize field names (auto-generate slug from label if needed)
+    name_errors = _normalize_field_names(schema)
+    if name_errors:
+        return json.dumps({"status": "error", "message": "Field naming errors.", "errors": name_errors})
+
     # Validate field types
     errors = _validate_schema(schema)
     if errors:
@@ -534,9 +578,9 @@ def handle_cms_create_content_type(args: dict, **_kw) -> str:
 
 
 def handle_cms_update_content_type_schema(args: dict, **_kw) -> str:
-    ct_id = args.get("contentTypeId")
+    ct_id = args.get("contentTypeId") or get_active_content_type_id()
     if ct_id is None:
-        return json.dumps({"status": "error", "message": "Missing required parameter: contentTypeId"})
+        return json.dumps({"status": "error", "message": "Missing contentTypeId and no active content type. Specify which content type to update."})
 
     schema = args.get("schema")
     if schema is None:
@@ -550,6 +594,11 @@ def handle_cms_update_content_type_schema(args: dict, **_kw) -> str:
         return _ct_not_found(ct_id)
     if ct.get("status") == "committed":
         return json.dumps({"status": "error", "message": "Cannot overwrite schema on a committed content type."})
+
+    # Normalize field names (auto-generate slug from label if needed)
+    name_errors = _normalize_field_names(schema)
+    if name_errors:
+        return json.dumps({"status": "error", "message": "Field naming errors.", "errors": name_errors})
 
     # Validate field types
     errors = _validate_schema(schema)
@@ -770,7 +819,7 @@ CMS_TOOL_DEFINITIONS: list[dict] = [
                     "slug": {"type": "string", "description": "Optional URL-safe slug."},
                     "schema": {
                         "type": "array",
-                        "description": "Field definitions: [{name, type, required, guidelines?, options?}]. Include options[] for select fields.",
+                        "description": "Field definitions: [{name, label, type, required, guidelines?, options?}]. name=snake_case key, label=display text. Include options[] for select fields.",
                         "items": {"type": "object"},
                     },
                 },
@@ -789,7 +838,7 @@ CMS_TOOL_DEFINITIONS: list[dict] = [
                     "contentTypeId": {"type": "integer", "description": "Payload ID of the content type."},
                     "schema": {
                         "type": "array",
-                        "description": "Full replacement schema: [{name, type, required, guidelines?, options?}]. Include options[] for select fields.",
+                        "description": "Full replacement schema: [{name, label, type, required, guidelines?, options?}]. name=snake_case key, label=display text. Include options[] for select fields.",
                         "items": {"type": "object"},
                     },
                 },

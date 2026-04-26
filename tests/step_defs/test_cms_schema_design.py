@@ -308,3 +308,75 @@ def assert_no_image_field_in_tool_call(context):
                         )
                 except json.JSONDecodeError:
                     pass
+
+
+@then("the schema uses snake_case names")
+def assert_schema_uses_snake_case(context):
+    """Assert that field names in the schema are snake_case (no spaces, lowercase)."""
+    import re
+    tool_messages = context["result"].get("tool_messages", [])
+    for msg in tool_messages:
+        if msg.get("role") == "tool":
+            try:
+                parsed = json.loads(msg.get("content", "{}"))
+                if parsed.get("status") == "ok" and "contentType" in parsed:
+                    schema = parsed["contentType"].get("schema", [])
+                    if isinstance(schema, dict):
+                        schema = schema.get("fields", [])
+                    for field in schema:
+                        name = field.get("name", "")
+                        # snake_case: lowercase, underscores, no spaces
+                        assert re.match(r"^[a-z][a-z0-9_]*$", name), (
+                            f"Field name '{name}' is not snake_case"
+                        )
+            except json.JSONDecodeError:
+                pass
+
+
+@then("the reply does not mention education in current schema")
+def assert_education_not_in_schema(context):
+    """Assert that education field was removed from the schema."""
+    tool_messages = context["result"].get("tool_messages", [])
+    for msg in tool_messages:
+        if msg.get("role") == "tool":
+            try:
+                parsed = json.loads(msg.get("content", "{}"))
+                if parsed.get("status") == "ok" and "contentType" in parsed:
+                    schema = parsed["contentType"].get("schema", [])
+                    if isinstance(schema, dict):
+                        schema = schema.get("fields", [])
+                    field_names = [f.get("name", "").lower() for f in schema]
+                    assert "education" not in field_names, (
+                        f"Education field should have been deleted, but found in: {field_names}"
+                    )
+            except json.JSONDecodeError:
+                pass
+
+
+@then("the reply does not contain raw JSON schema")
+def assert_no_raw_json_in_reply(context):
+    """Assert the reply doesn't dump raw JSON schema - should be natural language."""
+    reply = context["result"]["reply"]
+    # Check for signs of raw JSON dump (multiple consecutive JSON-like lines)
+    json_indicators = [
+        '"name":',
+        '"type":',
+        '"required":',
+        '{"name"',
+        '[{"name"',
+    ]
+    json_count = sum(1 for indicator in json_indicators if indicator in reply)
+    assert json_count < 3, (
+        f"Reply appears to contain raw JSON schema (found {json_count} JSON indicators): {reply[:500]}"
+    )
+
+
+@then(parsers.parse('the agent does not call "{tool}" again'))
+def assert_tool_not_called_again(context, tool):
+    """Assert the agent only called the tool once (no looping)."""
+    tools = context["result"].get("tool_calls_executed", [])
+    tool_count = tools.count(tool)
+    assert tool_count <= 1, (
+        f"Expected {tool} to be called at most once, but was called {tool_count} times. "
+        f"All tools: {tools}"
+    )

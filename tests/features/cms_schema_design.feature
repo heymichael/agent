@@ -34,8 +34,9 @@ Feature: CMS Schema Design
 
   @capability_modify_content_type @tool_cms_update_content_type_schema
   Scenario: Add a field to an existing draft content type
-    Given a draft content type "Products" exists
-    When the CMS admin says "Add a price field to Products as a number"
+    When the CMS admin says "Create a products collection with name and description"
+    Then the agent calls "cms_create_content_type"
+    When the CMS admin says "Add a price field as number"
     Then the agent calls "cms_update_content_type_schema" or proposes the change
     And the reply mentions "price"
 
@@ -79,3 +80,43 @@ Feature: CMS Schema Design
     When the CMS admin says "I'm done with the schema, let's publish it"
     Then the reply mentions "commit" or "button"
     And the agent does not call "cms_commit_content_type"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Label/Name field generation
+  # ─────────────────────────────────────────────────────────────────────────
+
+  @capability_create_content_type @tool_cms_create_content_type
+  Scenario: Create content type with human-readable field labels
+    When the CMS admin says "Create a team members collection with Profile Picture as text and Job Title"
+    Then the agent calls "cms_create_content_type"
+    And the tool response indicates success
+    And the schema uses snake_case names
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Compound operations
+  # ─────────────────────────────────────────────────────────────────────────
+
+  @capability_modify_content_type @tool_cms_update_content_type_schema
+  Scenario: Delete a field from a multi-field draft
+    When the CMS admin says "Create a profiles collection with name, bio, and notes"
+    Then the agent calls "cms_create_content_type"
+    When the CMS admin says "Remove the notes field from profiles"
+    Then the agent calls "cms_update_content_type_schema" or asks for clarification
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Response quality
+  # ─────────────────────────────────────────────────────────────────────────
+
+  @capability_response_format
+  Scenario: Agent summarizes changes naturally without raw JSON
+    When the CMS admin says "Create an events collection with title and date"
+    Then the agent calls "cms_create_content_type"
+    And the reply does not contain raw JSON schema
+    And the reply mentions "events"
+
+  @capability_no_loop
+  Scenario: Agent does not repeat successful tool calls
+    When the CMS admin says "Create a simple posts collection with title and body"
+    Then the agent calls "cms_create_content_type"
+    And the tool response indicates success
+    And the agent does not call "cms_create_content_type" again
