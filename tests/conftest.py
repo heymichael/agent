@@ -219,6 +219,41 @@ def scoped_chat(prompt: str, *, attachments=None):
     return chat(prompt, headers=SCOPED_HEADERS, attachments=attachments)
 
 
+def cms_chat(prompt: str, *, mode: str = "admin", session_id: str | None = None,
+             messages: list[dict] | None = None, headers=None):
+    """POST to /chat with CMS app context and specified mode.
+
+    Args:
+        prompt: User message to send
+        mode: CMS mode (admin, editing, scheduling, browse)
+        session_id: Optional session ID for multi-turn conversations
+        messages: Optional full message history (overrides single prompt)
+        headers: Optional request headers
+    """
+    if messages:
+        msg_list = messages
+    else:
+        msg_list = [{"role": "user", "content": prompt}]
+
+    payload = {
+        "messages": msg_list,
+        "context": {"app": "cms", "mode": mode},
+    }
+    if session_id:
+        payload["session_id"] = session_id
+
+    resp = requests.post(
+        f"{BASE_URL}/chat",
+        json=payload,
+        headers=headers or DEFAULT_HEADERS,
+        timeout=60,
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    _track_usage(result)
+    return result
+
+
 def chat_with_csv(csv_content: str, filename: str = "test.csv", prompt: str = "",
                   *, headers=None):
     """POST to /chat with a CSV attachment using the standard bulk-edit preamble."""

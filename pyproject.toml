@@ -52,6 +52,18 @@ markers = [
     "tool_ask_expense_agent: tests exercising expense agent delegation",
     "tool_set_view_columns: tests exercising the set_view_columns tool",
     "tool_set_table_filters: tests exercising the set_table_filters tool",
+    # ── CMS domain ──────────────────────────────────────────────────────────
+    "cms: tests for CMS domain",
+    "agent_cms_schema_design: tests handled by the CMS schema design agent",
+    "domain_cms: CMS content management domain",
+    "module_schema_design: content type schema design module",
+    "capability_create_content_type: creating new content types via chat",
+    "capability_modify_content_type: modifying draft content type schemas",
+    "capability_unsupported_field_handling: graceful handling of unsupported field types",
+    "capability_context_switch: switching between multiple draft content types",
+    "tool_cms_create_content_type: tests exercising cms_create_content_type",
+    "tool_cms_update_content_type_schema: tests exercising cms_update_content_type_schema",
+    "tool_cms_set_active_content_type: tests exercising cms_set_active_content_type",
 ]
 filterwarnings = [
     "ignore::pytest.PytestUnknownMarkWarning",

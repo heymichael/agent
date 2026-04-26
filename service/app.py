@@ -21,7 +21,7 @@ from openai import OpenAI
 
 from .prompts import (
     EXPENSE_ANALYTICS_PROMPT, VENDOR_MANAGEMENT_PROMPT, build_table_prompt,
-    CMS_GUIDE_PROMPT, CMS_EDITING_PROMPT, CMS_SCHEDULING_PROMPT, CMS_ADMIN_PROMPT,
+    CMS_GUIDE_PROMPT, CMS_EDITING_PROMPT, CMS_SCHEDULING_PROMPT, CMS_SCHEMA_DESIGN_PROMPT,
 )
 from . import tools as tools_module
 from .tools import (
@@ -1109,7 +1109,7 @@ def _resolve_cms_mode(mode: str, context: dict | None = None) -> tuple[str, list
     if mode == "scheduling":
         return CMS_SCHEDULING_PROMPT, CMS_SCHEDULING_TOOLS, CMS_SCHEDULING_HANDLERS
     if mode == "admin":
-        return CMS_ADMIN_PROMPT, CMS_ADMIN_TOOLS, CMS_ADMIN_HANDLERS
+        return CMS_SCHEMA_DESIGN_PROMPT, CMS_ADMIN_TOOLS, CMS_ADMIN_HANDLERS
     # browse, approval, admin-permissions → guide-only (no tools)
     return CMS_GUIDE_PROMPT, [], {}
 
