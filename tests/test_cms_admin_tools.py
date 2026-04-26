@@ -286,8 +286,8 @@ class TestCreateContentTypeHandler:
             result = json.loads(handle_cms_create_content_type({
                 "name": "Test",
                 "schema": [
-                    {"type": "text"},  # missing name
-                    {"name": "Photo", "type": "image"},  # unsupported
+                    {"label": "Photo", "type": "image"},  # unsupported type
+                    {"label": "Author", "type": "relationship"},  # unsupported type
                 ],
             }))
             assert result["status"] == "error"
