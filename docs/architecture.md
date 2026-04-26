@@ -29,6 +29,12 @@ Auth middleware (get_verified_user)
   │  Rejects with 401 if missing/invalid/expired
   │
   ▼
+Org context middleware
+  │  Reads X-Active-Org header (set by frontend from localStorage)
+  │  Validates org membership via /me endpoint data
+  │  Sets active_org_slug contextvar for downstream tools
+  │
+  ▼
 FastAPI app.py  (max 10 tool-call rounds, 20K char result truncation)
   │
   ├─► OpenAI chat.completions.create (with tool definitions)
@@ -136,6 +142,27 @@ analytics pipeline tracking. Schema: `migrations/006_chat_feedback.sql`,
 **site_feedback** — general site/app feedback. Stores `user_id`, `app_id`,
 `open_panes` (JSONB snapshot of UI state), and `feedback_text`.
 Schema: `migrations/007_site_feedback.sql`.
+
+## Multi-org tenancy
+
+The agent service enforces tenant isolation via an `active_org_slug` contextvar (task 254).
+
+### Request flow
+
+1. Frontend reads active org from `localStorage` (set during sign-in via `resolveActiveOrgSlug`)
+2. Every authenticated request includes `X-Active-Org: <slug>` header
+3. Auth middleware validates the caller has membership in the requested org
+4. `active_org_slug` contextvar is set for the request lifetime
+5. All downstream tools (spend queries, vendor CRUD, CMS operations) filter by org automatically
+
+### Tool-level enforcement
+
+- **Vendor/expense tools** — `_caller_org_slug` contextvar scopes all SQL queries
+- **CMS tools** — slug→Payload-org-id resolver caches org IDs; cross-tenant guard verifies every by-ID read/write matches the caller's org
+
+### Caller context
+
+`_build_caller_context` in `service/tools.py` combines org scoping with user-level access controls (allowed vendors, departments, contractor access grants).
 
 ## Domain routing
 
