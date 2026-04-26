@@ -21,7 +21,7 @@ from openai import OpenAI
 
 from .prompts import (
     EXPENSE_ANALYTICS_PROMPT, VENDOR_MANAGEMENT_PROMPT, build_table_prompt,
-    CMS_GUIDE_PROMPT, CMS_EDITING_PROMPT, CMS_SCHEDULING_PROMPT, CMS_ADMIN_PROMPT,
+    CMS_GUIDE_PROMPT, CMS_EDITING_PROMPT, CMS_SCHEDULING_PROMPT, CMS_SCHEMA_DESIGN_PROMPT,
 )
 from . import tools as tools_module
 from .tools import (
@@ -1109,7 +1109,28 @@ def _resolve_cms_mode(mode: str, context: dict | None = None) -> tuple[str, list
     if mode == "scheduling":
         return CMS_SCHEDULING_PROMPT, CMS_SCHEDULING_TOOLS, CMS_SCHEDULING_HANDLERS
     if mode == "admin":
-        return CMS_ADMIN_PROMPT, CMS_ADMIN_TOOLS, CMS_ADMIN_HANDLERS
+        prompt = CMS_SCHEMA_DESIGN_PROMPT
+        ctx = context or {}
+        ct_id = ctx.get("contentTypeId")
+        ct_slug = ctx.get("contentTypeSlug")
+        if ct_id:
+            # Set as active content type so tools know which one we're editing
+            from . import cms_tools
+            cms_tools.set_active_content_type_id(int(ct_id))
+            # Fetch the content type to include schema in context
+            ct = cms_tools._fetch_content_type(int(ct_id))
+            if ct:
+                import json
+                schema_json = json.dumps(ct.get("schema", []), indent=2)
+                prompt += f"\n\n## Active content type\n\n"
+                prompt += f"- **Name**: {ct.get('name')}\n"
+                prompt += f"- **ID**: {ct_id}\n"
+                prompt += f"- **Status**: {ct.get('status')}\n"
+                prompt += f"- **Current schema**:\n```json\n{schema_json}\n```\n"
+                prompt += "\nWhen modifying fields, include ALL existing fields in the schema array (not just the changed ones)."
+        elif ct_slug:
+            prompt += f"\n\n## Active content type\n\ncontentTypeSlug: {ct_slug}"
+        return prompt, CMS_ADMIN_TOOLS, CMS_ADMIN_HANDLERS
     # browse, approval, admin-permissions → guide-only (no tools)
     return CMS_GUIDE_PROMPT, [], {}
 
@@ -1359,6 +1380,41 @@ def restore_cms_item_version(
     if result.get("status") == "not_found":
         raise HTTPException(status_code=404, detail=result.get("message", "Not found"))
     return result
+
+
+@app.post("/cms/content-types/{content_type_id}/commit")
+def commit_content_type(
+    content_type_id: int,
+    caller: dict = Depends(get_verified_user),
+    _org_slug: str = Depends(require_app("site")),
+):
+    from .cms_tools import handle_cms_commit_content_type
+    tools_module.set_caller_org_slug(_org_slug)
+    result = json.loads(handle_cms_commit_content_type({"contentTypeId": content_type_id}))
+    if result.get("status") == "not_found":
+        raise HTTPException(status_code=404, detail=result.get("message", "Not found"))
+    return result
+
+
+@app.delete("/cms/content-types/{content_type_id}")
+def delete_content_type(
+    content_type_id: int,
+    caller: dict = Depends(get_verified_user),
+    _org_slug: str = Depends(require_app("site")),
+):
+    import httpx
+    from .cms_tools import _api, _headers, _fetch_content_type
+    tools_module.set_caller_org_slug(_org_slug)
+    ct = _fetch_content_type(content_type_id)
+    if ct is None:
+        raise HTTPException(status_code=404, detail="Content type not found")
+    if ct.get("status") == "committed":
+        raise HTTPException(status_code=400, detail="Cannot delete committed content types")
+    r = httpx.delete(_api(f"/api/content-types/{content_type_id}"), headers=_headers(), timeout=10)
+    if r.status_code == 404:
+        raise HTTPException(status_code=404, detail="Content type not found")
+    r.raise_for_status()
+    return {"status": "ok", "deleted": content_type_id}
 
 
 @app.post("/feedback")

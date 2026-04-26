@@ -72,12 +72,11 @@ class TestCmsAdminTools:
     EXPECTED = {
         "cms_create_content_type",
         "cms_update_content_type_schema",
-        "cms_commit_content_type",
-        "cms_extend_content_type_schema",
+        "cms_set_active_content_type",
     }
 
-    def test_contains_exactly_four_tools(self):
-        assert len(CMS_ADMIN_TOOLS) == 4
+    def test_contains_exactly_three_tools(self):
+        assert len(CMS_ADMIN_TOOLS) == 3
 
     def test_tool_names_match_expected_set(self):
         names = {t["function"]["name"] for t in CMS_ADMIN_TOOLS}

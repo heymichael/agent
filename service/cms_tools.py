@@ -13,8 +13,8 @@ Tools are grouped by agent mode:
 - Editing: get, create, update, lock/unlock, submit_for_approval,
   restore_version, add_to_schedule
 - Scheduling: add_to_schedule, get_item (read-only confirmation)
-- Admin: create_content_type, update_content_type_schema,
-  commit_content_type, extend_content_type_schema
+- Admin (schema design): create_content_type, update_content_type_schema,
+  set_active_content_type
 
 Multi-org gating (task 254 Phase 5)
 -----------------------------------
@@ -35,6 +35,7 @@ caller_slug`. Mismatches return `{"status": "not_found"}` so existence
 of cross-tenant items is not leaked to the caller.
 """
 
+import contextvars
 import json
 import logging
 import os
@@ -45,6 +46,33 @@ import httpx
 from . import tools as tools_module
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Active content type tracking (task 290)
+#
+# Within a single /chat request, multiple tool calls may reference the same
+# content type. This contextvar tracks which content type the agent is
+# currently working on. Handlers set it as a side effect of successful
+# create/update operations, and cms_set_active_content_type explicitly
+# switches it.
+#
+# NOTE: This is request-scoped (single turn). For true cross-turn persistence,
+# the active content type would need to be stored in session metadata.
+# ---------------------------------------------------------------------------
+
+_active_content_type_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "active_content_type_id", default=None
+)
+
+
+def set_active_content_type_id(ct_id: int | None) -> None:
+    """Set the active content type for the current request."""
+    _active_content_type_id.set(ct_id)
+
+
+def get_active_content_type_id() -> int | None:
+    """Get the active content type for the current request."""
+    return _active_content_type_id.get()
 
 CMS_API_URL = os.environ.get("CMS_API_URL", "")
 _cms_key_ref = os.environ.get("CMS_API_KEY", "")
@@ -158,6 +186,104 @@ def _not_found(item_id: int | str) -> str:
 
 def _ct_not_found(ct_id: int | str) -> str:
     return json.dumps({"status": "not_found", "message": f"Content type {ct_id} not found."})
+
+
+# ---------------------------------------------------------------------------
+# Schema field validation (task 290)
+# ---------------------------------------------------------------------------
+
+V1_FIELD_TYPES = {"text", "richtext", "number", "date", "boolean", "select", "url", "email"}
+FUTURE_FIELD_TYPES = {"image", "media", "relationship"}
+_DEFAULT_GUIDELINES = "Provide content following the established voice and style."
+
+
+def _validate_field(field: dict) -> str | None:
+    """Return error message if field is invalid, None if valid."""
+    name = field.get("name")
+    if not name:
+        return "Field is missing a 'name'."
+
+    ftype = field.get("type")
+    if not ftype:
+        return f"Field '{name}' is missing a 'type'."
+
+    if ftype not in V1_FIELD_TYPES:
+        if ftype in FUTURE_FIELD_TYPES:
+            return f"Field '{name}': '{ftype}' is not supported in V1. This field type is planned for a future release."
+        return f"Field '{name}': Unknown type '{ftype}'. Supported: {', '.join(sorted(V1_FIELD_TYPES))}."
+
+    if ftype == "select":
+        options = field.get("options")
+        if not options:
+            return f"Field '{name}': Select fields require an 'options' array."
+        if not isinstance(options, list) or not all(isinstance(o, str) for o in options):
+            return f"Field '{name}': 'options' must be an array of strings."
+
+    return None
+
+
+def _validate_schema(schema: list[dict]) -> list[str]:
+    """Validate all fields. Returns list of error messages (empty if valid)."""
+    return [err for field in schema if (err := _validate_field(field))]
+
+
+def _ensure_richtext_guidelines(schema: list[dict]) -> tuple[list[dict], list[str]]:
+    """Add default guidelines to richtext fields that lack them.
+
+    Returns (schema, list_of_field_names_that_got_defaults).
+    """
+    generated_for = []
+    for field in schema:
+        if field.get("type") == "richtext" and not field.get("guidelines"):
+            field["guidelines"] = _DEFAULT_GUIDELINES
+            generated_for.append(field["name"])
+    return schema, generated_for
+
+
+def _apply_required_defaults(schema: list[dict]) -> None:
+    """Set required=True on fields that don't specify it."""
+    for field in schema:
+        if "required" not in field:
+            field["required"] = True
+
+
+def _slugify(text: str) -> str:
+    """Convert text to snake_case slug."""
+    import re
+    # Replace spaces and hyphens with underscores
+    slug = re.sub(r"[\s\-]+", "_", text.strip())
+    # Remove non-alphanumeric chars except underscore
+    slug = re.sub(r"[^\w]", "", slug)
+    # Convert to lowercase
+    slug = slug.lower()
+    # Collapse multiple underscores
+    slug = re.sub(r"_+", "_", slug)
+    # Strip leading/trailing underscores
+    return slug.strip("_")
+
+
+def _normalize_field_names(schema: list[dict]) -> list[str]:
+    """Ensure each field has both name (slug) and label.
+    
+    - If label is present but name is missing, auto-generate name from label
+    - If name is present but label is missing, copy name to label
+    - Returns list of error messages for fields missing both
+    """
+    errors = []
+    for field in schema:
+        label = field.get("label")
+        name = field.get("name")
+        
+        if label and not name:
+            # Auto-generate slug from label
+            field["name"] = _slugify(label)
+        elif name and not label:
+            # Use name as label (backward compat)
+            field["label"] = name
+        elif not name and not label:
+            errors.append("Field missing both 'name' and 'label'")
+    
+    return errors
 
 
 def _validate_org_id_arg(args: dict) -> str | None:
@@ -413,10 +539,27 @@ def handle_cms_create_content_type(args: dict, **_kw) -> str:
     mismatch = _validate_org_id_arg(args)
     if mismatch:
         return mismatch
+
+    schema = args.get("schema", [])
+
+    # Normalize field names (auto-generate slug from label if needed)
+    name_errors = _normalize_field_names(schema)
+    if name_errors:
+        return json.dumps({"status": "error", "message": "Field naming errors.", "errors": name_errors})
+
+    # Validate field types
+    errors = _validate_schema(schema)
+    if errors:
+        return json.dumps({"status": "error", "message": "Schema validation failed.", "errors": errors})
+
+    # Apply defaults and auto-generate guidelines
+    _apply_required_defaults(schema)
+    schema, generated_guidelines = _ensure_richtext_guidelines(schema)
+
     body = {
         "org": _caller_payload_org_id(),
         "name": args["name"],
-        "schema": args.get("schema", []),
+        "schema": schema,
         "status": "draft",
     }
     if args.get("slug"):
@@ -424,20 +567,59 @@ def handle_cms_create_content_type(args: dict, **_kw) -> str:
     r = httpx.post(_api("/api/content-types"), headers=_headers(), json=body, timeout=10)
     r.raise_for_status()
     doc = r.json()["doc"]
-    return json.dumps({"status": "ok", "contentType": doc, "slug": doc.get("slug")})
+
+    # Set as active content type for this request
+    set_active_content_type_id(doc["id"])
+
+    response = {"status": "ok", "contentType": doc, "slug": doc.get("slug")}
+    if generated_guidelines:
+        response["guidelines_generated_for"] = generated_guidelines
+    return json.dumps(response)
 
 
 def handle_cms_update_content_type_schema(args: dict, **_kw) -> str:
-    ct_id = args["contentTypeId"]
+    ct_id = args.get("contentTypeId") or get_active_content_type_id()
+    if ct_id is None:
+        return json.dumps({"status": "error", "message": "Missing contentTypeId and no active content type. Specify which content type to update."})
+
+    schema = args.get("schema")
+    if schema is None:
+        return json.dumps({
+            "status": "error",
+            "message": "Missing required parameter: schema. You must provide the full replacement schema array.",
+        })
+
     ct = _fetch_content_type(ct_id)
     if ct is None:
         return _ct_not_found(ct_id)
     if ct.get("status") == "committed":
-        return json.dumps({"status": "error", "message": "Cannot overwrite schema on a committed content type. Use extend instead."})
+        return json.dumps({"status": "error", "message": "Cannot overwrite schema on a committed content type."})
 
-    r = httpx.patch(_api(f"/api/content-types/{ct_id}"), headers=_headers(), json={"schema": args["schema"]}, timeout=10)
+    # Normalize field names (auto-generate slug from label if needed)
+    name_errors = _normalize_field_names(schema)
+    if name_errors:
+        return json.dumps({"status": "error", "message": "Field naming errors.", "errors": name_errors})
+
+    # Validate field types
+    errors = _validate_schema(schema)
+    if errors:
+        return json.dumps({"status": "error", "message": "Schema validation failed.", "errors": errors})
+
+    # Apply defaults and auto-generate guidelines
+    _apply_required_defaults(schema)
+    schema, generated_guidelines = _ensure_richtext_guidelines(schema)
+
+    r = httpx.patch(_api(f"/api/content-types/{ct_id}"), headers=_headers(), json={"schema": schema}, timeout=10)
     r.raise_for_status()
-    return json.dumps({"status": "ok", "contentType": r.json()["doc"]})
+    doc = r.json()["doc"]
+
+    # Set as active content type for this request
+    set_active_content_type_id(doc["id"])
+
+    response = {"status": "ok", "contentType": doc}
+    if generated_guidelines:
+        response["guidelines_generated_for"] = generated_guidelines
+    return json.dumps(response)
 
 
 def handle_cms_commit_content_type(args: dict, **_kw) -> str:
@@ -479,6 +661,26 @@ def handle_cms_extend_content_type_schema(args: dict, **_kw) -> str:
     )
     r.raise_for_status()
     return json.dumps({"status": "ok", "contentType": r.json()["doc"]})
+
+
+def handle_cms_set_active_content_type(args: dict, **_kw) -> str:
+    """Set which content type the agent is currently working on."""
+    ct_id = args["contentTypeId"]
+    ct = _fetch_content_type(ct_id)
+    if ct is None:
+        return _ct_not_found(ct_id)
+
+    # Set as active content type for this request
+    set_active_content_type_id(ct_id)
+
+    return json.dumps({
+        "status": "ok",
+        "activeContentType": {
+            "id": ct_id,
+            "name": ct.get("name"),
+            "status": ct.get("status"),
+        },
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -617,7 +819,7 @@ CMS_TOOL_DEFINITIONS: list[dict] = [
                     "slug": {"type": "string", "description": "Optional URL-safe slug."},
                     "schema": {
                         "type": "array",
-                        "description": "Field definitions: [{name, type, required, ui, guidelines}].",
+                        "description": "Field definitions: [{name, label, type, required, guidelines?, options?}]. name=snake_case key, label=display text. Include options[] for select fields.",
                         "items": {"type": "object"},
                     },
                 },
@@ -636,7 +838,7 @@ CMS_TOOL_DEFINITIONS: list[dict] = [
                     "contentTypeId": {"type": "integer", "description": "Payload ID of the content type."},
                     "schema": {
                         "type": "array",
-                        "description": "Full replacement schema: [{name, type, required, ui, guidelines}].",
+                        "description": "Full replacement schema: [{name, label, type, required, guidelines?, options?}]. name=snake_case key, label=display text. Include options[] for select fields.",
                         "items": {"type": "object"},
                     },
                 },
@@ -669,11 +871,25 @@ CMS_TOOL_DEFINITIONS: list[dict] = [
                     "contentTypeId": {"type": "integer", "description": "Payload ID of the content type."},
                     "proposedFields": {
                         "type": "array",
-                        "description": "Proposed new fields: [{name, type, required, ui, guidelines}].",
+                        "description": "Proposed new fields: [{name, type, required, guidelines}].",
                         "items": {"type": "object"},
                     },
                 },
                 "required": ["contentTypeId", "proposedFields"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cms_set_active_content_type",
+            "description": "Set which content type the agent is currently working on. Call when switching context between content types.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contentTypeId": {"type": "integer", "description": "Payload ID of the content type to make active."},
+                },
+                "required": ["contentTypeId"],
             },
         },
     },
@@ -697,6 +913,7 @@ CMS_TOOL_HANDLERS: dict[str, callable] = {
     "cms_update_content_type_schema": handle_cms_update_content_type_schema,
     "cms_commit_content_type": handle_cms_commit_content_type,
     "cms_extend_content_type_schema": handle_cms_extend_content_type_schema,
+    "cms_set_active_content_type": handle_cms_set_active_content_type,
 }
 
 
@@ -716,7 +933,7 @@ _SCHEDULING_TOOL_NAMES = {
 
 _ADMIN_TOOL_NAMES = {
     "cms_create_content_type", "cms_update_content_type_schema",
-    "cms_commit_content_type", "cms_extend_content_type_schema",
+    "cms_set_active_content_type",
 }
 
 CMS_EDITING_TOOLS = [t for t in CMS_TOOL_DEFINITIONS if t["function"]["name"] in _EDITING_TOOL_NAMES]
