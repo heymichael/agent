@@ -1253,6 +1253,7 @@ class CmsItemPatchRequest(BaseModel):
     slug: str | None = None
     workflow_status: str | None = None
     workflow_comment: str | None = None
+    preview_hidden: bool | None = None
 
 
 class CmsItemCreateRequest(BaseModel):
@@ -1289,7 +1290,7 @@ def patch_cms_item(
     tools_module.set_caller_org_slug(_org_slug)
     caller_email = caller.get("email", "")
 
-    if req.workflow_status is not None or req.workflow_comment is not None:
+    if req.workflow_status is not None or req.workflow_comment is not None or req.preview_hidden is not None:
         # Phase 5 cross-tenant guard: confirm the item belongs to the caller
         # before applying a workflow transition direct to Payload.
         existing = _fetch_item(item_id)
@@ -1315,6 +1316,8 @@ def patch_cms_item(
                 body["workflow_status"] = req.workflow_status
         if req.workflow_comment is not None:
             body["workflow_comment"] = req.workflow_comment
+        if req.preview_hidden is not None:
+            body["preview_hidden"] = req.preview_hidden
         r = httpx.patch(_api(f"/api/content-items/{item_id}"), headers=_headers(), json=body, timeout=10)
         r.raise_for_status()
         return {"status": "ok", "item": r.json().get("doc", r.json())}
@@ -1380,6 +1383,29 @@ def restore_cms_item_version(
     if result.get("status") == "not_found":
         raise HTTPException(status_code=404, detail=result.get("message", "Not found"))
     return result
+
+
+@app.delete("/cms/items/{item_id}")
+def delete_cms_item(
+    item_id: int,
+    caller: dict = Depends(get_verified_user),
+    _org_slug: str = Depends(require_app("site")),
+):
+    import httpx
+    from .cms_tools import _api, _headers
+    tools_module.set_caller_org_slug(_org_slug)
+    item_resp = httpx.get(_api(f"/api/content-items/{item_id}"), headers=_headers(), timeout=10)
+    if item_resp.status_code == 404:
+        raise HTTPException(status_code=404, detail="Item not found")
+    item = item_resp.json()
+    if item.get("workflow_status") == "live":
+        raise HTTPException(status_code=400, detail="Cannot delete live items")
+    r = httpx.delete(_api(f"/api/content-items/{item_id}"), headers=_headers(), timeout=10)
+    if r.status_code == 404:
+        raise HTTPException(status_code=404, detail="Item not found")
+    if not r.is_success:
+        raise HTTPException(status_code=r.status_code, detail="Delete failed")
+    return {"status": "deleted", "id": item_id}
 
 
 @app.post("/cms/content-types/{content_type_id}/commit")
