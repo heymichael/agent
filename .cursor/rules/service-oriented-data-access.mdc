@@ -1,6 +1,6 @@
 ---
-description: Service-oriented data access — definition lives in the platform repo
-alwaysApply: false
+description: Service-oriented data access — APIs only, no direct database access
+alwaysApply: true
 ---
 
 # Service-Oriented Data Access
@@ -8,3 +8,7 @@ alwaysApply: false
 Frontend apps must access data through service APIs, not directly through any database or storage backend.
 
 Follow the full rule defined in `../haderach-platform/.cursor/rules/service-oriented-data-access.mdc`.
+
+## Agent-specific: Database change control
+
+For rules governing changes to the agent service's own Postgres database (schema migrations, data changes, direct SQL prohibition), see `database-change-control.mdc` in this directory. That rule is `alwaysApply: true` and covers SOC2 compliance requirements.

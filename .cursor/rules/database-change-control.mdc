@@ -1,0 +1,53 @@
+---
+description: Database change control — all schema and data changes must go through controlled processes; direct SQL is prohibited
+alwaysApply: true
+---
+
+# Database Change Control
+
+The agent service's Cloud SQL Postgres database (`haderach-ai:us-central1:haderach-main`) is a production system subject to SOC2 compliance controls. All changes must go through auditable, controlled processes.
+
+## Hard prohibition on writes — SOC2 compliance
+
+**NEVER write to the production database directly.** This includes:
+
+- `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, or any DDL (`CREATE`, `ALTER`, `DROP`)
+- Python scripts using `psycopg2`, `asyncpg`, or any database driver to modify production data
+- Shell commands that execute write operations against production
+- Data seeding, backfills, or one-off fixes via direct SQL
+
+This prohibition applies to:
+
+- The AI coding agent (Cursor, Codex, or any LLM-driven tool)
+- Human operators during normal development
+- Any process that bypasses the CI migration workflow
+
+**Read-only queries are allowed** for debugging and inspection (e.g., `SELECT` statements via `psql` or Cloud SQL Proxy). Reads do not require the same change control as writes.
+
+**Compliance justification:** Direct database writes bypass the auditable migration workflow and lack proper change control. They violate SOC2 CC8.1 (change management — changes must be tested and go through controlled processes) and CC6.1 (logical access — production credentials require proper access control). Violations create compliance findings that jeopardize audit readiness.
+
+## Correct patterns
+
+### Schema changes
+
+1. **Create a migration file** in `migrations/NNN_descriptive_name.sql`
+2. **Test locally** against Docker Postgres (`localhost:5436`)
+3. **Merge to main** — the `migrations.yml` workflow applies it to production
+4. **Verify** via the workflow logs and `schema_migrations` table
+
+### Data changes
+
+1. **Use application code** — add an API endpoint or tool that performs the change through the service layer
+2. **For bulk operations** — create a migration that performs the data change with proper guards
+3. **For CMS data** — use the Payload REST API via `cms_tools.py`, never direct SQL
+
+### Local development
+
+- Use Docker Postgres on `localhost:5436` (see `docker-compose.local.yml`)
+- Direct SQL against the local database is allowed and expected
+- Never point local development at production — `.env.example` defaults to local
+
+## Exceptions
+
+- **CI migration workflow** (`migrations.yml`) is the only authorized path for schema changes to production
+- **Emergency break-glass scenarios** for writes require explicit user approval, must be logged in the credential lifecycle log, and should be followed by a proper migration that codifies the change
