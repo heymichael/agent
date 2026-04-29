@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
-"""Seed the Postgres `branding` table with the current logo SVG.
+"""Seed the Postgres `branding` table with a logo SVG for a given org.
 
-Reads the logo from haderach-home/public/assets/landing/logo.svg, strips
-Illustrator metadata bloat (the <metadata> block is ~170 KB of embedded
-PGF data), and upserts the clean SVG into the singleton branding row.
+Reads the logo from the specified path (default: haderach-home landing logo),
+strips Illustrator metadata bloat, and upserts the clean SVG into the branding
+row for the given org.
 
 Usage:
     cd agent
     source .venv/bin/activate
-    DATABASE_URL="postgresql://..." python scripts/seed_branding.py [--dry-run]
+
+    # Seed haderach (default)
+    DATABASE_URL="postgresql://..." python scripts/seed_branding.py
+
+    # Seed arcade with a custom logo
+    DATABASE_URL="postgresql://..." python scripts/seed_branding.py --org arcade --logo /path/to/arcade-logo.svg
 """
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -22,7 +28,7 @@ load_dotenv(interpolate=False)
 
 from service.pg_client import get_pool
 
-LOGO_PATH = Path(__file__).resolve().parent.parent.parent / "haderach-home" / "public" / "assets" / "landing" / "logo.svg"
+DEFAULT_LOGO_PATH = Path(__file__).resolve().parent.parent.parent / "haderach-home" / "public" / "assets" / "landing" / "logo.svg"
 
 
 def strip_svg(raw: str) -> str:
@@ -49,7 +55,20 @@ def strip_svg(raw: str) -> str:
 
 
 def main():
-    logo_file = LOGO_PATH
+    parser = argparse.ArgumentParser(description="Seed branding for an org")
+    parser.add_argument(
+        "--org",
+        default="haderach",
+        help="Org slug to seed branding for (default: haderach)",
+    )
+    parser.add_argument(
+        "--logo",
+        type=Path,
+        help="Path to logo SVG (default: haderach-home landing logo)",
+    )
+    args = parser.parse_args()
+
+    logo_file = args.logo or DEFAULT_LOGO_PATH
     if not logo_file.exists():
         print(f"Error: logo file not found at {logo_file}")
         sys.exit(1)
@@ -62,15 +81,15 @@ def main():
     pool = get_pool()
     with pool.connection() as conn:
         conn.execute(
-            """INSERT INTO branding (id, logo_svg, show_lockup)
-               VALUES (1, %s, false)
-               ON CONFLICT (id) DO UPDATE
+            """INSERT INTO branding (org_slug, logo_svg, show_lockup)
+               VALUES (%s, %s, 'none')
+               ON CONFLICT (org_slug) DO UPDATE
                  SET logo_svg = EXCLUDED.logo_svg,
                      show_lockup = EXCLUDED.show_lockup""",
-            (svg_content,),
+            (args.org, svg_content),
         )
 
-    print("Upserted branding row with cleaned logo SVG (show_lockup=false).")
+    print(f"Upserted branding row for org={args.org} with cleaned logo SVG.")
     print("\nDone.")
 
 
