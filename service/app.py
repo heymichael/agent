@@ -474,9 +474,24 @@ def health():
     return {"status": "ok"}
 
 
+def _org_from_host(host: str | None) -> str:
+    """Map Host header to org_slug. Default to haderach."""
+    if host and host.startswith("arcade."):
+        return "arcade"
+    return "haderach"
+
+
 @app.get("/branding")
-def get_branding_config():
-    row = pg_client.get_branding()
+def get_branding_config(request: Request):
+    """Return branding for the resolved org.
+
+    Resolution order: X-Active-Org header > Host header default.
+    """
+    org_slug = request.headers.get("X-Active-Org")
+    if not org_slug:
+        org_slug = _org_from_host(request.headers.get("Host"))
+
+    row = pg_client.get_branding(org_slug)
     if not row:
         return {"logoSvg": None, "lockupSvg": None, "lockupMode": "none"}
     return row

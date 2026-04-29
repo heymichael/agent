@@ -1211,12 +1211,13 @@ def _app_row_to_dict(row: dict) -> dict:
 # Branding
 # ---------------------------------------------------------------------------
 
-def get_branding() -> dict | None:
-    """Return the singleton branding row, or None if no row exists."""
+def get_branding(org_slug: str) -> dict | None:
+    """Return the branding row for the given org, or None if no row exists."""
     pool = get_pool()
     with pool.connection() as conn:
         row = conn.execute(
-            "SELECT logo_svg, lockup_svg, show_lockup FROM branding WHERE id = 1"
+            "SELECT logo_svg, lockup_svg, show_lockup FROM branding WHERE org_slug = %s",
+            (org_slug,),
         ).fetchone()
     if not row:
         return None
