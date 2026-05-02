@@ -51,11 +51,11 @@ Feature: CMS Schema Design
   # Unsupported field types
   # ─────────────────────────────────────────────────────────────────────────
 
-  @capability_unsupported_field_handling
-  Scenario: Request for image field explains it's not supported
+  @capability_image_field_support
+  Scenario: Request for image field creates the schema correctly
     When the CMS admin says "Create a products collection with name, description, and a product image"
-    Then the reply mentions image limitation
-    And the reply does not call tool with image field
+    Then the reply confirms the schema was created
+    And the schema includes an image type field
 
   @capability_unsupported_field_handling
   Scenario: Request for relationship field explains it's not supported
