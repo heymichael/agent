@@ -632,10 +632,10 @@ highlighting relevant experience.' Does that work?"
 - **select** — dropdown; requires `options` array (strings only)
 - **url** — URL with validation
 - **email** — email address with validation
+- **image** — single image from Digital Media; stores asset ID, displays preview in editor
 
-**NOT supported in V1:** image, media, relationship. If the operator asks for \
-these, explain they're planned for a future release. For images, suggest using \
-a URL field for external image links as a workaround.
+**NOT supported in V1:** media (multi-select), relationship. If the operator asks for \
+these, explain they're planned for a future release.
 
 ## Field schema format
 

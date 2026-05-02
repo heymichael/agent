@@ -32,6 +32,10 @@ _caller_org_slug: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "caller_org_slug", default=None,
 )
 
+_caller_bearer_token: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "caller_bearer_token", default=None,
+)
+
 
 def set_caller_org_slug(slug: str | None) -> None:
     """Set the active org slug for the current request (called from `/chat`)."""
@@ -41,6 +45,20 @@ def set_caller_org_slug(slug: str | None) -> None:
 def get_caller_org_slug() -> str | None:
     """Read the active org slug for the current request, or None if unset."""
     return _caller_org_slug.get()
+
+
+def set_caller_bearer_token(token: str | None) -> None:
+    """Set the caller's raw bearer token for the current request.
+
+    Used for service-to-service calls (e.g., media API reference sync)
+    that need to pass through the user's auth.
+    """
+    _caller_bearer_token.set(token)
+
+
+def get_caller_bearer_token() -> str | None:
+    """Read the caller's bearer token for the current request, or None if unset."""
+    return _caller_bearer_token.get()
 
 
 def _require_caller_org_slug() -> str:

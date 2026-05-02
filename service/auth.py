@@ -141,6 +141,7 @@ def get_verified_user(request: Request) -> dict:
         or decoded.get(_ACTIVE_ORG_CLAIM)
     )
     decoded["active_org_slug"] = _resolve_active_org_slug(email, requested)
+    decoded["_raw_token"] = token
     return decoded
 
 

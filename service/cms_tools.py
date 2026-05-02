@@ -78,6 +78,8 @@ CMS_API_URL = os.environ.get("CMS_API_URL", "")
 _cms_key_ref = os.environ.get("CMS_API_KEY", "")
 CMS_API_KEY = open(_cms_key_ref).read().strip() if _cms_key_ref and os.path.isfile(_cms_key_ref) else _cms_key_ref
 
+MEDIA_API_URL = os.environ.get("MEDIA_API_URL", "/media/api")
+
 
 def _headers() -> dict[str, str]:
     return {
@@ -88,6 +90,10 @@ def _headers() -> dict[str, str]:
 
 def _api(path: str) -> str:
     return f"{CMS_API_URL}{path}"
+
+
+def _media_api(path: str) -> str:
+    return f"{MEDIA_API_URL}{path}"
 
 
 # ---------------------------------------------------------------------------
@@ -189,11 +195,202 @@ def _ct_not_found(ct_id: int | str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Media reference sync (task 305)
+#
+# When CMS content items are created/updated with image field values,
+# we sync references to the Digital Media service so it can track
+# asset usage for delete warnings.
+# ---------------------------------------------------------------------------
+
+
+def _extract_image_fields(schema: list[dict]) -> list[str]:
+    """Extract field names of type 'image' from a content type schema."""
+    return [f["name"] for f in schema if f.get("type") == "image"]
+
+
+def _resolve_image_fields(item_data: dict, schema: list[dict]) -> dict:
+    """Resolve image asset IDs to full objects with URLs and metadata.
+
+    For each image field in the schema, if the item has an asset_id value,
+    fetch the asset details from the Digital Media API and replace the
+    raw ID with a resolved object containing url, title, alt_text, etc.
+
+    Uses the caller's bearer token if available. On resolution failure,
+    returns an unresolved placeholder so content reads don't fail.
+    """
+    # Skip if media API URL isn't a valid absolute URL (e.g., in tests)
+    if not MEDIA_API_URL.startswith("http"):
+        return item_data
+
+    image_fields = _extract_image_fields(schema)
+    if not image_fields:
+        return item_data
+
+    bearer_token = tools_module.get_caller_bearer_token()
+    org_slug = tools_module.get_caller_org_slug()
+
+    resolved_data = dict(item_data)
+
+    for field_name in image_fields:
+        asset_id = item_data.get(field_name)
+        if not asset_id:
+            continue
+
+        if not bearer_token or not org_slug:
+            resolved_data[field_name] = {
+                "asset_id": asset_id,
+                "resolved": False,
+                "error": "no_auth_context",
+            }
+            continue
+
+        headers = {
+            "Authorization": f"Bearer {bearer_token}",
+            "X-Active-Org": org_slug,
+        }
+
+        try:
+            asset_resp = httpx.get(
+                _media_api(f"/assets/{asset_id}"),
+                headers=headers,
+                timeout=10,
+            )
+            url_resp = httpx.get(
+                _media_api(f"/assets/{asset_id}/url"),
+                headers=headers,
+                timeout=10,
+            )
+
+            if asset_resp.status_code == 200 and url_resp.status_code == 200:
+                asset = asset_resp.json()
+                url_data = url_resp.json()
+                resolved_data[field_name] = {
+                    "asset_id": asset_id,
+                    "resolved": True,
+                    "url": url_data.get("url"),
+                    "title": asset.get("title"),
+                    "alt_text": asset.get("alt_text"),
+                    "width": asset.get("width"),
+                    "height": asset.get("height"),
+                    "approved_public": asset.get("approved_public", False),
+                }
+            else:
+                resolved_data[field_name] = {
+                    "asset_id": asset_id,
+                    "resolved": False,
+                    "error": "media_unavailable",
+                }
+        except Exception as e:
+            logger.warning("Failed to resolve image field %s: %s", field_name, e)
+            resolved_data[field_name] = {
+                "asset_id": asset_id,
+                "resolved": False,
+                "error": "resolution_failed",
+            }
+
+    return resolved_data
+
+
+def _sync_media_references(
+    content_type_slug: str,
+    content_type_name: str,
+    item_id: int,
+    item_title: str | None,
+    schema: list[dict],
+    current_data: dict,
+    previous_data: dict | None = None,
+) -> None:
+    """Sync image field references to the Digital Media service.
+
+    Creates references for new image values, removes references for
+    cleared/changed image values. Best-effort: failures are logged
+    but don't block the CMS operation.
+    """
+    # Skip if media API URL isn't a valid absolute URL (e.g., in tests)
+    if not MEDIA_API_URL.startswith("http"):
+        return
+
+    image_fields = _extract_image_fields(schema)
+    if not image_fields:
+        return
+
+    bearer_token = tools_module.get_caller_bearer_token()
+    org_slug = tools_module.get_caller_org_slug()
+    if not bearer_token or not org_slug:
+        logger.warning("Cannot sync media refs: missing bearer token or org slug")
+        return
+
+    def media_headers() -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {bearer_token}",
+            "Content-Type": "application/json",
+            "X-Active-Org": org_slug,
+        }
+
+    consumer_id = f"{content_type_slug}/{item_id}"
+    display_name = f"{content_type_name} / {item_title or item_id}"
+
+    for field_name in image_fields:
+        current_value = current_data.get(field_name)
+        previous_value = (previous_data or {}).get(field_name)
+
+        if current_value == previous_value:
+            continue
+
+        if previous_value and previous_value != current_value:
+            try:
+                refs_resp = httpx.get(
+                    _media_api(f"/assets/{previous_value}/references"),
+                    headers=media_headers(),
+                    timeout=10,
+                )
+                if refs_resp.status_code == 200:
+                    refs = refs_resp.json()
+                    for ref in refs:
+                        if (
+                            ref.get("consumer_type") == "cms_content_item"
+                            and ref.get("consumer_id") == consumer_id
+                            and ref.get("consumer_field") == field_name
+                        ):
+                            httpx.delete(
+                                _media_api(f"/assets/{previous_value}/references/{ref['id']}"),
+                                headers=media_headers(),
+                                timeout=10,
+                            )
+                            break
+            except Exception as e:
+                logger.warning(
+                    "Failed to remove media ref for asset %s: %s",
+                    previous_value,
+                    e,
+                )
+
+        if current_value:
+            try:
+                httpx.post(
+                    _media_api(f"/assets/{current_value}/references"),
+                    headers=media_headers(),
+                    json={
+                        "consumer_type": "cms_content_item",
+                        "consumer_id": consumer_id,
+                        "consumer_field": f"{display_name} / {field_name}",
+                    },
+                    timeout=10,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to create media ref for asset %s: %s",
+                    current_value,
+                    e,
+                )
+
+
+# ---------------------------------------------------------------------------
 # Schema field validation (task 290)
 # ---------------------------------------------------------------------------
 
-V1_FIELD_TYPES = {"text", "richtext", "number", "date", "boolean", "select", "url", "email"}
-FUTURE_FIELD_TYPES = {"image", "media", "relationship"}
+V1_FIELD_TYPES = {"text", "richtext", "number", "date", "boolean", "select", "url", "email", "image"}
+FUTURE_FIELD_TYPES = {"media", "relationship"}
 _DEFAULT_GUIDELINES = "Provide content following the established voice and style."
 
 
@@ -361,12 +558,19 @@ def handle_cms_get_item(args: dict, **_kw) -> str:
 
     ct = item.get("contentType")
     guidelines = {}
+    schema = []
     if isinstance(ct, dict) and ct.get("schema"):
         schema = ct["schema"]
         fields = schema.get("fields", schema) if isinstance(schema, dict) else schema
+        schema = fields
         for field_def in fields:
             if field_def.get("guidelines"):
                 guidelines[field_def["name"]] = field_def["guidelines"]
+
+    item_data = item.get("data", {})
+    if schema and item_data:
+        resolved_data = _resolve_image_fields(item_data, schema)
+        item = {**item, "data": resolved_data}
 
     return json.dumps({"status": "ok", "item": item, "field_guidelines": guidelines})
 
@@ -386,7 +590,28 @@ def handle_cms_create_item(args: dict, **_kw) -> str:
         body["slug"] = args["slug"]
     r = httpx.post(_api("/api/content-items"), headers=_headers(), json=body, timeout=10)
     r.raise_for_status()
-    return json.dumps({"status": "ok", "item": r.json()["doc"]})
+    created_item = r.json()["doc"]
+
+    # Best-effort media reference sync (don't fail the create if this errors)
+    try:
+        ct = _fetch_content_type(args["contentTypeId"])
+        if ct:
+            schema = ct.get("schema", [])
+            if isinstance(schema, dict):
+                schema = schema.get("fields", [])
+            _sync_media_references(
+                content_type_slug=ct.get("slug", "unknown"),
+                content_type_name=ct.get("name", "Content"),
+                item_id=created_item["id"],
+                item_title=args["data"].get("title"),
+                schema=schema,
+                current_data=args["data"],
+                previous_data=None,
+            )
+    except Exception as e:
+        logger.warning("Failed to sync media references on create: %s", e)
+
+    return json.dumps({"status": "ok", "item": created_item})
 
 
 def handle_cms_update_item(args: dict, **_kw) -> str:
@@ -400,19 +625,42 @@ def handle_cms_update_item(args: dict, **_kw) -> str:
     if locked_by and locked_by != caller:
         return json.dumps({"status": "locked", "message": f"Item is locked by {locked_by}."})
 
+    previous_data = existing.get("data") or {}
+
     body: dict = {"_status": "published"}
     if "data" in args:
         body["data"] = args["data"]
     else:
         content_fields = {k: v for k, v in args.items() if k not in ("itemId", "slug")}
         if content_fields:
-            existing_data = existing.get("data") or {}
-            body["data"] = {**existing_data, **content_fields}
+            body["data"] = {**previous_data, **content_fields}
     if "slug" in args:
         body["slug"] = args["slug"]
     r = httpx.patch(_api(f"/api/content-items/{item_id}"), headers=_headers(), json=body, timeout=10)
     r.raise_for_status()
-    return json.dumps({"status": "ok", "item": r.json()["doc"]})
+    updated_item = r.json()["doc"]
+
+    # Best-effort media reference sync (don't fail the update if this errors)
+    try:
+        ct = existing.get("contentType")
+        if isinstance(ct, dict):
+            schema = ct.get("schema", [])
+            if isinstance(schema, dict):
+                schema = schema.get("fields", [])
+            new_data = body.get("data", {})
+            _sync_media_references(
+                content_type_slug=ct.get("slug", "unknown"),
+                content_type_name=ct.get("name", "Content"),
+                item_id=item_id,
+                item_title=new_data.get("title") or previous_data.get("title"),
+                schema=schema,
+                current_data=new_data,
+                previous_data=previous_data,
+            )
+    except Exception as e:
+        logger.warning("Failed to sync media references on update: %s", e)
+
+    return json.dumps({"status": "ok", "item": updated_item})
 
 
 def handle_cms_submit_for_approval(args: dict, **_kw) -> str:
@@ -535,10 +783,45 @@ def handle_cms_add_to_schedule(args: dict, **_kw) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _slugify(name: str) -> str:
+    """Convert name to kebab-case slug (matches Payload's default behavior)."""
+    import re
+    slug = name.lower().strip()
+    slug = re.sub(r"[^a-z0-9]+", "-", slug)
+    slug = slug.strip("-")
+    return slug
+
+
 def handle_cms_create_content_type(args: dict, **_kw) -> str:
     mismatch = _validate_org_id_arg(args)
     if mismatch:
         return mismatch
+
+    # Check for existing content type with same name/slug to prevent duplicates
+    name = args["name"]
+    slug = args.get("slug") or _slugify(name)
+    org_id = _caller_payload_org_id()
+
+    try:
+        existing_r = httpx.get(
+            _api("/api/content-types"),
+            headers=_headers(),
+            params={"where[org][equals]": org_id, "where[slug][equals]": slug, "limit": 1, "depth": 0},
+            timeout=10,
+        )
+        if existing_r.status_code == 200:
+            docs = existing_r.json().get("docs", [])
+            if docs:
+                existing = docs[0]
+                return json.dumps({
+                    "status": "error",
+                    "message": f"A content type with slug '{slug}' already exists.",
+                    "existingContentTypeId": existing["id"],
+                    "existingName": existing.get("name"),
+                    "hint": "Use cms_update_content_type_schema to modify the existing content type instead of creating a new one.",
+                })
+    except Exception:
+        pass  # Skip duplicate check if CMS API is unavailable (e.g., in tests)
 
     schema = args.get("schema", [])
 

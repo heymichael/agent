@@ -92,12 +92,10 @@ class TestFieldValidation:
         assert err is not None
         assert "missing a 'type'" in err
 
-    def test_unsupported_image_type(self):
-        """Image type returns a helpful 'planned for future' message."""
+    def test_supported_image_type(self):
+        """Image type is valid in V1."""
         err = _validate_field({"name": "Photo", "type": "image"})
-        assert err is not None
-        assert "not supported in V1" in err
-        assert "planned for a future release" in err
+        assert err is None
 
     def test_unsupported_media_type(self):
         """Media type returns a helpful 'planned for future' message."""
@@ -153,7 +151,7 @@ class TestSchemaValidation:
         """All field errors are returned, not just the first one."""
         schema = [
             {"type": "text"},  # missing name
-            {"name": "Photo", "type": "image"},  # unsupported
+            {"name": "Video", "type": "media"},  # unsupported (media is future)
             {"name": "Status", "type": "select"},  # missing options
         ]
         errors = _validate_schema(schema)
@@ -286,7 +284,7 @@ class TestCreateContentTypeHandler:
             result = json.loads(handle_cms_create_content_type({
                 "name": "Test",
                 "schema": [
-                    {"label": "Photo", "type": "image"},  # unsupported type
+                    {"label": "Video", "type": "media"},  # unsupported type
                     {"label": "Author", "type": "relationship"},  # unsupported type
                 ],
             }))
@@ -337,7 +335,7 @@ class TestUpdateContentTypeHandler:
             with patch("service.cms_tools.httpx.patch") as mock_patch:
                 result = json.loads(handle_cms_update_content_type_schema({
                     "contentTypeId": 50,
-                    "schema": [{"name": "Photo", "type": "image"}],
+                    "schema": [{"name": "Video", "type": "media"}],  # media is unsupported
                 }))
                 assert result["status"] == "error"
                 mock_patch.assert_not_called()

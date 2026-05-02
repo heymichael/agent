@@ -269,32 +269,11 @@ def assert_reply_mentions_relationship_limitation(context):
     )
 
 
-@then("the reply mentions image limitation")
-def assert_reply_mentions_image_limitation(context):
-    """Assert the reply explains image/media fields aren't available."""
-    reply = context["result"]["reply"].lower()
-    # Check for various ways the agent might explain the limitation
-    limitation_phrases = [
-        "image",
-        "media",
-        "can't",
-        "cannot",
-        "not support",
-        "not yet",
-        "not available",
-        "workaround",
-        "url field",
-    ]
-    found = any(phrase in reply for phrase in limitation_phrases)
-    assert found, (
-        f"Expected explanation about image limitation in reply, got: {reply[:500]}"
-    )
-
-
-@then("the reply does not call tool with image field")
-def assert_no_image_field_in_tool_call(context):
-    """Assert that if a tool was called, it didn't include an image field type."""
+@then("the schema includes an image type field")
+def assert_schema_includes_image_field(context):
+    """Assert that the schema created includes an image field type."""
     tool_messages = context["result"].get("tool_messages", [])
+    found_image_field = False
     for msg in tool_messages:
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             for tc in msg["tool_calls"]:
@@ -303,11 +282,12 @@ def assert_no_image_field_in_tool_call(context):
                     parsed = json.loads(args)
                     schema = parsed.get("schema", [])
                     for field in schema:
-                        assert field.get("type") != "image", (
-                            f"Tool was called with image field type: {field}"
-                        )
+                        if field.get("type") == "image":
+                            found_image_field = True
+                            break
                 except json.JSONDecodeError:
                     pass
+    assert found_image_field, "Expected schema to include an image type field"
 
 
 @then("the schema uses snake_case names")

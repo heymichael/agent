@@ -1186,6 +1186,7 @@ def chat(req: ChatRequest, caller: dict = Depends(get_verified_user)):
     # SQL queries to this tenant. Sub-agents run inside the same Python
     # task and inherit the contextvar automatically.
     tools_module.set_caller_org_slug(caller.get("active_org_slug"))
+    tools_module.set_caller_bearer_token(caller.get("_raw_token"))
 
     today = date.today().isoformat()
 
@@ -1286,6 +1287,7 @@ def create_cms_item(
     # Phase 5 task 254: pin caller's active org slug into the tools contextvar so
     # the CMS handler can resolve the Payload org id without orgId being passed.
     tools_module.set_caller_org_slug(_org_slug)
+    tools_module.set_caller_bearer_token(caller.get("_raw_token"))
     result = json.loads(handle_cms_create_item({
         "contentTypeId": req.contentTypeId,
         "data": req.data,
@@ -1303,6 +1305,7 @@ def patch_cms_item(
     from .cms_tools import handle_cms_update_item, _api, _headers, _fetch_item
     import httpx
     tools_module.set_caller_org_slug(_org_slug)
+    tools_module.set_caller_bearer_token(caller.get("_raw_token"))
     caller_email = caller.get("email", "")
 
     if req.workflow_status is not None or req.workflow_comment is not None or req.preview_hidden is not None:
